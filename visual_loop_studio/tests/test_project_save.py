@@ -19,6 +19,10 @@ class ProjectModelTests(unittest.TestCase):
         original.background_folder = "C:/backgrounds"
         original.batch_recursive = True
         original.ai_engine = "LOCAL"
+        original.ai_source_mode = "MULTI"
+        original.ai_source_folder = "C:/ai-images"
+        original.ai_source_images = ["C:/one.png", "C:/two.jpg"]
+        original.ai_source_recursive = True
         original.local_resolution = "1280x704"
         original.local_frames = 81
         original.local_steps = 20

@@ -114,6 +114,10 @@ class VisualProject:
     ai_resolution: str = "720p"
     ai_aspect_ratio: str = "16:9"
     ai_engine: str = "LOCAL"
+    ai_source_mode: str = "SINGLE"
+    ai_source_folder: str = ""
+    ai_source_images: list[str] = field(default_factory=list)
+    ai_source_recursive: bool = False
     local_resolution: str = "1280x704"
     local_frames: int = 81
     local_steps: int = 20
@@ -139,6 +143,10 @@ class VisualProject:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "VisualProject":
         data = dict(value or {})
+        if "ai_source_mode" not in data and data.get("background_folder"):
+            data["ai_source_mode"] = "FOLDER"
+            data["ai_source_folder"] = data.get("background_folder", "")
+            data["ai_source_recursive"] = bool(data.get("batch_recursive", False))
         data["effects"] = [EffectItem(**item) for item in data.get("effects", [])]
         text_defaults = default_text_styles()
         loaded_styles: dict[str, TextStyle] = {}

@@ -185,6 +185,8 @@ class MainWindow(QMainWindow):
             or self.batch.running
             or self.visual.ai_worker.running
             or self.visual.local_ai_worker.running
+            or self.visual.local_ai_worker.checking
+            or self.visual.local_setup_worker.running
         ):
             answer = QMessageBox.question(self, "Render đang chạy", "Cancel render và thoát ứng dụng?")
             if answer != QMessageBox.StandardButton.Yes:
@@ -195,6 +197,8 @@ class MainWindow(QMainWindow):
             self.batch.cancel_all()
             self.visual.ai_worker.cancel()
             self.visual.local_ai_worker.cancel()
+            self.visual.local_setup_worker.cancel()
+        self.visual.local_runtime.stop()
         self._save_settings()
         event.accept()
 

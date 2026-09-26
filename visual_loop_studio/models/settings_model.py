@@ -15,6 +15,8 @@ class AppSettings:
     fps: int = 30
     comfyui_url: str = "http://127.0.0.1:8188"
     comfyui_workflow: str = ""
+    local_ai_root: str = ""
+    local_ai_auto_start: bool = True
     gemini_api_key: str = ""
 
     def to_dict(self) -> dict[str, Any]:

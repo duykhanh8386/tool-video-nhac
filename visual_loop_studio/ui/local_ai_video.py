@@ -5,6 +5,7 @@ import threading
 from PySide6.QtCore import QObject, Signal
 
 from ai.comfyui import LocalGenerationCancelled, check_comfyui, generate_local_image_to_video
+from ai.local_runtime import LocalRuntimeManager, RuntimeInstallCancelled
 
 
 class LocalAiVideoWorker(QObject):
@@ -14,8 +15,9 @@ class LocalAiVideoWorker(QObject):
     canceled = Signal()
     checked = Signal(bool, str)
 
-    def __init__(self, parent: QObject | None = None):
+    def __init__(self, runtime_manager: LocalRuntimeManager, parent: QObject | None = None):
         super().__init__(parent)
+        self.runtime_manager = runtime_manager
         self.running = False
         self.checking = False
         self._cancel = threading.Event()
@@ -27,29 +29,37 @@ class LocalAiVideoWorker(QObject):
         self._cancel.clear()
         threading.Thread(target=self._run, args=(kwargs,), daemon=True).start()
 
-    def check(self, comfyui_url: str, workflow_path: str = "") -> None:
+    def check(self, comfyui_url: str, workflow_path: str = "", runtime_root: str = "") -> None:
         if self.checking or self.running:
             raise RuntimeError("ComfyUI đang được kiểm tra hoặc đang tạo video.")
         self.checking = True
+        self._cancel.clear()
         threading.Thread(
             target=self._check,
-            args=(comfyui_url, workflow_path),
+            args=(comfyui_url, workflow_path, runtime_root),
             daemon=True,
         ).start()
 
     def cancel(self) -> None:
-        if self.running:
+        if self.running or self.checking:
             self._cancel.set()
             self.progress.emit(0, "Đang yêu cầu ComfyUI hủy tác vụ…")
 
     def _run(self, kwargs: dict) -> None:
         try:
+            runtime_root = str(kwargs.pop("runtime_root", "") or "")
+            self.runtime_manager.ensure_running(
+                runtime_root,
+                str(kwargs.get("comfyui_url") or ""),
+                progress=lambda value, message: self.progress.emit(value, message),
+                cancelled=self._cancel.is_set,
+            )
             output = generate_local_image_to_video(
                 **kwargs,
                 progress=lambda value, message: self.progress.emit(value, message),
                 cancelled=self._cancel.is_set,
             )
-        except LocalGenerationCancelled:
+        except (LocalGenerationCancelled, RuntimeInstallCancelled):
             self.running = False
             self.canceled.emit()
         except Exception as exc:
@@ -59,8 +69,15 @@ class LocalAiVideoWorker(QObject):
             self.running = False
             self.finished.emit(str(output))
 
-    def _check(self, comfyui_url: str, workflow_path: str) -> None:
+    def _check(self, comfyui_url: str, workflow_path: str, runtime_root: str) -> None:
         try:
+            if runtime_root:
+                self.runtime_manager.ensure_running(
+                    runtime_root,
+                    comfyui_url,
+                    progress=lambda value, message: self.progress.emit(value, message),
+                    cancelled=self._cancel.is_set,
+                )
             stats = check_comfyui(comfyui_url, require_default_models=not bool(workflow_path))
             devices = stats.get("devices") or []
             device = devices[0] if devices else {}
