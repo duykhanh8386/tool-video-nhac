@@ -195,7 +195,7 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
             y_expression = f"{y}+{max(2, round(height * .0075))}*sin(2*PI*t/5)"
         next_label = f"layer{serial}"
         kind = _kind(element_id)
-        if layout.blend_mode == "lighten" and kind in {"artwork", "logo", "platform_icons", "waveform"}:
+        if layout.blend_mode in {"lighten", "screen", "addition"} and kind in {"artwork", "logo", "platform_icons", "waveform"}:
             dark_label = f"dark{serial}"
             positioned_label = f"positioned{serial}"
             filters.append(f"color=c=black:s={width}x{height}:r={project.fps}:d=60,format=rgba[{dark_label}]")
@@ -203,10 +203,41 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
                 f"[{dark_label}][{source_label}]overlay=x='{x}':y='{y_expression}':"
                 f"eval=frame:format=auto[{positioned_label}]"
             )
-            filters.append(f"[{current}][{positioned_label}]blend=all_mode=lighten:shortest=1[{next_label}]")
+            filters.append(
+                f"[{current}][{positioned_label}]blend=all_mode={layout.blend_mode}:shortest=1[{next_label}]"
+            )
         else:
             filters.append(f"[{current}][{source_label}]overlay=x='{x}':y='{y_expression}':eval=frame:format=auto[{next_label}]")
         current = next_label
+
+    if project.effect_overlay:
+        overlay_still = is_still_image(project.effect_overlay)
+        if overlay_still:
+            inputs += ["-loop", "1", "-framerate", str(project.fps), "-i", project.effect_overlay]
+        else:
+            inputs += ["-stream_loop", "-1", "-i", project.effect_overlay]
+        opacity = min(1.0, max(0.0, project.effect_overlay_opacity / 100))
+        blend = str(project.effect_overlay_blend or "lighten").lower()
+        overlay_label = "effectoverlay"
+        base_chain = (
+            f"[{input_index}:v]setpts=PTS-STARTPTS,fps={project.fps},"
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},format=rgba"
+        )
+        if blend == "normal":
+            filters.append(f"{base_chain},colorchannelmixer=aa={opacity:.4f}[{overlay_label}]")
+            filters.append(
+                f"[{current}][{overlay_label}]overlay=x=0:y=0:eval=frame:format=auto:shortest=1[effectlayer]"
+            )
+        else:
+            blend = blend if blend in {"lighten", "screen", "addition"} else "lighten"
+            filters.append(f"{base_chain}[{overlay_label}]")
+            filters.append(
+                f"[{current}][{overlay_label}]blend=all_mode={blend}:all_opacity={opacity:.4f}:"
+                "shortest=1[effectlayer]"
+            )
+        current = "effectlayer"
+        input_index += 1
 
     post = ffmpeg_effect_filters(project.effects) + ffmpeg_color_filters(project.color_filter) + ffmpeg_manual_filters(project.manual_color) + lut_filter(project.lut)
     post += ["format=yuv420p"]

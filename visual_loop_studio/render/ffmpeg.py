@@ -32,7 +32,7 @@ def _video_encoding(encoder: str) -> list[str]:
 
 def build_visual_job(project: VisualProject, settings: AppSettings) -> RenderJob:
     project.background = existing_file(project.background, "background")
-    for attr, label in (("font_file", "font"), ("artwork", "artwork"), ("logo", "logo"), ("platform_icons", "platform icons"), ("audio", "audio"), ("waveform_media", "file sóng"), ("lut", "LUT")):
+    for attr, label in (("font_file", "font"), ("artwork", "artwork"), ("logo", "logo"), ("platform_icons", "platform icons"), ("audio", "audio"), ("waveform_media", "file sóng"), ("effect_overlay", "overlay toàn cảnh"), ("lut", "LUT")):
         value = getattr(project, attr)
         if value:
             setattr(project, attr, existing_file(value, label))

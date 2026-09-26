@@ -31,6 +31,33 @@ class CompositorTests(unittest.TestCase):
         self.assertIn("blend=all_mode=lighten", graph.filter_complex)
         self.assertIn("color=c=black:s=1920x1080", graph.filter_complex)
 
+    def test_moving_full_frame_overlay_loops_and_uses_screen_blend(self):
+        project = VisualProject(
+            background="background.png",
+            effect_overlay="particles.mov",
+            effect_overlay_blend="screen",
+            effect_overlay_opacity=65,
+        )
+        graph = build_visual_graph(project, 1920, 1080)
+        self.assertIn("particles.mov", graph.inputs)
+        overlay_index = graph.inputs.index("particles.mov")
+        self.assertEqual(graph.inputs[overlay_index - 3:overlay_index], ["-stream_loop", "-1", "-i"])
+        self.assertIn("setpts=PTS-STARTPTS,fps=30", graph.filter_complex)
+        self.assertIn("blend=all_mode=screen:all_opacity=0.6500", graph.filter_complex)
+        self.assertIn("crop=1920:1080", graph.filter_complex)
+
+    def test_alpha_overlay_uses_normal_composition(self):
+        project = VisualProject(
+            background="background.png",
+            effect_overlay="frame.png",
+            effect_overlay_blend="normal",
+            effect_overlay_opacity=80,
+        )
+        graph = build_visual_graph(project, 1920, 1080)
+        self.assertIn("-loop", graph.inputs)
+        self.assertIn("colorchannelmixer=aa=0.8000", graph.filter_complex)
+        self.assertIn("overlay=x=0:y=0", graph.filter_complex)
+
 
 if __name__ == "__main__":
     unittest.main()

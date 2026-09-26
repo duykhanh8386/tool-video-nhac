@@ -5,8 +5,12 @@ import subprocess
 from dataclasses import asdict
 from pathlib import Path
 
+import cv2
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QWheelEvent
+from PySide6.QtGui import (
+    QBrush, QColor, QCloseEvent, QFont, QImage, QMouseEvent, QPainter,
+    QPainterPath, QPen, QPixmap, QRadialGradient, QWheelEvent,
+)
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from models.visual_project import ElementLayout, TextStyle, default_element_layouts, default_text_styles
@@ -42,7 +46,10 @@ class CompositionPreview(QWidget):
         self.text_styles: dict[str, TextStyle] = default_text_styles()
         self.waveform = "Smooth sine waveform"
         self.waveform_media = ""
-        self.effects: list[str] = []
+        self.effect_overlay = ""
+        self.effect_overlay_blend = "lighten"
+        self.effect_overlay_opacity = 1.0
+        self.effects: list[object] = []
         self.color_filter = "NONE"
         self.manual_color: dict[str, float] = {}
         self.elements: dict[str, ElementLayout] = default_element_layouts()
@@ -56,6 +63,7 @@ class CompositionPreview(QWidget):
         self._time = 0.0
         self._playing = True
         self._images: dict[str, QPixmap] = {}
+        self._video_readers: dict[str, _VideoPreviewReader] = {}
         self._hit_rects: dict[str, QRectF] = {}
         self._canvas = QRectF()
         self._action = ""
@@ -69,9 +77,21 @@ class CompositionPreview(QWidget):
         self.timer.start()
 
     def set_source(self, kind: str, path: str) -> None:
+        previous = str(getattr(self, kind, "") or "")
         setattr(self, kind, path)
+        if previous and previous != path:
+            self._release_video_if_unused(previous)
         if path and Path(path).is_file():
-            pixmap = QPixmap(path) if is_still_image(path) else _video_thumbnail(path, self.ffmpeg_path)
+            if is_still_image(path):
+                pixmap = QPixmap(path)
+            else:
+                reader = self._video_readers.get(path)
+                if reader is None:
+                    reader = _VideoPreviewReader(path)
+                    self._video_readers[path] = reader
+                pixmap = reader.frame_at(self._time)
+                if pixmap is None or pixmap.isNull():
+                    pixmap = _video_thumbnail(path, self.ffmpeg_path)
             if not pixmap.isNull():
                 self._images[path] = pixmap
         self.update()
@@ -139,16 +159,51 @@ class CompositionPreview(QWidget):
     def stop(self) -> None:
         self._playing = False
         self._time = 0
+        self._refresh_video_frames()
         self.update()
 
     def restart(self) -> None:
         self._time = 0
+        self._refresh_video_frames()
         self.play()
 
     def _tick(self) -> None:
         if self._playing:
-            self._time = (self._time + .033) % 10
+            self._time = (self._time + .033) % 3600
+            if self.isVisible():
+                self._refresh_video_frames()
             self.update()
+
+    def _refresh_video_frames(self) -> None:
+        active = {
+            str(getattr(self, name, "") or "")
+            for name in ("background", "artwork", "logo", "platform_icons", "waveform_media", "effect_overlay")
+        }
+        for path in active:
+            reader = self._video_readers.get(path)
+            if not reader:
+                continue
+            pixmap = reader.frame_at(self._time)
+            if pixmap is not None and not pixmap.isNull():
+                self._images[path] = pixmap
+
+    def _release_video_if_unused(self, path: str) -> None:
+        active = {
+            str(getattr(self, name, "") or "")
+            for name in ("background", "artwork", "logo", "platform_icons", "waveform_media", "effect_overlay")
+        }
+        if path in active:
+            return
+        reader = self._video_readers.pop(path, None)
+        if reader:
+            reader.close()
+        self._images.pop(path, None)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        for reader in self._video_readers.values():
+            reader.close()
+        self._video_readers.clear()
+        super().closeEvent(event)
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
@@ -158,13 +213,14 @@ class CompositionPreview(QWidget):
         self._canvas = canvas
         painter.fillRect(rect, QColor("#090d18"))
         painter.setClipRect(canvas)
-        phase = self._time / 10
+        phase = (self._time % 10) / 10
         self._paint_background(painter, canvas, phase)
         self._paint_filter(painter, canvas)
         self._hit_rects.clear()
         for element_id, layout in sorted(self.elements.items(), key=lambda item: item[1].z_order):
             if layout.visible and layout.opacity > 0:
                 self._paint_element(painter, canvas, element_id, layout)
+        self._paint_effect_overlay(painter, canvas)
         self._paint_effects(painter, canvas, phase)
         painter.setClipping(False)
         if self.show_guides:
@@ -185,6 +241,28 @@ class CompositionPreview(QWidget):
             painter.setPen(QColor("#64748b"))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Hãy chọn ảnh hoặc video nền")
 
+    def _paint_effect_overlay(self, painter: QPainter, rect: QRectF) -> None:
+        pixmap = self._images.get(self.effect_overlay)
+        if pixmap is None or pixmap.isNull() or self.effect_overlay_opacity <= 0:
+            return
+        scaled = pixmap.scaled(
+            round(rect.width()),
+            round(rect.height()),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        source = QRectF(
+            max(0, (scaled.width() - rect.width()) / 2),
+            max(0, (scaled.height() - rect.height()) / 2),
+            min(scaled.width(), rect.width()),
+            min(scaled.height(), rect.height()),
+        )
+        painter.save()
+        painter.setOpacity(max(0.0, min(1.0, float(self.effect_overlay_opacity))))
+        _set_painter_blend(painter, self.effect_overlay_blend)
+        painter.drawPixmap(rect, scaled, source)
+        painter.restore()
+
     def _paint_element(self, painter: QPainter, canvas: QRectF, element_id: str, layout: ElementLayout) -> None:
         x, y, width, height = to_top_left_rect(layout)
         item_rect = QRectF(canvas.left() + x * canvas.width(), canvas.top() + y * canvas.height(), width * canvas.width(), height * canvas.height())
@@ -197,8 +275,8 @@ class CompositionPreview(QWidget):
         painter.rotate(layout.rotation)
         local = QRectF(-item_rect.width() / 2, -item_rect.height() / 2, item_rect.width(), item_rect.height())
         kind = element_id.split("_copy_", 1)[0]
-        if layout.blend_mode == "lighten" and kind in {"artwork", "logo", "platform_icons", "waveform"}:
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Lighten)
+        if kind in {"artwork", "logo", "platform_icons", "waveform"}:
+            _set_painter_blend(painter, layout.blend_mode)
         if kind in {"artwork", "logo", "platform_icons"}:
             path = getattr(self, kind, "")
             pixmap = self._images.get(path)
@@ -268,29 +346,79 @@ class CompositionPreview(QWidget):
             painter.fillRect(rect, QColor(255, 95, 35, min(55, round(temperature * .45))) if temperature > 0 else QColor(40, 110, 255, min(55, round(-temperature * .45))))
 
     def _paint_effects(self, painter: QPainter, rect: QRectF, phase: float) -> None:
-        upper = {item.upper() for item in self.effects}
+        amounts: dict[str, float] = {}
+        for item in self.effects:
+            name = str(getattr(item, "name", item)).upper()
+            amount = max(0.0, min(1.0, float(getattr(item, "intensity", .35))))
+            amounts[name] = max(amounts.get(name, 0.0), amount)
+        upper = set(amounts)
+        painter.save()
         if upper & {"SNOW", "SPARKLES", "DUST", "STAR_FIELD", "FLOATING_LIGHTS"}:
+            amount = max(amounts.get(name, 0) for name in upper & {"SNOW", "SPARKLES", "DUST", "STAR_FIELD", "FLOATING_LIGHTS"})
             painter.setPen(Qt.PenStyle.NoPen)
-            for x, y, size in particle_positions(80, int(rect.width()), int(rect.height()), phase):
-                painter.setBrush(QColor(255, 255, 255, 120 if "SNOW" in upper else 80))
-                painter.drawEllipse(QRectF(rect.left() + x, rect.top() + y, size, size))
+            count = round(35 + amount * 130)
+            for x, y, size in particle_positions(count, int(rect.width()), int(rect.height()), phase):
+                alpha = round((70 if "SNOW" in upper else 45) + amount * 120)
+                color = QColor(255, 245, 190, alpha) if "FLOATING_LIGHTS" in upper else QColor(255, 255, 255, alpha)
+                painter.setBrush(color)
+                radius = size * (1 + amount * 1.5)
+                painter.drawEllipse(QRectF(rect.left() + x, rect.top() + y, radius, radius))
         if "RAIN" in upper:
-            painter.setPen(QPen(QColor(190, 220, 255, 85), 1))
-            for x, y, _ in particle_positions(95, int(rect.width()), int(rect.height()), phase * 3):
-                painter.drawLine(round(rect.left() + x), round(rect.top() + y), round(rect.left() + x - 4), round(rect.top() + y + 14))
+            amount = amounts["RAIN"]
+            painter.setPen(QPen(QColor(190, 220, 255, round(55 + amount * 150)), max(1, round(1 + amount * 2))))
+            for x, y, _ in particle_positions(round(50 + amount * 160), int(rect.width()), int(rect.height()), phase * 3):
+                length = round(9 + amount * 24)
+                painter.drawLine(round(rect.left() + x), round(rect.top() + y), round(rect.left() + x - length * .3), round(rect.top() + y + length))
         if upper & {"FILM_GRAIN", "TV_STATIC", "VHS_NOISE", "PIXEL_NOISE"}:
-            painter.setPen(QColor(255, 255, 255, 22))
-            for x, y, _ in particle_positions(180, int(rect.width()), int(rect.height()), (phase * 31) % 1):
+            amount = max(amounts.get(name, 0) for name in upper & {"FILM_GRAIN", "TV_STATIC", "VHS_NOISE", "PIXEL_NOISE"})
+            painter.setPen(QColor(255, 255, 255, round(12 + amount * 70)))
+            for x, y, _ in particle_positions(round(100 + amount * 500), int(rect.width()), int(rect.height()), (phase * 31) % 1):
                 painter.drawPoint(round(rect.left() + x), round(rect.top() + y))
         if "SCANLINES" in upper:
-            painter.setPen(QColor(0, 0, 0, 40))
+            amount = amounts["SCANLINES"]
+            painter.setPen(QColor(0, 0, 0, round(20 + amount * 95)))
             y = int(rect.top())
             while y < rect.bottom():
                 painter.drawLine(int(rect.left()), y, int(rect.right()), y)
                 y += 4
+        if upper & {"LIGHT_LEAK", "BLOOM", "SOFT_GLOW"}:
+            amount = max(amounts.get(name, 0) for name in upper & {"LIGHT_LEAK", "BLOOM", "SOFT_GLOW"})
+            center = QPointF(rect.left() + rect.width() * (.15 + .7 * phase), rect.top() + rect.height() * .28)
+            gradient = QRadialGradient(center, rect.width() * (.35 + amount * .35))
+            gradient.setColorAt(0, QColor(255, 225, 155, round(70 + amount * 100)))
+            gradient.setColorAt(.45, QColor(255, 95, 45, round(30 + amount * 65)))
+            gradient.setColorAt(1, QColor(255, 60, 20, 0))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
+            painter.fillRect(rect, QBrush(gradient))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        if upper & {"BOKEH", "FOG"}:
+            amount = max(amounts.get(name, 0) for name in upper & {"BOKEH", "FOG"})
+            painter.setPen(Qt.PenStyle.NoPen)
+            for x, y, size in particle_positions(round(16 + amount * 42), int(rect.width()), int(rect.height()), (phase * .35) % 1):
+                radius = (8 + size * 7) * (1 + amount)
+                alpha = round(18 + amount * (55 if "FOG" in upper else 95))
+                painter.setBrush(QColor(235, 245, 255, alpha))
+                painter.drawEllipse(QRectF(rect.left() + x - radius, rect.top() + y - radius, radius * 2, radius * 2))
+        if upper & {"RGB_GLITCH", "CHROMATIC_ABERRATION"}:
+            amount = max(amounts.get(name, 0) for name in upper & {"RGB_GLITCH", "CHROMATIC_ABERRATION"})
+            shift = max(2, round(rect.width() * (.002 + amount * .008)))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
+            painter.fillRect(QRectF(rect.left() + shift, rect.top(), shift, rect.height()), QColor(255, 20, 60, round(30 + amount * 80)))
+            painter.fillRect(QRectF(rect.right() - shift * 2, rect.top(), shift, rect.height()), QColor(20, 160, 255, round(30 + amount * 80)))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        if upper & {"OLD_FILM", "FILM_SCRATCHES"}:
+            amount = max(amounts.get(name, 0) for name in upper & {"OLD_FILM", "FILM_SCRATCHES"})
+            if "OLD_FILM" in upper:
+                painter.fillRect(rect, QColor(145, 90, 25, round(15 + amount * 55)))
+            painter.setPen(QPen(QColor(255, 245, 220, round(30 + amount * 90)), 1))
+            for index in range(round(2 + amount * 9)):
+                x = rect.left() + ((index * 0.173 + phase * .41) % 1) * rect.width()
+                painter.drawLine(QPointF(x, rect.top()), QPointF(x + math.sin(index) * 3, rect.bottom()))
         if "VIGNETTE" in upper:
-            painter.setPen(QPen(QColor(0, 0, 0, 120), max(12, rect.width() * .06)))
+            amount = amounts["VIGNETTE"]
+            painter.setPen(QPen(QColor(0, 0, 0, round(55 + amount * 170)), max(12, rect.width() * (.025 + amount * .09))))
             painter.drawRect(rect.adjusted(2, 2, -2, -2))
+        painter.restore()
 
     def _paint_guides(self, painter: QPainter, canvas: QRectF) -> None:
         painter.save()
@@ -418,6 +546,59 @@ def _placeholder(painter: QPainter, rect: QRectF, label: str) -> None:
     painter.setBrush(QColor(15, 23, 42, 90))
     painter.drawRoundedRect(rect, 5, 5)
     painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+
+
+def _set_painter_blend(painter: QPainter, mode: str) -> None:
+    modes = {
+        "lighten": QPainter.CompositionMode.CompositionMode_Lighten,
+        "screen": QPainter.CompositionMode.CompositionMode_Screen,
+        "addition": QPainter.CompositionMode.CompositionMode_Plus,
+    }
+    painter.setCompositionMode(modes.get(str(mode or "normal").lower(), QPainter.CompositionMode.CompositionMode_SourceOver))
+
+
+class _VideoPreviewReader:
+    def __init__(self, path: str):
+        self.path = path
+        self.capture = cv2.VideoCapture(path)
+        self.fps = float(self.capture.get(cv2.CAP_PROP_FPS) or 0) or 30.0
+        self.frame_count = max(0, int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
+        self.current_index = -1
+
+    def frame_at(self, seconds: float) -> QPixmap | None:
+        if not self.capture.isOpened():
+            return None
+        target = max(0, int(seconds * self.fps))
+        if self.frame_count > 0:
+            target %= self.frame_count
+        if target <= self.current_index or target - self.current_index > 4:
+            self.capture.set(cv2.CAP_PROP_POS_FRAMES, target)
+            self.current_index = target - 1
+        while self.current_index + 1 < target:
+            if not self.capture.grab():
+                self.capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                self.current_index = -1
+                break
+            self.current_index += 1
+        ok, frame = self.capture.read()
+        if not ok or frame is None:
+            self.capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self.current_index = -1
+            ok, frame = self.capture.read()
+            if not ok or frame is None:
+                return None
+        self.current_index += 1
+        height, width = frame.shape[:2]
+        maximum_width = 960
+        if width > maximum_width:
+            scale = maximum_width / width
+            frame = cv2.resize(frame, (maximum_width, max(1, round(height * scale))), interpolation=cv2.INTER_AREA)
+            height, width = frame.shape[:2]
+        image = QImage(frame.data, width, height, int(frame.strides[0]), QImage.Format.Format_BGR888)
+        return QPixmap.fromImage(image.copy())
+
+    def close(self) -> None:
+        self.capture.release()
 
 
 def _video_thumbnail(path: str, ffmpeg: str = "ffmpeg") -> QPixmap:

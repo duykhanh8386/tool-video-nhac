@@ -58,7 +58,8 @@ class ElementLayout:
         self.y = min(0.98, max(0.02, float(self.y)))
         self.opacity = min(1.0, max(0.0, float(self.opacity)))
         self.rotation = float(self.rotation) % 360
-        self.blend_mode = "lighten" if str(self.blend_mode).lower() == "lighten" else "normal"
+        blend = str(self.blend_mode or "normal").lower()
+        self.blend_mode = blend if blend in {"normal", "lighten", "screen", "addition"} else "normal"
         return self
 
 
@@ -98,6 +99,9 @@ class VisualProject:
     audio: str = ""
     waveform_media: str = ""
     waveform_remove_white: bool = True
+    effect_overlay: str = ""
+    effect_overlay_blend: str = "lighten"
+    effect_overlay_opacity: int = 100
     output_folder: str = ""
     background_folder: str = ""
     batch_recursive: bool = False
@@ -177,5 +181,12 @@ class VisualProject:
                 loaded[name] = ElementLayout(**{k: v for k, v in base.items() if k in allowed_layout}).normalized()
         defaults.update(loaded)
         data["elements"] = defaults
+        overlay_blend = str(data.get("effect_overlay_blend") or "lighten").lower()
+        data["effect_overlay_blend"] = overlay_blend if overlay_blend in {"normal", "lighten", "screen", "addition"} else "lighten"
+        try:
+            overlay_opacity = int(data.get("effect_overlay_opacity", 100))
+        except (TypeError, ValueError):
+            overlay_opacity = 100
+        data["effect_overlay_opacity"] = min(100, max(0, overlay_opacity))
         allowed = cls.__dataclass_fields__.keys()
         return cls(**{k: v for k, v in data.items() if k in allowed})

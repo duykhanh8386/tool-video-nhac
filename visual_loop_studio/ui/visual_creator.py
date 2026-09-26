@@ -164,7 +164,12 @@ class VisualCreatorPage(QWidget):
         self.element_anchor = QComboBox()
         self.element_anchor.addItems(["top_left", "top_center", "top_right", "center", "bottom_left", "bottom_center", "bottom_right"])
         self.element_blend = QComboBox()
-        _add_options(self.element_blend, [("Bình thường", "normal"), ("Lighten — làm sáng", "lighten")])
+        _add_options(self.element_blend, [
+            ("Normal — bình thường", "normal"),
+            ("Lighten — bỏ vùng tối", "lighten"),
+            ("Screen — sáng mềm", "screen"),
+            ("Linear Dodge (Add) — cộng sáng", "addition"),
+        ])
         selected_form.addRow("Thành phần đang chọn", self.element_choice)
         selected_form.addRow(state_row)
         selected_form.addRow("Điểm neo", self.element_anchor)
@@ -454,6 +459,13 @@ class VisualCreatorPage(QWidget):
         asset_layout.addWidget(self.logo)
         asset_layout.addWidget(self.artwork)
         asset_layout.addWidget(self.platform_icons)
+        asset_blend_note = QLabel(
+            "Hòa trộn ảnh: click Logo/Ảnh bìa/Icon trên preview, rồi chọn Normal, Lighten, Screen "
+            "hoặc Linear Dodge ở mục ‘Hòa trộn ảnh’ trong Bố cục thông minh."
+        )
+        asset_blend_note.setWordWrap(True)
+        asset_blend_note.setObjectName("muted")
+        asset_layout.addWidget(asset_blend_note)
         asset_layout.addWidget(QLabel("Chuyển động ảnh bìa"))
         asset_layout.addWidget(self.artwork_motion)
         self.form.addWidget(asset_group)
@@ -470,7 +482,10 @@ class VisualCreatorPage(QWidget):
         wave_layout.addWidget(self.audio)
         wave_layout.addWidget(self.waveform)
         wave_layout.addWidget(self.waveform_remove_white)
-        wave_note = QLabel("File sóng chỉ chạy lặp theo thời gian của chính file, không tăng giảm theo âm lượng nhạc.")
+        wave_note = QLabel(
+            "File sóng chỉ chạy lặp theo thời gian của chính file, không tăng giảm theo âm lượng nhạc. "
+            "Click lớp Sóng trên preview để đặt Normal/Lighten/Screen/Linear Dodge."
+        )
         wave_note.setWordWrap(True)
         wave_note.setObjectName("muted")
         wave_layout.addWidget(wave_note)
@@ -478,6 +493,37 @@ class VisualCreatorPage(QWidget):
 
         effects_group = QGroupBox("HIỆU ỨNG TOÀN KHUNG")
         effects_layout = QVBoxLayout(effects_group)
+        self.effect_overlay = FileField(
+            "Overlay toàn cảnh có chuyển động (PNG/GIF/MOV/MP4)",
+            MEDIA_FILTER,
+            optional=True,
+        )
+        overlay_controls = QHBoxLayout()
+        self.effect_overlay_blend = QComboBox()
+        _add_options(self.effect_overlay_blend, [
+            ("Normal — giữ alpha của file", "normal"),
+            ("Lighten — bỏ nền đen", "lighten"),
+            ("Screen — bỏ nền đen, sáng mềm", "screen"),
+            ("Linear Dodge (Add) — cộng sáng", "addition"),
+        ])
+        _set_combo_value(self.effect_overlay_blend, "lighten")
+        self.effect_overlay_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.effect_overlay_opacity.setRange(0, 100)
+        self.effect_overlay_opacity.setValue(100)
+        self.effect_overlay_opacity.setToolTip("Độ mờ của overlay toàn cảnh")
+        overlay_controls.addWidget(QLabel("Hòa trộn"))
+        overlay_controls.addWidget(self.effect_overlay_blend, 1)
+        overlay_controls.addWidget(QLabel("Độ mờ"))
+        overlay_controls.addWidget(self.effect_overlay_opacity, 1)
+        overlay_note = QLabel(
+            "MOV/GIF/MP4 được phát và lặp theo thời lượng gốc, không bị giữ ở frame đầu. "
+            "Dùng Lighten/Screen cho overlay nền đen; dùng Normal cho file có kênh alpha."
+        )
+        overlay_note.setWordWrap(True)
+        overlay_note.setObjectName("notice")
+        effects_layout.addWidget(self.effect_overlay)
+        effects_layout.addLayout(overlay_controls)
+        effects_layout.addWidget(overlay_note)
         self.effects = EffectPanel()
         effects_layout.addWidget(self.effects)
         self.form.addWidget(effects_group)
@@ -538,6 +584,13 @@ class VisualCreatorPage(QWidget):
         self.logo.changed.connect(lambda value: self.preview.set_source("logo", value))
         self.platform_icons.changed.connect(lambda value: self.preview.set_source("platform_icons", value))
         self.waveform_media.changed.connect(lambda value: self.preview.set_source("waveform_media", value))
+        self.effect_overlay.changed.connect(lambda value: self.preview.set_source("effect_overlay", value))
+        self.effect_overlay_blend.currentIndexChanged.connect(
+            lambda _index: self._set_preview_value("effect_overlay_blend", _combo_value(self.effect_overlay_blend))
+        )
+        self.effect_overlay_opacity.valueChanged.connect(
+            lambda value: self._set_preview_value("effect_overlay_opacity", value / 100)
+        )
         self.title.textChanged.connect(lambda value: self._set_preview_value("title", value))
         self.subtitle.textChanged.connect(lambda value: self._set_preview_value("subtitle", value))
         self.artist.textChanged.connect(lambda value: self._set_preview_value("artist", value))
@@ -579,7 +632,7 @@ class VisualCreatorPage(QWidget):
         self.preview.update()
 
     def _preview_effects(self) -> None:
-        self.preview.effects = [item.name for item in self.effects.values() if item.enabled]
+        self.preview.effects = [item for item in self.effects.values() if item.enabled]
         self.preview.color_filter = self.color.preset.currentText()
         self.preview.manual_color = self.color.values()
         self.preview.update()
@@ -778,6 +831,9 @@ class VisualCreatorPage(QWidget):
             text_opacity=self.text_opacity.value(), stroke_width=self.stroke_width.value(), text_shadow=self.text_shadow.isChecked(),
             background=self.background.text(), logo=self.logo.text(), artwork=self.artwork.text(), platform_icons=self.platform_icons.text(), audio=self.audio.text(),
             waveform_media=self.waveform_media.text(), waveform_remove_white=self.waveform_remove_white.isChecked(),
+            effect_overlay=self.effect_overlay.text(),
+            effect_overlay_blend=str(_combo_value(self.effect_overlay_blend)),
+            effect_overlay_opacity=self.effect_overlay_opacity.value(),
             output_folder=self.output_folder.text(), background_folder=self.background_folder.text(),
             batch_recursive=self.batch_recursive.isChecked(), output_name=self.output_name.text(), resolution=self.resolution.currentText(),
             fps=self.fps.value(), encoder=self.encoder.currentText(), animation=_combo_value(self.animation),
@@ -803,7 +859,7 @@ class VisualCreatorPage(QWidget):
         for widget, value in ((self.title, project.title), (self.subtitle, project.subtitle), (self.artist, project.artist), (self.custom_text, project.custom_text)):
             widget.setText(value)
         self.playlist.setPlainText(project.playlist)
-        for widget, value in ((self.font_file, project.font_file), (self.background, project.background), (self.logo, project.logo), (self.artwork, project.artwork), (self.platform_icons, project.platform_icons), (self.waveform_media, project.waveform_media), (self.audio, project.audio), (self.output_folder, project.output_folder), (self.background_folder, project.background_folder), (self.ai_source_folder, project.ai_source_folder), (self.color.lut, project.lut)):
+        for widget, value in ((self.font_file, project.font_file), (self.background, project.background), (self.logo, project.logo), (self.artwork, project.artwork), (self.platform_icons, project.platform_icons), (self.waveform_media, project.waveform_media), (self.effect_overlay, project.effect_overlay), (self.audio, project.audio), (self.output_folder, project.output_folder), (self.background_folder, project.background_folder), (self.ai_source_folder, project.ai_source_folder), (self.color.lut, project.lut)):
             widget.setText(value)
         self.batch_recursive.setChecked(project.batch_recursive)
         self.text_styles = {name: TextStyle(**asdict(style)) for name, style in project.text_styles.items()}
@@ -820,6 +876,8 @@ class VisualCreatorPage(QWidget):
         _set_combo_value(self.artwork_motion, project.artwork_motion)
         _set_combo_value(self.waveform, project.waveform if project.waveform in {"FILE", "NONE"} else "FILE")
         self.waveform_remove_white.setChecked(project.waveform_remove_white)
+        _set_combo_value(self.effect_overlay_blend, project.effect_overlay_blend)
+        self.effect_overlay_opacity.setValue(project.effect_overlay_opacity)
         self.ai_prompt.setPlainText(project.ai_prompt)
         _set_combo_value(self.ai_model, project.ai_model)
         _set_combo_value(self.ai_duration, project.ai_duration)

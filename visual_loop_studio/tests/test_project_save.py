@@ -16,6 +16,9 @@ class ProjectModelTests(unittest.TestCase):
         original.elements["logo"].x = .82
         original.elements["logo"].blend_mode = "lighten"
         original.text_styles["title"] = TextStyle("Arial", 112, True, True)
+        original.effect_overlay = "C:/effects/light.mov"
+        original.effect_overlay_blend = "screen"
+        original.effect_overlay_opacity = 72
         original.background_folder = "C:/backgrounds"
         original.batch_recursive = True
         original.ai_engine = "LOCAL"
@@ -30,6 +33,16 @@ class ProjectModelTests(unittest.TestCase):
         original.local_seed = 42
         restored = VisualProject.from_dict(original.to_dict())
         self.assertEqual(restored, original)
+
+    def test_invalid_overlay_values_are_normalized(self):
+        restored = VisualProject.from_dict({
+            "effect_overlay_blend": "unknown",
+            "effect_overlay_opacity": 140,
+            "elements": {"logo": {"x": .1, "y": .1, "width": .2, "height": .2, "blend_mode": "screen"}},
+        })
+        self.assertEqual(restored.effect_overlay_blend, "lighten")
+        self.assertEqual(restored.effect_overlay_opacity, 100)
+        self.assertEqual(restored.elements["logo"].blend_mode, "screen")
 
     def test_loop_round_trip_ignores_future_fields(self):
         payload = LoopProject(main_volume=.8).to_dict()
