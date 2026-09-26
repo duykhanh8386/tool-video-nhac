@@ -29,15 +29,15 @@ FFmpeg, FFprobe, kiểm tra GPU và helper cập nhật đều chạy ẩn trong
 - Preview giải mã frame thật của video nền, file sóng và overlay thay vì chỉ giữ frame đầu. Hiệu ứng toàn khung tích hợp cũng hiển thị theo cường độ đã chọn.
 - Veo tạo video 24 fps nên ứng dụng tự chuyển FPS project về 24 sau khi tạo để giữ nhịp khung hình mượt.
 
-## Thiết lập Wan 2.2 local cho RTX 3060
+## Thiết lập Wan 2.2 local đa GPU
 
-EXE của Visual Loop Studio là portable; không cần chạy `install.bat` hay `run.bat`. Ở lần dùng AI Local đầu tiên, bấm **Cài AI Local tự động (chỉ lần đầu)**, chọn ổ đĩa còn tối thiểu 32 GB trống và xác nhận. Tool sẽ tự tải bản [ComfyUI Portable NVIDIA chính thức](https://github.com/Comfy-Org/ComfyUI/releases) cùng ba model theo [hướng dẫn Wan 2.2 chính thức](https://docs.comfy.org/tutorials/video/wan/wan2_2):
+EXE của Visual Loop Studio là portable; không cần chạy `install.bat` hay `run.bat`. Ở lần dùng AI Local đầu tiên, bấm **Cài AI Local tự động (chỉ lần đầu)**, chọn ổ đĩa còn tối thiểu 32 GB trống và xác nhận. Tool tự nhận diện GPU và tải đúng bản [ComfyUI Portable chính thức](https://github.com/Comfy-Org/ComfyUI/releases): NVIDIA CUDA, Intel Arc XPU, AMD hoặc chế độ CPU. Sau đó tool tải ba model theo [hướng dẫn Wan 2.2 chính thức](https://docs.comfy.org/tutorials/video/wan/wan2_2):
 
 - `wan2.2_ti2v_5B_fp16.safetensors` → `ComfyUI/models/diffusion_models/`
 - `umt5_xxl_fp8_e4m3fn_scaled.safetensors` → `ComfyUI/models/text_encoders/`
 - `wan2.2_vae.safetensors` → `ComfyUI/models/vae/`
 
-Sau khi cài xong, Visual Loop Studio tự khởi động ComfyUI ẩn ở `http://127.0.0.1:8188` khi mở app và tự tắt tiến trình do app mở khi thoát. Không có cửa sổ CMD nhấp nháy; log nằm trong `VisualLoopStudio/logs/comfyui.log`. File tải dở được giữ để tiếp tục nếu mạng bị ngắt. Dùng preset `720p 1280×704 — RTX 3060`; các video được chạy tuần tự để hạn chế tràn VRAM.
+Sau khi cài xong, Visual Loop Studio tự khởi động ComfyUI ẩn ở `http://127.0.0.1:8188` khi mở app và tự tắt tiến trình do app mở khi thoát. Không có cửa sổ CMD nhấp nháy; log nằm trong `VisualLoopStudio/logs/comfyui.log`. File tải dở được giữ để tiếp tục nếu mạng bị ngắt. Nếu chuyển sang máy dùng hãng GPU khác, tool thay riêng backend Python và giữ lại model Wan đã tải. Các video được chạy tuần tự để hạn chế tràn VRAM.
 
 Gói ComfyUI Portable được giải nén bằng `7zr.exe` chính thức của 7-Zip để hỗ trợ bộ lọc BCJ2; file 7zr được kiểm tra SHA-256 trước khi chạy. Nếu bản cũ đã tải xong archive ComfyUI nhưng lỗi ở bước BCJ2, bản mới sẽ dùng lại archive đó thay vì tải lại gần 2 GB.
 

@@ -77,7 +77,7 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 ## Wan 2.2 Native local
 
 1. Trong Visual Creator chọn **Wan 2.2 TI2V 5B Native — Local, miễn phí** và bấm **Cài AI Local tự động (chỉ lần đầu)**.
-2. Chọn ổ còn tối thiểu 32 GB trống. Tool tự tải ComfyUI Portable NVIDIA và ba model từ nguồn chính thức; tải dở có thể tiếp tục.
+2. Chọn ổ còn tối thiểu 32 GB trống. Tool tự nhận diện NVIDIA CUDA, Intel Arc XPU, AMD hoặc CPU, rồi tải đúng ComfyUI Portable và ba model từ nguồn chính thức; tải dở có thể tiếp tục.
 3. Sau khi cài, ComfyUI tự chạy ẩn cùng Visual Loop Studio và tự tắt khi thoát. Có thể bấm **Kiểm tra ComfyUI + model** để xác nhận.
 4. Với RTX 3060 + 32 GB RAM, chọn `1280×704`, 81 frame, 20 step. Nếu thiếu VRAM hoặc muốn thử nhanh, chọn `832×480` hoặc 49 frame.
 5. Để bulk, chọn **Toàn bộ ảnh trong một thư mục** ở **Nguồn ảnh AI**, chọn thư mục, nhập prompt chung và bấm **Tạo Wan 2.2 + render toàn bộ ảnh**.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -89,6 +90,25 @@ def _text_style(project: VisualProject, kind: str) -> TextStyle:
     return style if isinstance(style, TextStyle) else default_text_styles().get(kind, TextStyle())
 
 
+def _ffmpeg_color(value: str, fallback: str = "FFFFFF") -> str:
+    color = str(value or "").strip()
+    if re.fullmatch(r"#?[0-9A-Fa-f]{6}", color):
+        return "0x" + color.lstrip("#").upper()
+    return color or f"0x{fallback}"
+
+
+def _gradient_points(direction: str, width: int, height: int) -> tuple[int, int, int, int]:
+    right = max(1, width - 1)
+    bottom = max(1, height - 1)
+    points = {
+        "left_to_right": (0, height // 2, right, height // 2),
+        "right_to_left": (right, height // 2, 0, height // 2),
+        "top_to_bottom": (width // 2, 0, width // 2, bottom),
+        "bottom_to_top": (width // 2, bottom, width // 2, 0),
+        "diagonal_down": (0, 0, right, bottom),
+        "diagonal_up": (0, bottom, right, 0),
+    }
+    return points.get(str(direction or "").lower(), points["left_to_right"])
 def _font_size(project: VisualProject, kind: str, output_height: int, item_height: int) -> int:
     ratios = {"title": 1.0, "subtitle": .60, "artist": .52, "custom_text": .48, "playlist": .38}
     style = _text_style(project, kind)
@@ -167,18 +187,47 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
                 continue
             style = _text_style(project, kind)
             font_size = _font_size(project, kind, height, item_height)
-            color = project.text_color.strip().lstrip("#") or "FFFFFF"
+            color = _ffmpeg_color(style.color_start or project.text_color)
             opacity = max(0, min(100, project.text_opacity)) / 100 * layout.opacity
             border = max(0, project.stroke_width)
             shadow = ":shadowx=2:shadowy=2:shadowcolor=black@.65" if project.text_shadow else ""
             align = "center" if layout.anchor in {"center", "top_center", "bottom_center"} else "left"
             text_x = "(w-text_w)/2" if align == "center" else "4"
+            text_options = (
+                f"{_font_option(project.font_file, style.font_family, style.bold, style.italic)}"
+                f"textfile='{_text_file(text)}':reload=0:x={text_x}:y=4:"
+                f"fontsize={font_size}:line_spacing={max(2, font_size // 4)}"
+            )
+            if style.color_mode == "linear_gradient":
+                x0, y0, x1, y1 = _gradient_points(style.gradient_direction, item_width, item_height)
+                shadow_label = f"textshadow{serial}"
+                mask_source_label = f"textmasksource{serial}"
+                mask_label = f"textmask{serial}"
+                gradient_label = f"textgradient{serial}"
+                gradient_fill_label = f"textgradientfill{serial}"
+                filters.append(
+                    f"color=c=black@0.0:s={item_width}x{item_height}:r={project.fps}:d=60,format=rgba,"
+                    f"drawtext={text_options}:fontcolor=black@0.0:borderw={border}:bordercolor=black@.7{shadow}[{shadow_label}]"
+                )
+                filters.append(
+                    f"color=c=black@0.0:s={item_width}x{item_height}:r={project.fps}:d=60,format=rgba,"
+                    f"drawtext={text_options}:fontcolor=white@{opacity:.4f}:borderw=0[{mask_source_label}]"
+                )
+                filters.append(f"[{mask_source_label}]alphaextract[{mask_label}]")
+                filters.append(
+                    f"gradients=s={item_width}x{item_height}:r={project.fps}:d=60:c0={_ffmpeg_color(style.color_start)}:"
+                    f"c1={_ffmpeg_color(style.color_end)}:n=2:x0={x0}:y0={y0}:x1={x1}:y1={y1}:t=linear:speed=0,format=rgba[{gradient_label}]"
+                )
+                filters.append(f"[{gradient_label}][{mask_label}]alphamerge,format=rgba[{gradient_fill_label}]")
+                filters.append(
+                    f"[{shadow_label}][{gradient_fill_label}]overlay=x=0:y=0:format=auto{_rotate_filter(layout)}[{source_label}]"
+                )
+                sources.append((layout.z_order, source_label, element_id, layout))
+                continue
             filters.append(
                 f"color=c=black@0.0:s={item_width}x{item_height}:r={project.fps}:d=60,format=rgba,"
-                f"drawtext={_font_option(project.font_file, style.font_family, style.bold, style.italic)}textfile='{_text_file(text)}':reload=0:x={text_x}:y=4:"
-                f"fontsize={font_size}:fontcolor=0x{color}@{opacity:.4f}:borderw={border}:"
-                f"bordercolor=black@.7:line_spacing={max(2, font_size // 4)}{shadow}"
-                f"{_rotate_filter(layout)}[{source_label}]"
+                f"drawtext={text_options}:fontcolor={color}@{opacity:.4f}:borderw={border}:"
+                f"bordercolor=black@.7{shadow}{_rotate_filter(layout)}[{source_label}]"
             )
         else:
             continue

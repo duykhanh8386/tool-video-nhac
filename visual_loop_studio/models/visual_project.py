@@ -18,11 +18,26 @@ class TextStyle:
     bold: bool = False
     italic: bool = False
 
+    color_mode: str = "solid"
+    color_start: str = "#FFFFFF"
+    color_end: str = "#67E8F9"
+    gradient_direction: str = "left_to_right"
     def normalized(self) -> "TextStyle":
         self.font_family = str(self.font_family or "Segoe UI")
         self.font_size = min(300, max(8, int(self.font_size)))
         self.bold = bool(self.bold)
         self.italic = bool(self.italic)
+        self.color_mode = str(self.color_mode or "solid").lower()
+        if self.color_mode not in {"solid", "linear_gradient"}:
+            self.color_mode = "solid"
+        self.color_start = str(self.color_start or "#FFFFFF").strip()
+        self.color_end = str(self.color_end or self.color_start).strip()
+        self.gradient_direction = str(self.gradient_direction or "left_to_right").lower()
+        if self.gradient_direction not in {
+            "left_to_right", "right_to_left", "top_to_bottom", "bottom_to_top",
+            "diagonal_down", "diagonal_up",
+        }:
+            self.gradient_direction = "left_to_right"
         return self
 
 
@@ -154,6 +169,7 @@ class VisualProject:
             data["ai_source_recursive"] = bool(data.get("batch_recursive", False))
         data["effects"] = [EffectItem(**item) for item in data.get("effects", [])]
         text_defaults = default_text_styles()
+        legacy_text_color = str(data.get("text_color") or "#FFFFFF")
         loaded_styles: dict[str, TextStyle] = {}
         for name, item in (data.get("text_styles") or {}).items():
             if isinstance(item, TextStyle):
@@ -162,8 +178,14 @@ class VisualProject:
                 base = asdict(text_defaults.get(name, TextStyle()))
                 base.update(item)
                 allowed_style = TextStyle.__dataclass_fields__.keys()
+                # Projects created before per-text colors used one shared color.
+                if "color_start" not in item:
+                    base["color_start"] = legacy_text_color
                 loaded_styles[name] = TextStyle(**{k: v for k, v in base.items() if k in allowed_style}).normalized()
         text_defaults.update(loaded_styles)
+        if not data.get("text_styles"):
+            for style in text_defaults.values():
+                style.color_start = legacy_text_color
         if not data.get("text_styles") and int(data.get("font_size") or 0) > 0:
             base_size = int(data["font_size"])
             ratios = {"title": 1.0, "subtitle": .60, "artist": .52, "custom_text": .48, "playlist": .38}

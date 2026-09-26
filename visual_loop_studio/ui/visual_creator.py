@@ -6,14 +6,17 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
     QFileDialog, QFontComboBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar,
-    QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget,
+    QColorDialog, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
-from ai.local_runtime import LocalRuntimeManager, default_runtime_root, is_runtime_installed, server_ready
+from ai.local_runtime import (
+    LocalRuntimeManager, default_runtime_root, detect_runtime_backend,
+    is_runtime_installed, server_ready,
+)
 from models.settings_model import AppSettings
 from models.visual_project import ElementLayout, TextStyle, VisualProject, default_element_layouts, default_text_styles
 from render.ffmpeg import build_visual_job
@@ -248,6 +251,18 @@ class VisualCreatorPage(QWidget):
         font_style_row.addStretch()
         self.font_file = FileField("File font riêng ghi đè danh sách font", "Fonts (*.ttf *.otf *.ttc);;Tất cả file (*.*)", optional=True)
         self.text_color = QLineEdit("#FFFFFF")
+        self.text_color_mode = QComboBox()
+        _add_options(self.text_color_mode, [("M\u00e0u \u0111\u01a1n", "solid"), ("Gradient tuy\u1ebfn t\u00ednh", "linear_gradient")])
+        self.text_color_pick = QPushButton("Ch\u1ecdn")
+        self.text_gradient_end = QLineEdit("#67E8F9")
+        self.text_gradient_end_pick = QPushButton("Ch\u1ecdn")
+        self.text_gradient_direction = QComboBox()
+        _add_options(self.text_gradient_direction, [
+            ("Ngang: tr\u00e1i \u2192 ph\u1ea3i", "left_to_right"), ("Ngang: ph\u1ea3i \u2192 tr\u00e1i", "right_to_left"),
+            ("D\u1ecdc: tr\u00ean \u2192 d\u01b0\u1edbi", "top_to_bottom"), ("D\u1ecdc: d\u01b0\u1edbi \u2192 tr\u00ean", "bottom_to_top"),
+            ("Ch\u00e9o: tr\u00e1i tr\u00ean \u2192 ph\u1ea3i d\u01b0\u1edbi", "diagonal_down"),
+            ("Ch\u00e9o: tr\u00e1i d\u01b0\u1edbi \u2192 ph\u1ea3i tr\u00ean", "diagonal_up"),
+        ])
         self.text_opacity = QSlider(Qt.Orientation.Horizontal)
         self.text_opacity.setRange(0, 100)
         self.text_opacity.setValue(100)
@@ -264,6 +279,11 @@ class VisualCreatorPage(QWidget):
         text_form.addRow("Độ mờ", self.text_opacity)
         text_form.addRow("Độ dày viền", self.stroke_width)
         text_form.addRow("Bóng chữ", self.text_shadow)
+        text_form.addRow("Ki\u1ec3u m\u00e0u text \u0111ang ch\u1ecdn", self.text_color_mode)
+        text_form.addRow("B\u1ea3ng m\u00e0u ch\u00ednh", self.text_color_pick)
+        text_form.addRow("M\u00e0u cu\u1ed1i gradient", self.text_gradient_end)
+        text_form.addRow("B\u1ea3ng m\u00e0u cu\u1ed1i", self.text_gradient_end_pick)
+        text_form.addRow("H\u01b0\u1edbng gradient", self.text_gradient_direction)
         self.form.addWidget(text_group)
 
         background_group = QGroupBox("2. ẢNH NỀN VÀ CHUYỂN ĐỘNG AI")
@@ -655,6 +675,12 @@ class VisualCreatorPage(QWidget):
         self.selected_font_size.valueChanged.connect(self._write_text_style_controls)
         self.font_bold.toggled.connect(self._write_text_style_controls)
         self.font_italic.toggled.connect(self._write_text_style_controls)
+        self.text_color_mode.currentIndexChanged.connect(self._write_text_style_controls)
+        self.text_color.textChanged.connect(self._write_text_style_controls)
+        self.text_gradient_end.textChanged.connect(self._write_text_style_controls)
+        self.text_gradient_direction.currentIndexChanged.connect(self._write_text_style_controls)
+        self.text_color_pick.clicked.connect(lambda: self._choose_text_color(self.text_color))
+        self.text_gradient_end_pick.clicked.connect(lambda: self._choose_text_color(self.text_gradient_end))
         self.guides.toggled.connect(lambda value: self._set_preview_option("show_guides", value))
         self.snap_center.toggled.connect(lambda value: self._set_preview_option("snap_center", value))
         self.snap_margin.toggled.connect(lambda value: self._set_preview_option("snap_safe_margin", value))
@@ -670,6 +696,21 @@ class VisualCreatorPage(QWidget):
     def _set_preview_value(self, name: str, value) -> None:
         setattr(self.preview, name, value)
         self.preview.update()
+
+    def _choose_text_color(self, field: QLineEdit) -> None:
+        current = QColor(field.text())
+        color = QColorDialog.getColor(current if current.isValid() else QColor("white"), self, "Ch\u1ecdn m\u00e0u ch\u1eef")
+        if color.isValid():
+            field.setText(color.name())
+
+    def _sync_text_color_controls(self, enabled: bool) -> None:
+        self.text_color_mode.setEnabled(enabled)
+        self.text_color.setEnabled(enabled)
+        self.text_color_pick.setEnabled(enabled)
+        gradient_enabled = enabled and str(_combo_value(self.text_color_mode)) == "linear_gradient"
+        self.text_gradient_end.setEnabled(gradient_enabled)
+        self.text_gradient_end_pick.setEnabled(gradient_enabled)
+        self.text_gradient_direction.setEnabled(gradient_enabled)
 
     def _set_preview_option(self, name: str, value: bool) -> None:
         setattr(self.preview, name, value)
@@ -839,12 +880,18 @@ class VisualCreatorPage(QWidget):
         enabled = style is not None
         for widget in (self.font_family, self.selected_font_size, self.font_bold, self.font_italic):
             widget.setEnabled(enabled)
+        self._sync_text_color_controls(enabled)
         if not style:
             return
         self.font_family.setCurrentFont(QFont(style.font_family))
         self.selected_font_size.setValue(style.font_size)
         self.font_bold.setChecked(style.bold)
         self.font_italic.setChecked(style.italic)
+        _set_combo_value(self.text_color_mode, style.color_mode)
+        self.text_color.setText(style.color_start)
+        self.text_gradient_end.setText(style.color_end)
+        _set_combo_value(self.text_gradient_direction, style.gradient_direction)
+        self._sync_text_color_controls(True)
 
     def _write_text_style_controls(self, *_args) -> None:
         if self._updating_element_controls:
@@ -858,8 +905,13 @@ class VisualCreatorPage(QWidget):
             font_size=self.selected_font_size.value(),
             bold=self.font_bold.isChecked(),
             italic=self.font_italic.isChecked(),
+            color_mode=str(_combo_value(self.text_color_mode)),
+            color_start=self.text_color.text(),
+            color_end=self.text_gradient_end.text(),
+            gradient_direction=str(_combo_value(self.text_gradient_direction)),
         ).normalized()
         self.preview.text_styles = self.text_styles
+        self._sync_text_color_controls(True)
         self.preview.update()
 
     def _write_element_controls(self, *_args) -> None:
@@ -936,7 +988,9 @@ class VisualCreatorPage(QWidget):
         self.batch_recursive.setChecked(project.batch_recursive)
         self.text_styles = {name: TextStyle(**asdict(style)) for name, style in project.text_styles.items()}
         self.preview.text_styles = self.text_styles
+        self.text_color.blockSignals(True)
         self.text_color.setText(project.text_color)
+        self.text_color.blockSignals(False)
         self.text_opacity.setValue(project.text_opacity)
         self.stroke_width.setValue(project.stroke_width)
         self.text_shadow.setChecked(project.text_shadow)
@@ -1182,10 +1236,12 @@ class VisualCreatorPage(QWidget):
         return server_ready(self.settings.comfyui_url) or is_runtime_installed(self.settings.local_ai_root)
 
     def _offer_local_setup(self) -> None:
+        backend = detect_runtime_backend()
         answer = QMessageBox.question(
             self,
             "Cài AI Local Wan 2.2",
-            "Máy chưa có ComfyUI + model Wan 2.2 đầy đủ. Tool có thể tự tải khoảng 20–25 GB, "
+            f"Đã nhận diện: {backend.label}.\n\n"
+            "Máy chưa có ComfyUI + model Wan 2.2 phù hợp. Tool có thể tự tải khoảng 20–25 GB, "
             "cài một lần vào ổ đĩa anh chọn và tự chạy ẩn ở các lần sau. Cài ngay?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
@@ -1208,9 +1264,11 @@ class VisualCreatorPage(QWidget):
                 return
             selected_path = Path(selected).resolve()
             root = selected_path if selected_path.name.lower() == "visualloopstudio_ai" else selected_path / "VisualLoopStudio_AI"
+            backend = detect_runtime_backend()
             answer = QMessageBox.question(
                 self,
                 "Xác nhận cài AI Local",
+                f"GPU/backend nhận diện: {backend.label}\n"
                 f"ComfyUI và Wan 2.2 sẽ được tải vào:\n{root}\n\n"
                 "Cần tối thiểu 32 GB trống. File tải dở sẽ được giữ để tiếp tục ở lần sau. Bắt đầu?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,

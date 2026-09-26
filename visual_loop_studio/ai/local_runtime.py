@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
 import threading
@@ -18,16 +21,34 @@ from utils.paths import LOG_DIR, USER_DATA_ROOT
 from utils.process import hidden_process_kwargs
 
 
-COMFY_PORTABLE_URL = (
-    "https://github.com/Comfy-Org/ComfyUI/releases/latest/download/"
-    "ComfyUI_windows_portable_nvidia.7z"
-)
+COMFY_RELEASE_BASE_URL = "https://github.com/Comfy-Org/ComfyUI/releases/latest/download/"
 SEVEN_ZIP_URL = "https://github.com/ip7z/7zip/releases/download/26.03/7zr.exe"
 SEVEN_ZIP_SHA256 = "ad4c82fadcbdf93c03b4fc440f300509c7d60c5c2f4d183e35d9d70d6957037d"
 MIN_FREE_BYTES = 32 * 1024**3
 COMFY_ARCHIVE_BYTES = 1_925_204_508
 COMFY_EXTRACT_RESERVE_BYTES = 8 * 1024**3
 INSTALL_MARGIN_BYTES = 2 * 1024**3
+
+
+@dataclass(frozen=True)
+class RuntimeBackend:
+    key: str
+    label: str
+    archive_name: str
+    launch_args: tuple[str, ...] = ()
+
+    @property
+    def url(self) -> str:
+        return COMFY_RELEASE_BASE_URL + self.archive_name
+
+
+RUNTIME_BACKENDS = {
+    "nvidia": RuntimeBackend("nvidia", "NVIDIA CUDA", "ComfyUI_windows_portable_nvidia.7z"),
+    "intel": RuntimeBackend("intel", "Intel Arc XPU", "ComfyUI_windows_portable_intel.7z"),
+    "amd": RuntimeBackend("amd", "AMD", "ComfyUI_windows_portable_amd.7z"),
+    # The NVIDIA portable package can also run without CUDA when --cpu is used.
+    "cpu": RuntimeBackend("cpu", "CPU", "ComfyUI_windows_portable_nvidia.7z", ("--cpu",)),
+}
 
 
 @dataclass(frozen=True)
@@ -71,6 +92,56 @@ class RuntimeInstallCancelled(RuntimeError):
     pass
 
 
+def windows_video_adapters() -> tuple[str, ...]:
+    """Return display adapter names without spawning a visible shell."""
+    if os.name != "nt":
+        return ()
+
+    class DisplayDevice(ctypes.Structure):
+        _fields_ = [
+            ("cb", ctypes.c_ulong),
+            ("DeviceName", ctypes.c_wchar * 32),
+            ("DeviceString", ctypes.c_wchar * 128),
+            ("StateFlags", ctypes.c_ulong),
+            ("DeviceID", ctypes.c_wchar * 128),
+            ("DeviceKey", ctypes.c_wchar * 128),
+        ]
+
+    try:
+        enum_display_devices = ctypes.windll.user32.EnumDisplayDevicesW
+    except (AttributeError, OSError):
+        return ()
+
+    names: list[str] = []
+    index = 0
+    while True:
+        device = DisplayDevice()
+        device.cb = ctypes.sizeof(device)
+        try:
+            found = enum_display_devices(None, index, ctypes.byref(device), 0)
+        except (AttributeError, OSError):
+            break
+        if not found:
+            break
+        name = str(device.DeviceString or "").strip()
+        if name and name not in names:
+            names.append(name)
+        index += 1
+    return tuple(names)
+
+
+def detect_runtime_backend(adapters: tuple[str, ...] | list[str] | None = None) -> RuntimeBackend:
+    names = tuple(adapters) if adapters is not None else windows_video_adapters()
+    normalized = " | ".join(names).casefold()
+    if "nvidia" in normalized or "geforce" in normalized or "quadro" in normalized:
+        return RUNTIME_BACKENDS["nvidia"]
+    if "amd" in normalized or "radeon" in normalized or "advanced micro devices" in normalized:
+        return RUNTIME_BACKENDS["amd"]
+    if "intel" in normalized and "arc" in normalized:
+        return RUNTIME_BACKENDS["intel"]
+    return RUNTIME_BACKENDS["cpu"]
+
+
 def default_runtime_root() -> Path:
     return USER_DATA_ROOT / "ai_runtime"
 
@@ -88,25 +159,64 @@ def portable_dir(install_root: str | Path) -> Path:
     return nested.parent.parent
 
 
-def runtime_paths(install_root: str | Path) -> dict[str, Path]:
+def runtime_paths(
+    install_root: str | Path,
+    backend: RuntimeBackend | str | None = None,
+) -> dict[str, Path | RuntimeBackend]:
     root = Path(install_root).expanduser().resolve()
+    selected = RUNTIME_BACKENDS.get(backend, None) if isinstance(backend, str) else backend
+    selected = selected or detect_runtime_backend()
     portable = portable_dir(root)
     comfy = portable / "ComfyUI"
     return {
         "root": root,
         "portable": portable,
+        "backend": selected,
         "python": portable / "python_embeded" / "python.exe",
         "main": comfy / "main.py",
         "models": comfy / "models",
-        "archive": root / "downloads" / "ComfyUI_windows_portable_nvidia.7z",
+        "archive": root / "downloads" / selected.archive_name,
         "seven_zip": root / "tools" / "7zr.exe",
         "portable_marker": root / ".comfy-portable-ok",
     }
 
 
-def missing_runtime_files(install_root: str | Path) -> list[str]:
-    paths = runtime_paths(install_root)
+def installed_runtime_backend(paths: dict[str, Path | RuntimeBackend]) -> str:
+    marker = Path(paths["portable_marker"])
+    try:
+        marker_value = marker.read_text(encoding="utf-8").strip().casefold()
+    except OSError:
+        marker_value = ""
+    if marker_value in RUNTIME_BACKENDS:
+        return marker_value
+
+    version_file = Path(paths["portable"]) / "python_embeded" / "Lib" / "site-packages" / "torch" / "version.py"
+    try:
+        version_text = version_file.read_text(encoding="utf-8", errors="ignore").casefold()
+    except OSError:
+        return ""
+    for attribute, backend_key in (("xpu", "intel"), ("hip", "amd"), ("cuda", "nvidia")):
+        match = re.search(rf"(?m)^{attribute}[^\n=]*=\s*(['\"])([^'\"]+)\1", version_text)
+        if match and match.group(2).strip().casefold() not in {"none", "null"}:
+            return backend_key
+    return ""
+
+
+def missing_runtime_files(
+    install_root: str | Path,
+    expected_backend: RuntimeBackend | str | None = None,
+) -> list[str]:
+    selected = RUNTIME_BACKENDS.get(expected_backend, None) if isinstance(expected_backend, str) else expected_backend
+    selected = selected or detect_runtime_backend()
+    paths = runtime_paths(install_root, selected)
     missing: list[str] = []
+    if paths["portable_marker"].is_file():
+        installed = installed_runtime_backend(paths)
+        if installed and installed != selected.key:
+            installed_label = RUNTIME_BACKENDS.get(installed, RUNTIME_BACKENDS["cpu"]).label
+            missing.append(
+                f"backend {installed_label}; m\u00e1y n\u00e0y c\u1ea7n {selected.label}"
+            )
     for key, label in (("python", "Python ComfyUI"), ("main", "ComfyUI")):
         if not paths[key].is_file():
             missing.append(label)
@@ -119,11 +229,14 @@ def missing_runtime_files(install_root: str | Path) -> list[str]:
     return missing
 
 
-def is_runtime_installed(install_root: str | Path) -> bool:
+def is_runtime_installed(
+    install_root: str | Path,
+    expected_backend: RuntimeBackend | str | None = None,
+) -> bool:
     if not str(install_root or "").strip():
         return False
     try:
-        return not missing_runtime_files(install_root)
+        return not missing_runtime_files(install_root, expected_backend)
     except OSError:
         return False
 
@@ -136,21 +249,30 @@ def install_local_runtime(
     progress = progress or (lambda _value, _message: None)
     cancelled = cancelled or (lambda: False)
     root = Path(install_root).expanduser().resolve()
+    backend = detect_runtime_backend()
     root.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(root).free
-    required = required_free_bytes(root)
-    if free < required and not is_runtime_installed(root):
+    required = required_free_bytes(root, backend)
+    if free < required and not is_runtime_installed(root, backend):
         raise RuntimeError(
             f"Ổ đĩa chỉ còn {free / 1024**3:.1f} GB. Cần thêm khoảng {required / 1024**3:.1f} GB trống "
             "để tải/tiếp tục cài ComfyUI + Wan 2.2."
         )
     _raise_if_cancelled(cancelled)
-    paths = runtime_paths(root)
-    if not paths["python"].is_file() or not paths["main"].is_file() or not paths["portable_marker"].is_file():
-        if not paths["archive"].is_file() or paths["archive"].stat().st_size < COMFY_ARCHIVE_BYTES:
-            progress(1, "Đang tải ComfyUI Portable NVIDIA (có thể tiếp tục nếu mạng bị ngắt)…")
+    paths = runtime_paths(root, backend)
+    installed_backend = installed_runtime_backend(paths)
+    switching_backend = bool(installed_backend and installed_backend != backend.key)
+    portable_ready = (
+        paths["python"].is_file()
+        and paths["main"].is_file()
+        and paths["portable_marker"].is_file()
+        and not switching_backend
+    )
+    if not portable_ready:
+        if not paths["archive"].is_file() or paths["archive"].stat().st_size < 256 * 1024**2:
+            progress(1, f"Đã nhận diện {backend.label}. Đang tải đúng bản ComfyUI Portable…")
             _download(
-                COMFY_PORTABLE_URL,
+                backend.url,
                 paths["archive"],
                 lambda value, message: progress(1 + round(value * .17), message),
                 cancelled,
@@ -166,15 +288,18 @@ def install_local_runtime(
                 SEVEN_ZIP_SHA256,
             )
         _raise_if_cancelled(cancelled)
-        progress(19, "Đang giải nén ComfyUI Portable bằng 7-Zip; bước này có thể mất vài phút…")
+        if switching_backend:
+            progress(19, f"Đang chuyển backend {installed_backend} sang {backend.label}; giữ nguyên model Wan…")
+            _prepare_backend_switch(paths)
+        progress(19, f"Đang giải nén ComfyUI Portable {backend.label}; bước này có thể mất vài phút…")
         extract_7z_archive(paths["archive"], root, paths["seven_zip"])
-        paths = runtime_paths(root)
+        paths = runtime_paths(root, backend)
         if not paths["python"].is_file() or not paths["main"].is_file():
             raise RuntimeError("Đã giải nén nhưng không tìm thấy ComfyUI_windows_portable hợp lệ.")
-        paths["portable_marker"].write_text("ok\n", encoding="ascii")
+        paths["portable_marker"].write_text(backend.key + "\n", encoding="ascii")
         paths["archive"].unlink(missing_ok=True)
     else:
-        progress(20, "Đã có ComfyUI Portable; bỏ qua phần tải chương trình.")
+        progress(20, f"Đã có ComfyUI Portable {backend.label}; bỏ qua phần tải chương trình.")
 
     ranges = ((22, 62), (62, 91), (91, 99))
     for item, (start, end) in zip(MODEL_DOWNLOADS, ranges):
@@ -195,33 +320,56 @@ def install_local_runtime(
         )
     marker = root / "installed.json"
     marker.write_text(
-        json.dumps({"runtime": str(paths["portable"]), "models": [item.filename for item in MODEL_DOWNLOADS]}, indent=2),
+        json.dumps(
+            {
+                "runtime": str(paths["portable"]),
+                "backend": backend.key,
+                "backend_label": backend.label,
+                "models": [item.filename for item in MODEL_DOWNLOADS],
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
-    progress(100, "Đã cài xong ComfyUI + Wan 2.2 Native.")
+    progress(100, f"Đã cài xong ComfyUI {backend.label} + Wan 2.2 Native.")
     return str(root)
 
 
-def build_runtime_command(install_root: str | Path, base_url: str) -> tuple[list[str], Path]:
-    paths = runtime_paths(install_root)
+def build_runtime_command(
+    install_root: str | Path,
+    base_url: str,
+    backend: RuntimeBackend | str | None = None,
+) -> tuple[list[str], Path]:
+    selected = RUNTIME_BACKENDS.get(backend, None) if isinstance(backend, str) else backend
+    selected = selected or detect_runtime_backend()
+    paths = runtime_paths(install_root, selected)
     parsed = urlparse(_normalized_url(base_url))
     if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
         raise RuntimeError("Chỉ có thể tự chạy ComfyUI trên localhost.")
     port = parsed.port or 8188
     command = [
         str(paths["python"]), "-s", str(paths["main"]),
+        *selected.launch_args,
         "--windows-standalone-build", "--listen", "127.0.0.1",
         "--port", str(port), "--disable-auto-launch",
     ]
     return command, paths["portable"]
 
 
-def required_free_bytes(install_root: str | Path) -> int:
-    paths = runtime_paths(install_root)
-    has_progress = paths["archive"].exists() or paths["archive"].with_suffix(".7z.part").exists()
+def required_free_bytes(
+    install_root: str | Path,
+    backend: RuntimeBackend | str | None = None,
+) -> int:
+    selected = RUNTIME_BACKENDS.get(backend, None) if isinstance(backend, str) else backend
+    selected = selected or detect_runtime_backend()
+    paths = runtime_paths(install_root, selected)
+    archive_partial = paths["archive"].with_suffix(paths["archive"].suffix + ".part")
+    has_progress = paths["archive"].exists() or archive_partial.exists()
     remaining = INSTALL_MARGIN_BYTES
-    if not paths["python"].is_file() or not paths["main"].is_file() or not paths["portable_marker"].is_file():
-        archive_partial = paths["archive"].with_suffix(paths["archive"].suffix + ".part")
+    installed = installed_runtime_backend(paths)
+    runtime_missing = not paths["python"].is_file() or not paths["main"].is_file()
+    backend_mismatch = bool(installed and installed != selected.key)
+    if runtime_missing or not paths["portable_marker"].is_file() or backend_mismatch:
         archive_have = paths["archive"].stat().st_size if paths["archive"].is_file() else (
             archive_partial.stat().st_size if archive_partial.is_file() else 0
         )
@@ -233,6 +381,21 @@ def required_free_bytes(install_root: str | Path) -> int:
         has_progress = has_progress or have > 0
         remaining += max(0, item.size_bytes - have)
     return max(remaining, 8 * 1024**3 if has_progress else MIN_FREE_BYTES)
+
+
+def _prepare_backend_switch(paths: dict[str, Path | RuntimeBackend]) -> None:
+    root = Path(paths["root"]).resolve()
+    python_dir = (Path(paths["portable"]) / "python_embeded").resolve()
+    try:
+        python_dir.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError("Thư mục Python ComfyUI nằm ngoài thư mục AI Local; không thể chuyển backend an toàn.") from exc
+
+    if python_dir.is_symlink() or python_dir.is_file():
+        python_dir.unlink(missing_ok=True)
+    elif python_dir.is_dir():
+        shutil.rmtree(python_dir)
+    Path(paths["portable_marker"]).unlink(missing_ok=True)
 
 
 def extract_7z_archive(archive: str | Path, destination: str | Path, seven_zip: str | Path) -> None:

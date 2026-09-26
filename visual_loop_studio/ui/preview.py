@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QCloseEvent, QFont, QImage, QMouseEvent, QPainter,
+    QBrush, QColor, QCloseEvent, QFont, QImage, QLinearGradient, QMouseEvent, QPainter,
     QPainterPath, QPen, QPixmap, QRadialGradient, QWheelEvent,
 )
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -317,13 +317,29 @@ class CompositionPreview(QWidget):
         font.setBold(style.bold)
         font.setItalic(style.italic)
         painter.setFont(font)
-        color = QColor(self.text_color)
+        color = QColor(style.color_start or self.text_color)
         if not color.isValid():
             color = QColor("white")
         painter.setPen(QPen(QColor(0, 0, 0, 150), 3))
         flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap
         painter.drawText(rect.adjusted(2, 2, -2, -2), flags, text)
-        painter.setPen(color)
+        if style.color_mode == "linear_gradient":
+            points = {
+                "left_to_right": (rect.left(), rect.center().y(), rect.right(), rect.center().y()),
+                "right_to_left": (rect.right(), rect.center().y(), rect.left(), rect.center().y()),
+                "top_to_bottom": (rect.center().x(), rect.top(), rect.center().x(), rect.bottom()),
+                "bottom_to_top": (rect.center().x(), rect.bottom(), rect.center().x(), rect.top()),
+                "diagonal_down": (rect.left(), rect.top(), rect.right(), rect.bottom()),
+                "diagonal_up": (rect.left(), rect.bottom(), rect.right(), rect.top()),
+            }
+            x0, y0, x1, y1 = points.get(style.gradient_direction, points["left_to_right"])
+            gradient = QLinearGradient(x0, y0, x1, y1)
+            gradient.setColorAt(0, color)
+            end_color = QColor(style.color_end)
+            gradient.setColorAt(1, end_color if end_color.isValid() else color)
+            painter.setPen(QPen(QBrush(gradient), 1))
+        else:
+            painter.setPen(color)
         painter.drawText(rect, flags, text)
 
     def _paint_wave(self, painter: QPainter, rect: QRectF) -> None:
