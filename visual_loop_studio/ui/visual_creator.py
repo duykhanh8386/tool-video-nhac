@@ -5,15 +5,16 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar,
+    QFontComboBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar,
     QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
 from models.settings_model import AppSettings
-from models.visual_project import ElementLayout, VisualProject, default_element_layouts
+from models.visual_project import ElementLayout, TextStyle, VisualProject, default_element_layouts, default_text_styles
 from render.ffmpeg import build_visual_job
 from render.render_worker import RenderWorker
 from ui.ai_video import AiVideoWorker
@@ -21,7 +22,7 @@ from ui.color_filter_panel import ColorFilterPanel
 from ui.common import AUDIO_FILTER, IMAGE_FILTER, MEDIA_FILTER, FileField, RenderStatus, show_error
 from ui.effect_panel import EffectPanel
 from ui.preview import CompositionPreview
-from utils.media import is_still_image
+from utils.media import background_files, is_still_image
 from utils.paths import unique_output
 from visual.layout import ELEMENT_LABELS, PRESETS, analyze_background, compose_layout, reset_layout
 
@@ -35,9 +36,17 @@ class VisualCreatorPage(QWidget):
         self.worker = RenderWorker(self)
         self.ai_worker = AiVideoWorker(self)
         self.elements = default_element_layouts()
+        self.text_styles = default_text_styles()
         self.analysis = None
         self.layout_variant = 0
         self._updating_element_controls = False
+        self._batch_queue: list[str] = []
+        self._batch_total = 0
+        self._batch_completed: list[str] = []
+        self._batch_failures: list[str] = []
+        self._batch_current = ""
+        self._batch_mode = False
+        self._batch_template: VisualProject | None = None
         root = QVBoxLayout(self)
         heading = QLabel("Tạo Visual — 60 giây")
         heading.setObjectName("pageTitle")
@@ -45,13 +54,13 @@ class VisualCreatorPage(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         root.addWidget(splitter, 1)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(450)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setMinimumWidth(450)
         panel = QWidget()
         self.form = QVBoxLayout(panel)
-        scroll.setWidget(panel)
-        splitter.addWidget(scroll)
+        self.scroll.setWidget(panel)
+        splitter.addWidget(self.scroll)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -78,7 +87,7 @@ class VisualCreatorPage(QWidget):
         preview_controls.addWidget(auto)
         right_layout.addLayout(preview_controls)
         self.status = RenderStatus()
-        self.status.cancel_requested.connect(self.worker.cancel)
+        self.status.cancel_requested.connect(self.cancel_render)
         right_layout.addWidget(self.status)
         splitter.addWidget(right)
         splitter.setSizes([470, 900])
@@ -87,7 +96,7 @@ class VisualCreatorPage(QWidget):
         self.worker.progress.connect(self.status.update_progress)
         self.worker.finished.connect(self._finished)
         self.worker.failed.connect(self._failed)
-        self.worker.canceled.connect(lambda: self.status.stopped())
+        self.worker.canceled.connect(self._canceled)
         self.ai_worker.progress.connect(self._ai_progress)
         self.ai_worker.finished.connect(self._ai_finished)
         self.ai_worker.failed.connect(self._ai_failed)
@@ -126,9 +135,12 @@ class VisualCreatorPage(QWidget):
         state_row.addWidget(self.element_visible)
         self.element_anchor = QComboBox()
         self.element_anchor.addItems(["top_left", "top_center", "top_right", "center", "bottom_left", "bottom_center", "bottom_right"])
+        self.element_blend = QComboBox()
+        _add_options(self.element_blend, [("Bình thường", "normal"), ("Lighten — làm sáng", "lighten")])
         selected_form.addRow("Thành phần đang chọn", self.element_choice)
         selected_form.addRow(state_row)
         selected_form.addRow("Điểm neo", self.element_anchor)
+        selected_form.addRow("Hòa trộn ảnh", self.element_blend)
         layout_box.addLayout(selected_form)
 
         coordinates = QGridLayout()
@@ -190,10 +202,18 @@ class VisualCreatorPage(QWidget):
         self.playlist.setMaximumHeight(95)
         for label, widget in (("Tiêu đề", self.title), ("Tiêu đề phụ", self.subtitle), ("Nghệ sĩ", self.artist), ("Nội dung thêm", self.custom_text), ("Danh sách bài hát", self.playlist)):
             text_form.addRow(label, widget)
-        self.font_file = FileField("Font tùy chọn", "Fonts (*.ttf *.otf *.ttc);;Tất cả file (*.*)", optional=True)
-        self.font_size = QSpinBox()
-        self.font_size.setRange(0, 300)
-        self.font_size.setSpecialValueText("Tự động")
+        self.font_family = QFontComboBox()
+        self.font_family.setToolTip("Danh sách font đã cài trên Windows, hiển thị tương tự Microsoft Word.")
+        self.selected_font_size = QSpinBox()
+        self.selected_font_size.setRange(8, 300)
+        self.selected_font_size.setSuffix(" px @1080p")
+        self.font_bold = QCheckBox("Đậm")
+        self.font_italic = QCheckBox("Nghiêng")
+        font_style_row = QHBoxLayout()
+        font_style_row.addWidget(self.font_bold)
+        font_style_row.addWidget(self.font_italic)
+        font_style_row.addStretch()
+        self.font_file = FileField("File font riêng ghi đè danh sách font", "Fonts (*.ttf *.otf *.ttc);;Tất cả file (*.*)", optional=True)
         self.text_color = QLineEdit("#FFFFFF")
         self.text_opacity = QSlider(Qt.Orientation.Horizontal)
         self.text_opacity.setRange(0, 100)
@@ -203,8 +223,10 @@ class VisualCreatorPage(QWidget):
         self.stroke_width.setValue(2)
         self.text_shadow = QCheckBox("Bật")
         self.text_shadow.setChecked(True)
+        text_form.addRow("Font của text đang chọn", self.font_family)
+        text_form.addRow("Cỡ chữ text đang chọn", self.selected_font_size)
+        text_form.addRow("Kiểu chữ", font_style_row)
         text_form.addRow(self.font_file)
-        text_form.addRow("Cỡ chữ cơ sở", self.font_size)
         text_form.addRow("Màu chữ", self.text_color)
         text_form.addRow("Độ mờ", self.text_opacity)
         text_form.addRow("Độ dày viền", self.stroke_width)
@@ -332,6 +354,8 @@ class VisualCreatorPage(QWidget):
         output_layout = QVBoxLayout(output_group)
         self.output_folder = FileField("Thư mục lưu", directory=True)
         self.output_folder.setText(self.settings.last_output_folder)
+        self.background_folder = FileField("Thư mục background để render hàng loạt", directory=True, optional=True)
+        self.batch_recursive = QCheckBox("Lấy cả ảnh/video trong thư mục con")
         self.output_name = QLineEdit()
         self.output_name.setPlaceholderText("visual_YYYYMMDD_HHMMSS.mp4")
         config_row = QHBoxLayout()
@@ -351,11 +375,21 @@ class VisualCreatorPage(QWidget):
         render = QPushButton("Render video 1 phút")
         render.setObjectName("primary")
         render.clicked.connect(self.start_render)
+        render_folder = QPushButton("Render toàn bộ background trong thư mục")
+        render_folder.setObjectName("primary")
+        render_folder.clicked.connect(self.start_batch_render)
         output_layout.addWidget(self.output_folder)
         output_layout.addWidget(QLabel("Tên file đầu ra tùy chọn"))
         output_layout.addWidget(self.output_name)
         output_layout.addLayout(config_row)
         output_layout.addWidget(render)
+        output_layout.addWidget(self.background_folder)
+        output_layout.addWidget(self.batch_recursive)
+        batch_note = QLabel("Bấm một lần để xếp hàng toàn bộ background. Mỗi file tạo một video riêng và giữ nguyên text, logo, hiệu ứng, font cùng bố cục hiện tại.")
+        batch_note.setWordWrap(True)
+        batch_note.setObjectName("muted")
+        output_layout.addWidget(batch_note)
+        output_layout.addWidget(render_folder)
         self.form.addWidget(output_group)
         self.form.addStretch()
 
@@ -376,10 +410,15 @@ class VisualCreatorPage(QWidget):
         self.color.changed.connect(self._preview_effects)
         self.effects.changed.connect(self._preview_effects)
         self.preview.element_selected.connect(self._select_element_from_preview)
+        self.preview.element_activated.connect(self._activate_element_from_preview)
         self.preview.layout_changed.connect(self._layout_changed_from_preview)
-        for widget in (self.element_lock, self.element_visible, self.element_anchor, self.element_x, self.element_y, self.element_width, self.element_height, self.element_rotation, self.element_opacity, self.element_z):
+        for widget in (self.element_lock, self.element_visible, self.element_anchor, self.element_blend, self.element_x, self.element_y, self.element_width, self.element_height, self.element_rotation, self.element_opacity, self.element_z):
             signal = widget.currentTextChanged if isinstance(widget, QComboBox) else widget.toggled if isinstance(widget, QCheckBox) else widget.valueChanged
             signal.connect(self._write_element_controls)
+        self.font_family.currentFontChanged.connect(self._write_text_style_controls)
+        self.selected_font_size.valueChanged.connect(self._write_text_style_controls)
+        self.font_bold.toggled.connect(self._write_text_style_controls)
+        self.font_italic.toggled.connect(self._write_text_style_controls)
         self.guides.toggled.connect(lambda value: self._set_preview_option("show_guides", value))
         self.snap_center.toggled.connect(lambda value: self._set_preview_option("snap_center", value))
         self.snap_margin.toggled.connect(lambda value: self._set_preview_option("snap_safe_margin", value))
@@ -492,6 +531,29 @@ class VisualCreatorPage(QWidget):
             self._updating_element_controls = False
         self._load_element_controls()
 
+    def _activate_element_from_preview(self, element_id: str) -> None:
+        kind = element_id.split("_copy_", 1)[0]
+        file_fields = {
+            "logo": self.logo,
+            "artwork": self.artwork,
+            "platform_icons": self.platform_icons,
+            "waveform": self.waveform_media,
+        }
+        text_fields = {
+            "title": self.title,
+            "subtitle": self.subtitle,
+            "artist": self.artist,
+            "custom_text": self.custom_text,
+            "playlist": self.playlist,
+        }
+        if kind in file_fields:
+            file_fields[kind].browse()
+            return
+        widget = text_fields.get(kind)
+        if widget:
+            self.scroll.ensureWidgetVisible(widget, 30, 80)
+            widget.setFocus()
+
     def _load_element_controls(self) -> None:
         element_id = self.element_choice.currentData()
         layout = self.elements.get(element_id)
@@ -508,7 +570,40 @@ class VisualCreatorPage(QWidget):
         self.element_rotation.setValue(layout.rotation)
         self.element_opacity.setValue(round(layout.opacity * 100))
         self.element_z.setValue(layout.z_order)
+        _set_combo_value(self.element_blend, layout.blend_mode)
+        image_element = element_id.split("_copy_", 1)[0] in {"artwork", "logo", "platform_icons", "waveform"}
+        self.element_blend.setEnabled(image_element)
+        self._load_text_style_controls(element_id)
         self._updating_element_controls = False
+
+    def _load_text_style_controls(self, element_id: str) -> None:
+        kind = element_id.split("_copy_", 1)[0]
+        style = self.text_styles.get(kind)
+        enabled = style is not None
+        for widget in (self.font_family, self.selected_font_size, self.font_bold, self.font_italic):
+            widget.setEnabled(enabled)
+        if not style:
+            return
+        self.font_family.setCurrentFont(QFont(style.font_family))
+        self.selected_font_size.setValue(style.font_size)
+        self.font_bold.setChecked(style.bold)
+        self.font_italic.setChecked(style.italic)
+
+    def _write_text_style_controls(self, *_args) -> None:
+        if self._updating_element_controls:
+            return
+        element_id = self.element_choice.currentData()
+        kind = str(element_id or "").split("_copy_", 1)[0]
+        if kind not in self.text_styles:
+            return
+        self.text_styles[kind] = TextStyle(
+            font_family=self.font_family.currentFont().family(),
+            font_size=self.selected_font_size.value(),
+            bold=self.font_bold.isChecked(),
+            italic=self.font_italic.isChecked(),
+        ).normalized()
+        self.preview.text_styles = self.text_styles
+        self.preview.update()
 
     def _write_element_controls(self, *_args) -> None:
         if self._updating_element_controls:
@@ -525,6 +620,7 @@ class VisualCreatorPage(QWidget):
         layout.rotation = self.element_rotation.value()
         layout.opacity = self.element_opacity.value() / 100
         layout.z_order = self.element_z.value()
+        layout.blend_mode = str(_combo_value(self.element_blend)) if self.element_blend.isEnabled() else "normal"
         layout.locked = self.element_lock.isChecked()
         layout.visible = self.element_visible.isChecked()
         layout.normalized()
@@ -538,11 +634,13 @@ class VisualCreatorPage(QWidget):
     def collect(self) -> VisualProject:
         return VisualProject(
             title=self.title.text(), subtitle=self.subtitle.text(), artist=self.artist.text(), custom_text=self.custom_text.text(), playlist=self.playlist.toPlainText(),
-            font_file=self.font_file.text(), font_size=self.font_size.value(), text_color=self.text_color.text(),
+            font_file=self.font_file.text(), font_size=0,
+            text_styles={name: TextStyle(**asdict(style)) for name, style in self.text_styles.items()}, text_color=self.text_color.text(),
             text_opacity=self.text_opacity.value(), stroke_width=self.stroke_width.value(), text_shadow=self.text_shadow.isChecked(),
             background=self.background.text(), logo=self.logo.text(), artwork=self.artwork.text(), platform_icons=self.platform_icons.text(), audio=self.audio.text(),
             waveform_media=self.waveform_media.text(), waveform_remove_white=self.waveform_remove_white.isChecked(),
-            output_folder=self.output_folder.text(), output_name=self.output_name.text(), resolution=self.resolution.currentText(),
+            output_folder=self.output_folder.text(), background_folder=self.background_folder.text(),
+            batch_recursive=self.batch_recursive.isChecked(), output_name=self.output_name.text(), resolution=self.resolution.currentText(),
             fps=self.fps.value(), encoder=self.encoder.currentText(), animation=_combo_value(self.animation),
             artwork_motion=_combo_value(self.artwork_motion), waveform=_combo_value(self.waveform),
             ai_prompt=self.ai_prompt.toPlainText(), ai_model=_combo_value(self.ai_model),
@@ -557,9 +655,11 @@ class VisualCreatorPage(QWidget):
         for widget, value in ((self.title, project.title), (self.subtitle, project.subtitle), (self.artist, project.artist), (self.custom_text, project.custom_text)):
             widget.setText(value)
         self.playlist.setPlainText(project.playlist)
-        for widget, value in ((self.font_file, project.font_file), (self.background, project.background), (self.logo, project.logo), (self.artwork, project.artwork), (self.platform_icons, project.platform_icons), (self.waveform_media, project.waveform_media), (self.audio, project.audio), (self.output_folder, project.output_folder), (self.color.lut, project.lut)):
+        for widget, value in ((self.font_file, project.font_file), (self.background, project.background), (self.logo, project.logo), (self.artwork, project.artwork), (self.platform_icons, project.platform_icons), (self.waveform_media, project.waveform_media), (self.audio, project.audio), (self.output_folder, project.output_folder), (self.background_folder, project.background_folder), (self.color.lut, project.lut)):
             widget.setText(value)
-        self.font_size.setValue(project.font_size)
+        self.batch_recursive.setChecked(project.batch_recursive)
+        self.text_styles = {name: TextStyle(**asdict(style)) for name, style in project.text_styles.items()}
+        self.preview.text_styles = self.text_styles
         self.text_color.setText(project.text_color)
         self.text_opacity.setValue(project.text_opacity)
         self.stroke_width.setValue(project.stroke_width)
@@ -656,6 +756,10 @@ class VisualCreatorPage(QWidget):
 
     def start_render(self) -> None:
         try:
+            if self.worker.running:
+                raise RuntimeError("Một render khác đang chạy.")
+            self._batch_mode = False
+            self._batch_queue.clear()
             project = self.collect()
             job = build_visual_job(project, self.settings)
             self.settings.last_output_folder = project.output_folder
@@ -666,13 +770,105 @@ class VisualCreatorPage(QWidget):
         except Exception as exc:
             show_error(self, "Không thể bắt đầu render", exc)
 
+    def start_batch_render(self) -> None:
+        try:
+            if self.worker.running:
+                raise RuntimeError("Một render khác đang chạy.")
+            folder = Path(self.background_folder.text())
+            if not folder.is_dir():
+                raise ValueError("Hãy chọn thư mục chứa background cần render hàng loạt.")
+            backgrounds = background_files(str(folder), self.batch_recursive.isChecked())
+            if not backgrounds:
+                raise ValueError("Thư mục không có ảnh hoặc video background được hỗ trợ.")
+            template = self.collect()
+            if not template.output_folder:
+                raise ValueError("Hãy chọn thư mục lưu video đầu ra.")
+            self._batch_template = template
+            self._batch_queue = backgrounds
+            self._batch_total = len(backgrounds)
+            self._batch_completed = []
+            self._batch_failures = []
+            self._batch_current = ""
+            self._batch_mode = True
+            self.settings.last_output_folder = template.output_folder
+            self.settings.encoder = template.encoder
+            self.settings_changed.emit()
+            self._start_next_batch()
+        except Exception as exc:
+            show_error(self, "Không thể render hàng loạt", exc)
+
+    def _start_next_batch(self) -> None:
+        while self._batch_mode and self._batch_queue:
+            source = self._batch_queue.pop(0)
+            self._batch_current = source
+            project = VisualProject.from_dict(self._batch_template.to_dict() if self._batch_template else {})
+            project.background = source
+            project.output_name = f"{Path(source).stem}_visual.mp4"
+            current = self._batch_total - len(self._batch_queue)
+            try:
+                job = build_visual_job(project, self.settings)
+                self.status.begin()
+                self.status.info.setText(f"Đang render {current}/{self._batch_total}: {Path(source).name}")
+                self.worker.start(job)
+                return
+            except Exception as exc:
+                self._batch_failures.append(f"{Path(source).name}: {exc}")
+        if self._batch_mode:
+            self._finish_batch()
+
+    def cancel_render(self) -> None:
+        self._batch_queue.clear()
+        self._batch_mode = False
+        if self.worker.running:
+            self.worker.cancel()
+        else:
+            self.status.stopped("Đã hủy render.")
+
     def _finished(self, output: str, _log: str) -> None:
+        if self._batch_mode:
+            self._batch_completed.append(output)
+            if self._batch_queue:
+                QTimer.singleShot(0, self._start_next_batch)
+            else:
+                self._finish_batch(output)
+            return
         self.status.success(output)
         QMessageBox.information(self, "Render hoàn tất", f"Visual 60 giây đã được tạo:\n{output}")
 
     def _failed(self, message: str, log_path: str) -> None:
+        if self._batch_mode:
+            detail = f"{Path(self._batch_current).name}: {message}"
+            if log_path:
+                detail += f" (log: {log_path})"
+            self._batch_failures.append(detail)
+            if self._batch_queue:
+                QTimer.singleShot(0, self._start_next_batch)
+            else:
+                self._finish_batch()
+            return
         self.status.stopped("Render thất bại")
         show_error(self, "Render thất bại", message, log_path)
+
+    def _canceled(self) -> None:
+        self._batch_queue.clear()
+        self._batch_mode = False
+        self.status.stopped("Đã hủy render.")
+
+    def _finish_batch(self, last_output: str = "") -> None:
+        self._batch_mode = False
+        success_count = len(self._batch_completed)
+        failure_count = len(self._batch_failures)
+        if last_output or self._batch_completed:
+            self.status.success(last_output or self._batch_completed[-1])
+        else:
+            self.status.stopped("Không có video nào render thành công.")
+        message = f"Đã hoàn tất hàng đợi: {success_count}/{self._batch_total} video thành công."
+        if failure_count:
+            preview = "\n".join(self._batch_failures[:8])
+            if failure_count > 8:
+                preview += f"\n... và {failure_count - 8} lỗi khác"
+            message += f"\n\nCó {failure_count} file lỗi:\n{preview}"
+        QMessageBox.information(self, "Render hàng loạt hoàn tất", message)
 
 
 def _normalized_spin(minimum: float = 0.0) -> QDoubleSpinBox:

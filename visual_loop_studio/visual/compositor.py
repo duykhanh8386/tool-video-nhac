@@ -4,12 +4,13 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from models.visual_project import ElementLayout, VisualProject, default_element_layouts
+from models.visual_project import ElementLayout, TextStyle, VisualProject, default_element_layouts, default_text_styles
 from utils.media import is_still_image
 from utils.paths import CACHE_DIR, ensure_app_dirs, ffmpeg_filter_path
 from visual.animation import background_filter
 from visual.effects import ffmpeg_effect_filters
 from visual.filters import ffmpeg_color_filters, ffmpeg_manual_filters
+from visual.fonts import windows_font_file
 from visual.layout import to_top_left_rect
 from visual.lut import lut_filter
 from visual.waveform import waveform_filter
@@ -39,14 +40,18 @@ def _text_file(value: str) -> str:
     return ffmpeg_filter_path(str(path))
 
 
-def _font_option(custom_font: str = "") -> str:
-    candidates = ([Path(custom_font)] if custom_font else []) + [
+def _font_option(custom_font: str = "", family: str = "Segoe UI", bold: bool = False, italic: bool = False) -> str:
+    selected = windows_font_file(family, bold, italic)
+    candidates = ([Path(custom_font)] if custom_font else []) + ([Path(selected)] if selected else []) + [
         Path("C:/Windows/Fonts/segoeui.ttf"),
         Path("C:/Windows/Fonts/arial.ttf"),
         Path("C:/Windows/Fonts/calibri.ttf"),
     ]
     font = next((item for item in candidates if item.is_file()), None)
-    return f"fontfile='{ffmpeg_filter_path(str(font))}':" if font else ""
+    if font:
+        return f"fontfile='{ffmpeg_filter_path(str(font))}':"
+    escaped_family = family.replace("\\", r"\\").replace("'", r"\'").replace(":", r"\:")
+    return f"font='{escaped_family}':" if escaped_family else ""
 
 
 def _kind(element_id: str) -> str:
@@ -79,10 +84,17 @@ def _element_text(project: VisualProject, kind: str) -> str:
     }.get(kind, "")
 
 
-def _font_size(project: VisualProject, kind: str, canvas_width: int, canvas_height: int) -> int:
-    base = project.font_size or max(20, round(canvas_width * .115))
+def _text_style(project: VisualProject, kind: str) -> TextStyle:
+    style = project.text_styles.get(kind) if project.text_styles else None
+    return style if isinstance(style, TextStyle) else default_text_styles().get(kind, TextStyle())
+
+
+def _font_size(project: VisualProject, kind: str, output_height: int, item_height: int) -> int:
     ratios = {"title": 1.0, "subtitle": .60, "artist": .52, "custom_text": .48, "playlist": .38}
-    return max(12, min(round(canvas_height * .72), round(base * ratios.get(kind, .5))))
+    style = _text_style(project, kind)
+    logical_size = round(project.font_size * ratios.get(kind, .5)) if project.font_size else style.font_size
+    scaled_size = round(logical_size * output_height / 1080)
+    return max(12, min(round(item_height * .88), scaled_size))
 
 
 def build_visual_graph(project: VisualProject, width: int, height: int) -> VisualCommand:
@@ -153,7 +165,8 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
             text = _element_text(project, kind)
             if not text:
                 continue
-            font_size = _font_size(project, kind, item_width, item_height)
+            style = _text_style(project, kind)
+            font_size = _font_size(project, kind, height, item_height)
             color = project.text_color.strip().lstrip("#") or "FFFFFF"
             opacity = max(0, min(100, project.text_opacity)) / 100 * layout.opacity
             border = max(0, project.stroke_width)
@@ -162,7 +175,7 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
             text_x = "(w-text_w)/2" if align == "center" else "4"
             filters.append(
                 f"color=c=black@0.0:s={item_width}x{item_height}:r={project.fps}:d=60,format=rgba,"
-                f"drawtext={_font_option(project.font_file)}textfile='{_text_file(text)}':reload=0:x={text_x}:y=4:"
+                f"drawtext={_font_option(project.font_file, style.font_family, style.bold, style.italic)}textfile='{_text_file(text)}':reload=0:x={text_x}:y=4:"
                 f"fontsize={font_size}:fontcolor=0x{color}@{opacity:.4f}:borderw={border}:"
                 f"bordercolor=black@.7:line_spacing={max(2, font_size // 4)}{shadow}"
                 f"{_rotate_filter(layout)}[{source_label}]"
@@ -181,7 +194,18 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
         if _kind(element_id) == "artwork" and project.artwork_motion.upper() in {"FLOAT", "BREATH", "BEAT_PULSE"}:
             y_expression = f"{y}+{max(2, round(height * .0075))}*sin(2*PI*t/5)"
         next_label = f"layer{serial}"
-        filters.append(f"[{current}][{source_label}]overlay=x='{x}':y='{y_expression}':eval=frame:format=auto[{next_label}]")
+        kind = _kind(element_id)
+        if layout.blend_mode == "lighten" and kind in {"artwork", "logo", "platform_icons", "waveform"}:
+            dark_label = f"dark{serial}"
+            positioned_label = f"positioned{serial}"
+            filters.append(f"color=c=black:s={width}x{height}:r={project.fps}:d=60,format=rgba[{dark_label}]")
+            filters.append(
+                f"[{dark_label}][{source_label}]overlay=x='{x}':y='{y_expression}':"
+                f"eval=frame:format=auto[{positioned_label}]"
+            )
+            filters.append(f"[{current}][{positioned_label}]blend=all_mode=lighten:shortest=1[{next_label}]")
+        else:
+            filters.append(f"[{current}][{source_label}]overlay=x='{x}':y='{y_expression}':eval=frame:format=auto[{next_label}]")
         current = next_label
 
     post = ffmpeg_effect_filters(project.effects) + ffmpeg_color_filters(project.color_filter) + ffmpeg_manual_filters(project.manual_color) + lut_filter(project.lut)

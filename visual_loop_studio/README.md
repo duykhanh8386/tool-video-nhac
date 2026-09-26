@@ -47,13 +47,17 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 - Template chỉ là vùng ưu tiên. Engine vẫn tránh important region, kiểm tra va chạm và safe margin theo từng background.
 - Mọi element dùng tọa độ chuẩn hóa `x/y/width/height`, cùng `anchor`, `rotation`, `opacity`, `z-order`, `locked`, `visible`.
 - Kéo trực tiếp để di chuyển; kéo handle góc phải-dưới để resize; `Ctrl + mouse wheel` để rotate.
+- Click không kéo vào Logo, Artwork, Icon nền tảng hoặc Sóng để mở ngay hộp chọn file tương ứng.
 - Snap theo canvas center, safe margin, grid hoặc element khác; có alignment guides.
 - `AUTO COMPOSE`, `TRY ANOTHER LAYOUT`, `RESET`, lock/hide từng element, duplicate và căn giữa.
 - Hỗ trợ tiêu đề, phụ đề, nghệ sĩ, nội dung thêm, playlist nhiều dòng, logo, artwork, biểu tượng nền tảng và file sóng.
+- Bộ chọn font hệ thống kiểu Word, cỡ chữ/đậm/nghiêng riêng cho từng loại text; preview và FFmpeg dùng cùng thang cỡ chữ 1080p để tránh chữ bị nhỏ khi render.
+- Mỗi element ảnh hỗ trợ hòa trộn `Lighten` bên cạnh chế độ bình thường.
 - Camera nền mặc định đứng yên. Có thể dùng ảnh nguồn + prompt để tạo video image-to-video bằng Veo 3.1; ảnh nguồn được dùng làm cả khung đầu và cuối nhằm ưu tiên vòng lặp liền mạch.
 - File sóng PNG/GIF/MOV/MP4 chạy lặp theo thời gian riêng, không phản ứng theo âm lượng nhạc; có tùy chọn xóa nền trắng.
 - Preview nhẹ 16:9 cho image/video background, artwork, logo, text, waveform, color preset và nhiều full-frame effect.
 - Render visual đúng 60 giây ở 1080p/4K, 24–60 fps.
+- Chọn một thư mục background để xếp hàng và render hàng chục visual trong một lần bấm; tên output được tạo theo tên từng background.
 - Effect stack có add/remove/reorder/enable/intensity; mặc định rỗng.
 - Color filter và `.cube` LUT; mặc định `NONE`.
 - Dò media bằng FFprobe theo stream thực, không chỉ dựa vào đuôi file.

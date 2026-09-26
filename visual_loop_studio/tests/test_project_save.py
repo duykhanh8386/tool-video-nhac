@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from models.loop_project import LoopProject
-from models.visual_project import EffectItem, VisualProject
+from models.visual_project import EffectItem, TextStyle, VisualProject
 from utils.paths import unique_output
 
 
@@ -14,6 +14,10 @@ class ProjectModelTests(unittest.TestCase):
         original = VisualProject(title="Healing", effects=[EffectItem("SNOW", .4)])
         original.elements["logo"].locked = True
         original.elements["logo"].x = .82
+        original.elements["logo"].blend_mode = "lighten"
+        original.text_styles["title"] = TextStyle("Arial", 112, True, True)
+        original.background_folder = "C:/backgrounds"
+        original.batch_recursive = True
         restored = VisualProject.from_dict(original.to_dict())
         self.assertEqual(restored, original)
 

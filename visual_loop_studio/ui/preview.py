@@ -9,7 +9,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from models.visual_project import ElementLayout, default_element_layouts
+from models.visual_project import ElementLayout, TextStyle, default_element_layouts, default_text_styles
 from utils.media import is_still_image
 from visual.layout import to_top_left_rect, update_from_top_left
 from visual.particles import particle_positions
@@ -17,6 +17,7 @@ from visual.particles import particle_positions
 
 class CompositionPreview(QWidget):
     element_selected = Signal(str)
+    element_activated = Signal(str)
     layout_changed = Signal()
 
     def __init__(self, parent=None):
@@ -37,6 +38,7 @@ class CompositionPreview(QWidget):
         self.custom_text = ""
         self.playlist = ""
         self.text_color = "#FFFFFF"
+        self.text_styles: dict[str, TextStyle] = default_text_styles()
         self.waveform = "Smooth sine waveform"
         self.waveform_media = ""
         self.effects: list[str] = []
@@ -58,6 +60,8 @@ class CompositionPreview(QWidget):
         self._action = ""
         self._drag_start = QPointF()
         self._start_rect = (0.0, 0.0, 0.0, 0.0)
+        self._press_element = ""
+        self._drag_moved = False
         self.timer = QTimer(self)
         self.timer.setInterval(33)
         self.timer.timeout.connect(self._tick)
@@ -192,6 +196,8 @@ class CompositionPreview(QWidget):
         painter.rotate(layout.rotation)
         local = QRectF(-item_rect.width() / 2, -item_rect.height() / 2, item_rect.width(), item_rect.height())
         kind = element_id.split("_copy_", 1)[0]
+        if layout.blend_mode == "lighten" and kind in {"artwork", "logo", "platform_icons", "waveform"}:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Lighten)
         if kind in {"artwork", "logo", "platform_icons"}:
             path = getattr(self, kind, "")
             pixmap = self._images.get(path)
@@ -218,9 +224,12 @@ class CompositionPreview(QWidget):
         }.get(kind, "")
         if not text:
             return
-        ratio = {"title": .34, "subtitle": .40, "artist": .42, "custom_text": .30, "playlist": .12}.get(kind, .25)
-        size = max(9, min(54, round(rect.height() * ratio)))
-        font = QFont("Segoe UI", size, QFont.Weight.Bold if kind == "title" else QFont.Weight.Normal)
+        style = self.text_styles.get(kind) or default_text_styles().get(kind, TextStyle())
+        size = max(6, min(round(rect.height() * .88), round(style.font_size * self._canvas.height() / 1080)))
+        font = QFont(style.font_family or "Segoe UI")
+        font.setPixelSize(size)
+        font.setBold(style.bold)
+        font.setItalic(style.italic)
         painter.setFont(font)
         color = QColor(self.text_color)
         if not color.isValid():
@@ -315,6 +324,8 @@ class CompositionPreview(QWidget):
         if not selected:
             return
         self.select_element(selected)
+        self._press_element = selected
+        self._drag_moved = False
         layout = self.elements[selected]
         if layout.locked:
             return
@@ -328,6 +339,8 @@ class CompositionPreview(QWidget):
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if not self._action or self.selected_element not in self.elements:
             return
+        if (event.position() - self._drag_start).manhattanLength() > 4:
+            self._drag_moved = True
         dx = (event.position().x() - self._drag_start.x()) / max(1, self._canvas.width())
         dy = (event.position().y() - self._drag_start.y()) / max(1, self._canvas.height())
         x, y, width, height = self._start_rect
@@ -341,8 +354,13 @@ class CompositionPreview(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, _event: QMouseEvent) -> None:
+        activated = self._press_element if self._press_element and not self._drag_moved else ""
         self._action = ""
+        self._press_element = ""
+        self._drag_moved = False
         self.unsetCursor()
+        if activated:
+            self.element_activated.emit(activated)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         layout = self.elements.get(self.selected_element)

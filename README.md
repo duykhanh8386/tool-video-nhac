@@ -22,6 +22,14 @@ Bản EXE đã đóng gói Python, Qt, FFmpeg và FFprobe; không cần cài Pyt
 - File sóng dạng PNG/GIF/MOV/MP4 chạy lặp độc lập, không co giãn theo âm lượng nhạc; có tùy chọn xóa nền trắng.
 - Veo tạo video 24 fps nên ứng dụng tự chuyển FPS project về 24 sau khi tạo để giữ nhịp khung hình mượt.
 
+## Chỉnh element và render hàng loạt
+
+- Click vào Logo, Ảnh bìa, Icon nền tảng hoặc Sóng trên preview để mở ngay hộp chọn file; kéo chuột vẫn dùng để di chuyển và kéo góc để đổi kích thước.
+- Mỗi thành phần ảnh có chế độ hòa trộn `Bình thường` hoặc `Lighten` trong phần **Bố cục thông minh**.
+- Mỗi loại text có font, cỡ chữ, đậm và nghiêng riêng. Danh sách font lấy trực tiếp từ font đã cài trên Windows giống bộ chọn font trong Word.
+- Cỡ chữ dùng chung một thang thiết kế 1080p nên preview, video 1080p và video 4K giữ đúng tỷ lệ.
+- Có thể chọn **Thư mục background để render hàng loạt** rồi bấm một lần để xếp hàng toàn bộ ảnh/video trong thư mục; mỗi background tạo một video riêng với cùng thiết kế hiện tại.
+
 Mỗi lần có commit mới được push lên nhánh `main`, GitHub Actions sẽ:
 
 1. Chạy toàn bộ kiểm thử.

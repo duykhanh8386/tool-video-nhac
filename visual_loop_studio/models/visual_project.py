@@ -12,6 +12,32 @@ class EffectItem:
 
 
 @dataclass
+class TextStyle:
+    font_family: str = "Segoe UI"
+    font_size: int = 48
+    bold: bool = False
+    italic: bool = False
+
+    def normalized(self) -> "TextStyle":
+        self.font_family = str(self.font_family or "Segoe UI")
+        self.font_size = min(300, max(8, int(self.font_size)))
+        self.bold = bool(self.bold)
+        self.italic = bool(self.italic)
+        return self
+
+
+def default_text_styles() -> dict[str, TextStyle]:
+    # Sizes are logical pixels at 1080p and scale with the output resolution.
+    return {
+        "title": TextStyle("Segoe UI", 96, True),
+        "subtitle": TextStyle("Segoe UI", 56),
+        "artist": TextStyle("Segoe UI", 48, True),
+        "custom_text": TextStyle("Segoe UI", 44),
+        "playlist": TextStyle("Segoe UI", 34),
+    }
+
+
+@dataclass
 class ElementLayout:
     x: float
     y: float
@@ -23,6 +49,7 @@ class ElementLayout:
     z_order: int = 30
     locked: bool = False
     visible: bool = True
+    blend_mode: str = "normal"
 
     def normalized(self) -> "ElementLayout":
         self.width = min(0.95, max(0.03, float(self.width)))
@@ -31,6 +58,7 @@ class ElementLayout:
         self.y = min(0.98, max(0.02, float(self.y)))
         self.opacity = min(1.0, max(0.0, float(self.opacity)))
         self.rotation = float(self.rotation) % 360
+        self.blend_mode = "lighten" if str(self.blend_mode).lower() == "lighten" else "normal"
         return self
 
 
@@ -57,6 +85,7 @@ class VisualProject:
     playlist: str = ""
     font_file: str = ""
     font_size: int = 0
+    text_styles: dict[str, TextStyle] = field(default_factory=default_text_styles)
     text_position: str = "Top Left"
     text_color: str = "#FFFFFF"
     text_opacity: int = 100
@@ -70,6 +99,8 @@ class VisualProject:
     waveform_media: str = ""
     waveform_remove_white: bool = True
     output_folder: str = ""
+    background_folder: str = ""
+    batch_recursive: bool = False
     output_name: str = ""
     resolution: str = "1920x1080"
     fps: int = 30
@@ -102,6 +133,23 @@ class VisualProject:
     def from_dict(cls, value: dict[str, Any]) -> "VisualProject":
         data = dict(value or {})
         data["effects"] = [EffectItem(**item) for item in data.get("effects", [])]
+        text_defaults = default_text_styles()
+        loaded_styles: dict[str, TextStyle] = {}
+        for name, item in (data.get("text_styles") or {}).items():
+            if isinstance(item, TextStyle):
+                loaded_styles[name] = item.normalized()
+            elif isinstance(item, dict):
+                base = asdict(text_defaults.get(name, TextStyle()))
+                base.update(item)
+                allowed_style = TextStyle.__dataclass_fields__.keys()
+                loaded_styles[name] = TextStyle(**{k: v for k, v in base.items() if k in allowed_style}).normalized()
+        text_defaults.update(loaded_styles)
+        if not data.get("text_styles") and int(data.get("font_size") or 0) > 0:
+            base_size = int(data["font_size"])
+            ratios = {"title": 1.0, "subtitle": .60, "artist": .52, "custom_text": .48, "playlist": .38}
+            for name, ratio in ratios.items():
+                text_defaults[name].font_size = max(8, round(base_size * ratio))
+        data["text_styles"] = text_defaults
         defaults = default_element_layouts()
         loaded: dict[str, ElementLayout] = {}
         for name, item in (data.get("elements") or {}).items():
