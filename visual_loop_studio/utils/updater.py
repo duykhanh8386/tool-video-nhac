@@ -109,33 +109,104 @@ def can_self_update() -> bool:
     return bool(getattr(sys, "frozen", False)) and Path(sys.executable).name.lower().endswith(".exe")
 
 
-def schedule_self_update(downloaded_exe: str | Path) -> Path:
+def build_self_update_script() -> str:
+    return r'''param(
+    [Parameter(Mandatory=$true)][string]$Old,
+    [Parameter(Mandatory=$true)][string]$New,
+    [Parameter(Mandatory=$true)][int]$AppPid,
+    [Parameter(Mandatory=$true)][string]$TargetVersion,
+    [Parameter(Mandatory=$true)][string]$LogPath
+)
+
+$ErrorActionPreference = "Stop"
+
+function Write-UpdateLog([string]$Message) {
+    $line = "{0:u} {1}" -f (Get-Date), $Message
+    Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+}
+
+try {
+    Write-UpdateLog "Updater started. Waiting for PID $AppPid."
+    $deadline = (Get-Date).AddSeconds(90)
+    while (Get-Process -Id $AppPid -ErrorAction SilentlyContinue) {
+        if ((Get-Date) -gt $deadline) {
+            throw "Timed out waiting for the old application to exit."
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    Start-Sleep -Milliseconds 750
+
+    if (-not (Test-Path -LiteralPath $New -PathType Leaf)) {
+        throw "The downloaded update no longer exists: $New"
+    }
+    $newHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $New).Hash
+    $installed = $false
+    for ($attempt = 1; $attempt -le 30; $attempt++) {
+        try {
+            Copy-Item -LiteralPath $New -Destination $Old -Force -ErrorAction Stop
+            $oldHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Old).Hash
+            if ($oldHash -ne $newHash) {
+                throw "The installed EXE hash does not match the downloaded update."
+            }
+            $installed = $true
+            break
+        }
+        catch {
+            Write-UpdateLog "Install attempt $attempt failed: $($_.Exception.Message)"
+            Start-Sleep -Seconds 1
+        }
+    }
+
+    if (-not $installed) {
+        throw "Windows did not allow the old EXE to be replaced after 30 attempts."
+    }
+
+    Write-UpdateLog "Update installed successfully: $Old"
+    Start-Process -FilePath $Old -WorkingDirectory (Split-Path -Parent $Old) -ArgumentList "--updated-to=$TargetVersion"
+    Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
+    exit 0
+}
+catch {
+    Write-UpdateLog "Update failed: $($_.Exception.Message)"
+    if (Test-Path -LiteralPath $New -PathType Leaf) {
+        Write-UpdateLog "Launching the verified downloaded EXE as fallback."
+        Start-Process -FilePath $New -WorkingDirectory (Split-Path -Parent $New) -ArgumentList "--updated-to=$TargetVersion", "--update-fallback"
+    }
+    exit 1
+}
+'''
+
+
+def schedule_self_update(downloaded_exe: str | Path, target_version: str = "") -> Path:
     if not can_self_update():
         raise RuntimeError("Self-update chỉ hoạt động trong bản EXE đã đóng gói.")
     current = Path(sys.executable).resolve()
     downloaded = Path(downloaded_exe).resolve()
-    script = Path(tempfile.gettempdir()) / f"visual_loop_studio_update_{os.getpid()}.cmd"
-    content = f"""@echo off
-setlocal
-set "OLD={current}"
-set "NEW={downloaded}"
-set "APP_PID={os.getpid()}"
-:wait_for_exit
-tasklist /FI "PID eq %APP_PID%" 2>NUL | find "%APP_PID%" >NUL
-if not errorlevel 1 (
-  timeout /t 1 /nobreak >NUL
-  goto wait_for_exit
-)
-copy /Y "%NEW%" "%OLD%" >NUL
-if errorlevel 1 (
-  start "" "%NEW%"
-  exit /b 1
-)
-start "" "%OLD%"
-del /Q "%NEW%" >NUL 2>NUL
-(goto) 2>NUL & del /Q "%~f0"
-"""
-    script.write_text(content, encoding="utf-8")
-    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-    subprocess.Popen(["cmd.exe", "/c", str(script)], creationflags=flags, close_fds=True)
+    if not downloaded.is_file():
+        raise ValueError(f"Không tìm thấy EXE cập nhật đã tải: {downloaded}")
+    temp_dir = Path(tempfile.gettempdir())
+    script = temp_dir / f"visual_loop_studio_update_{os.getpid()}.ps1"
+    log_path = temp_dir / "VisualLoopStudio-update.log"
+    # UTF-8 BOM is required for Windows PowerShell 5.1 to parse Unicode paths reliably.
+    script.write_text(build_self_update_script(), encoding="utf-8-sig")
+    powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    executable = str(powershell) if powershell.is_file() else "powershell.exe"
+    flags = (
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        | getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    )
+    subprocess.Popen(
+        [
+            executable, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-WindowStyle", "Hidden", "-File", str(script),
+            "-Old", str(current), "-New", str(downloaded), "-AppPid", str(os.getpid()),
+            "-TargetVersion", target_version or __version__, "-LogPath", str(log_path),
+        ],
+        creationflags=flags,
+        close_fds=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     return script

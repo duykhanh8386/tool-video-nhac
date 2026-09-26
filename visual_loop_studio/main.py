@@ -241,6 +241,20 @@ def main() -> int:
     app.setStyleSheet(STYLE)
     window = MainWindow()
     window.show()
+    updated_to = next((item.split("=", 1)[1] for item in sys.argv if item.startswith("--updated-to=")), "")
+    if updated_to:
+        fallback = "--update-fallback" in sys.argv
+        title = "Cập nhật cần xác nhận" if fallback else "Cập nhật hoàn tất"
+        message = (
+            f"Đã mở Visual Loop Studio v{updated_to} từ file tải tạm, nhưng Windows chưa cho phép "
+            "thay thế EXE cũ. Hãy tải/thay EXE thủ công từ trang Release."
+            if fallback else f"Đã cập nhật thành công lên Visual Loop Studio v{updated_to}."
+        )
+        if fallback:
+            callback = lambda: QMessageBox.warning(window, title, message)
+        else:
+            callback = lambda: QMessageBox.information(window, title, message)
+        QTimer.singleShot(900, callback)
     return app.exec()
 
 

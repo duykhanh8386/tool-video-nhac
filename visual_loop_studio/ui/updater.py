@@ -98,11 +98,17 @@ class UpdateController(QObject):
             self.progress_dialog.close()
             self.progress_dialog = None
         try:
-            schedule_self_update(path)
+            version = str(getattr(self.pending_release, "version", "") or "")
+            schedule_self_update(path, version)
         except Exception as exc:
             QMessageBox.critical(self.parent_window, "Update failed", str(exc))
             return
-        QMessageBox.information(self.parent_window, "Update ready", "Đã tải và xác minh SHA-256. Ứng dụng sẽ khởi động lại với phiên bản mới.")
+        QMessageBox.information(
+            self.parent_window,
+            "Sẵn sàng cập nhật",
+            "Đã tải và xác minh SHA-256. Ứng dụng sẽ đóng, thay EXE và tự mở lại. "
+            "Sau khi mở lại sẽ có thông báo Cập nhật hoàn tất.",
+        )
         QApplication.quit()
 
     def _handle_error(self, message: str, silent: bool) -> None:
