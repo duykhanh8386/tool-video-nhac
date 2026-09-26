@@ -3,10 +3,16 @@ from __future__ import annotations
 import subprocess
 from functools import lru_cache
 
+from utils.process import hidden_process_kwargs
+
 
 def available_encoders(ffmpeg: str = "ffmpeg") -> set[str]:
     try:
-        result = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True, errors="replace", check=False)
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, errors="replace", check=False,
+            **hidden_process_kwargs(),
+        )
     except FileNotFoundError:
         return set()
     return {name for name in ("h264_nvenc", "hevc_nvenc", "libx264") if name in result.stdout}
@@ -32,6 +38,9 @@ def nvenc_usable(ffmpeg: str = "ffmpeg") -> bool:
         "color=black:s=64x64:d=.05", "-c:v", "h264_nvenc", "-f", "null", "-",
     ]
     try:
-        return subprocess.run(command, capture_output=True, timeout=12, check=False).returncode == 0
+        return subprocess.run(
+            command, capture_output=True, timeout=12, check=False,
+            **hidden_process_kwargs(),
+        ).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False

@@ -7,6 +7,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+from utils.process import hidden_process_kwargs
+
 
 @dataclass
 class MediaInfo:
@@ -44,7 +46,10 @@ def probe_media(path: str, ffprobe: str = "ffprobe") -> MediaInfo:
         "-of", "json", str(target),
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+        result = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+            **hidden_process_kwargs(),
+        )
     except FileNotFoundError as exc:
         raise RuntimeError("Không tìm thấy FFprobe. Kiểm tra Settings > FFmpeg/FFprobe.") from exc
     if result.returncode:

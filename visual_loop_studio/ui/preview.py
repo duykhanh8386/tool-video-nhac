@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 from models.visual_project import ElementLayout, TextStyle, default_element_layouts, default_text_styles
 from utils.media import is_still_image
 from visual.layout import to_top_left_rect, update_from_top_left
+from utils.process import hidden_process_kwargs
 from visual.particles import particle_positions
 
 
@@ -423,7 +424,7 @@ def _video_thumbnail(path: str, ffmpeg: str = "ffmpeg") -> QPixmap:
     try:
         result = subprocess.run(
             [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path, "-frames:v", "1", "-vf", "scale=960:540:force_original_aspect_ratio=decrease", "-f", "image2pipe", "-vcodec", "png", "pipe:1"],
-            capture_output=True, timeout=15, check=False,
+            capture_output=True, timeout=15, check=False, **hidden_process_kwargs(),
         )
         pixmap = QPixmap()
         pixmap.loadFromData(result.stdout)

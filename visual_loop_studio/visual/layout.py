@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from models.visual_project import ElementLayout, default_element_layouts
+from utils.process import hidden_process_kwargs
 
 
 PRESETS = ["Healing", "Sleep", "Christmas", "Reggae", "LoFi", "Retro", "Minimal", "Meditation", "Thai Music", "Brazil Music", "Salsa", "Gospel"]
@@ -98,7 +99,10 @@ def analyze_background(path: str, ffmpeg: str = "ffmpeg") -> BackgroundAnalysis:
         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
     ]
     try:
-        result = subprocess.run(command, capture_output=True, timeout=20, check=False)
+        result = subprocess.run(
+            command, capture_output=True, timeout=20, check=False,
+            **hidden_process_kwargs(),
+        )
     except (OSError, subprocess.TimeoutExpired):
         return BackgroundAnalysis(zones=_neutral_zones(), method="fallback")
     expected = width * height * 3

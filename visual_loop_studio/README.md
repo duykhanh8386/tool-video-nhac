@@ -65,6 +65,7 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 - Dò media bằng FFprobe theo stream thực, không chỉ dựa vào đuôi file.
 - Auto NVENC khi GPU hoạt động; fallback libx264.
 - Progress, tốc độ, FPS, ETA, dung lượng output; cancel không khóa GUI.
+- Mọi tiến trình FFmpeg/FFprobe/GPU/updater chạy ẩn, không làm cửa sổ CMD nhấp nháy; output được thu vào giao diện và log render.
 - Audio Mixer sáu track; thời lượng theo main audio.
 - Batch queue hỗ trợ 1–3 job đồng thời, mặc định 1 để ổn định NVENC/RAM.
 - Lưu/mở project `.vls.json`; nhớ settings và output folder.

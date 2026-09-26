@@ -15,6 +15,8 @@ Bản EXE đã đóng gói Python, Qt, FFmpeg và FFprobe; không cần cài Pyt
 
 Ứng dụng tự kiểm tra bản phát hành mới khi khởi động. Bạn cũng có thể bấm **Check for Updates** ở thanh bên hoặc menu **Help**. Bản cập nhật chỉ được cài sau khi SHA-256 khớp với checksum trên GitHub Release.
 
+FFmpeg, FFprobe, kiểm tra GPU và helper cập nhật đều chạy ẩn trong nền. Không có cửa sổ CMD bật/tắt nhấp nháy; output render được gom vào trạng thái trong ứng dụng và file log.
+
 ## Chuyển động AI và file sóng
 
 - Ảnh nền mặc định dùng camera cố định, không còn tự zoom/pan gây rung toàn khung.
