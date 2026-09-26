@@ -96,6 +96,10 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
     input_index = 1
     sources: list[tuple[int, str, str, ElementLayout]] = []
     output_audio_index: int | None = None
+    if project.audio:
+        inputs += ["-stream_loop", "-1", "-i", project.audio]
+        output_audio_index = input_index
+        input_index += 1
 
     visible_elements = sorted(
         ((element_id, layout) for element_id, layout in project.elements.items() if layout.visible and layout.opacity > 0),
@@ -119,18 +123,32 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
         elif kind == "waveform":
             if project.waveform == "NONE":
                 continue
-            audio_index = input_index
-            if project.audio:
-                inputs += ["-stream_loop", "-1", "-i", project.audio]
-                if output_audio_index is None:
-                    output_audio_index = audio_index
+            if project.waveform_media:
+                wave_still = is_still_image(project.waveform_media)
+                if wave_still:
+                    inputs += ["-loop", "1", "-framerate", str(project.fps), "-i", project.waveform_media]
+                else:
+                    inputs += ["-stream_loop", "-1", "-i", project.waveform_media]
+                key_white = ",colorkey=0xFFFFFF:0.18:0.08" if project.waveform_remove_white else ""
+                filters.append(
+                    f"[{input_index}:v]setpts=PTS-STARTPTS,fps={project.fps},"
+                    f"scale={item_width}:{item_height}:force_original_aspect_ratio=decrease,format=rgba{key_white},"
+                    f"pad={item_width}:{item_height}:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+                    f"colorchannelmixer=aa={layout.opacity:.4f}{_rotate_filter(layout)}[{source_label}]"
+                )
+                input_index += 1
+            elif project.waveform not in {"FILE", "NONE"}:
+                audio_index = output_audio_index
+                if audio_index is None:
+                    audio_index = input_index
+                    inputs += ["-f", "lavfi", "-i", "sine=frequency=110:sample_rate=44100"]
+                    input_index += 1
+                filters.append(
+                    f"[{audio_index}:a]{waveform_filter(project.waveform, item_width, item_height)},"
+                    f"colorchannelmixer=aa={layout.opacity:.4f}{_rotate_filter(layout)}[{source_label}]"
+                )
             else:
-                inputs += ["-f", "lavfi", "-i", "sine=frequency=110:sample_rate=44100"]
-            input_index += 1
-            filters.append(
-                f"[{audio_index}:a]{waveform_filter(project.waveform, item_width, item_height)},"
-                f"colorchannelmixer=aa={layout.opacity:.4f}{_rotate_filter(layout)}[{source_label}]"
-            )
+                continue
         elif kind in {"title", "subtitle", "artist", "custom_text", "playlist"}:
             text = _element_text(project, kind)
             if not text:
@@ -169,4 +187,4 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
     post = ffmpeg_effect_filters(project.effects) + ffmpeg_color_filters(project.color_filter) + ffmpeg_manual_filters(project.manual_color) + lut_filter(project.lut)
     post += ["format=yuv420p"]
     filters.append(f"[{current}]{','.join(post)}[vout]")
-    return VisualCommand(inputs, ";".join(filters), "[vout]", f"{output_audio_index}:a" if project.audio and output_audio_index is not None else None)
+    return VisualCommand(inputs, ";".join(filters), "[vout]", f"{output_audio_index}:a" if output_audio_index is not None else None)

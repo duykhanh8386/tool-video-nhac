@@ -62,11 +62,11 @@ class MainWindow(QMainWindow):
         brand.setObjectName("brand")
         side.addWidget(brand)
         self.navigation = QListWidget()
-        self.navigation.addItems(["Home", "Visual Creator — 60s", "Loop Video + Music", "Audio Mixer", "Batch Render"])
+        self.navigation.addItems(["Trang chủ", "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh", "Render hàng loạt"])
         self.navigation.setCurrentRow(0)
         self.navigation.currentRowChanged.connect(self._navigate)
         side.addWidget(self.navigation, 1)
-        update_button = QPushButton("Check for Updates")
+        update_button = QPushButton("Kiểm tra cập nhật")
         update_button.clicked.connect(lambda: self.updater.check(silent=False))
         side.addWidget(update_button)
         version = QLabel(f"Local • FFmpeg • v{__version__}\n{__build_commit__[:10]}")
@@ -89,30 +89,30 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(shell)
 
     def _build_menu(self) -> None:
-        file_menu = self.menuBar().addMenu("File")
+        file_menu = self.menuBar().addMenu("Tệp")
         for text, shortcut, callback in (
-            ("New Project", "Ctrl+N", self.new_project), ("Open Project", "Ctrl+O", self.open_project),
-            ("Save Project", "Ctrl+S", self.save_project), ("Save Project As", "Ctrl+Shift+S", self.save_project_as),
+            ("Project mới", "Ctrl+N", self.new_project), ("Mở project", "Ctrl+O", self.open_project),
+            ("Lưu project", "Ctrl+S", self.save_project), ("Lưu project thành…", "Ctrl+Shift+S", self.save_project_as),
         ):
             action = QAction(text, self)
             action.setShortcut(shortcut)
             action.triggered.connect(callback)
             file_menu.addAction(action)
         file_menu.addSeparator()
-        exit_action = QAction("Exit", self)
+        exit_action = QAction("Thoát", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-        tools = self.menuBar().addMenu("Tools")
-        for index, text in enumerate(("Visual Creator — 60s", "Loop Video + Music", "Audio Mixer", "Batch Render"), start=1):
+        tools = self.menuBar().addMenu("Công cụ")
+        for index, text in enumerate(("Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh", "Render hàng loạt"), start=1):
             action = QAction(text, self)
             action.triggered.connect(lambda _checked=False, index=index: self.navigation.setCurrentRow(index))
             tools.addAction(action)
-        settings_menu = self.menuBar().addMenu("Settings")
-        action = QAction("FFmpeg, GPU, Output, ComfyUI…", self)
+        settings_menu = self.menuBar().addMenu("Cài đặt")
+        action = QAction("FFmpeg, GPU, ComfyUI và Gemini/Veo…", self)
         action.triggered.connect(self.open_settings)
         settings_menu.addAction(action)
-        help_menu = self.menuBar().addMenu("Help")
-        update_action = QAction("Check for Updates", self)
+        help_menu = self.menuBar().addMenu("Trợ giúp")
+        update_action = QAction("Kiểm tra cập nhật", self)
         update_action.triggered.connect(lambda: self.updater.check(silent=False))
         help_menu.addAction(update_action)
 
@@ -180,7 +180,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         workers = (self.visual.worker, self.loop.worker, self.audio.worker)
-        if any(worker.running for worker in workers) or self.batch.running:
+        if any(worker.running for worker in workers) or self.batch.running or self.visual.ai_worker.running:
             answer = QMessageBox.question(self, "Render đang chạy", "Cancel render và thoát ứng dụng?")
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
@@ -188,6 +188,7 @@ class MainWindow(QMainWindow):
             for worker in workers:
                 worker.cancel()
             self.batch.cancel_all()
+            self.visual.ai_worker.cancel()
         self._save_settings()
         event.accept()
 

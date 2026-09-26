@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout
 
 from models.settings_model import AppSettings
 
@@ -8,7 +8,7 @@ from models.settings_model import AppSettings
 class SettingsDialog(QDialog):
     def __init__(self, settings: AppSettings, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Settings")
+        self.setWindowTitle("Cài đặt")
         self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -16,11 +16,19 @@ class SettingsDialog(QDialog):
         self.ffprobe = QLineEdit(settings.ffprobe_path)
         self.comfy_url = QLineEdit(settings.comfyui_url)
         self.comfy_workflow = QLineEdit(settings.comfyui_workflow)
+        self.gemini_key = QLineEdit(settings.gemini_api_key)
+        self.gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.gemini_key.setPlaceholderText("Có thể dùng biến môi trường GEMINI_API_KEY")
         form.addRow("FFmpeg", self.ffmpeg)
         form.addRow("FFprobe", self.ffprobe)
         form.addRow("ComfyUI URL", self.comfy_url)
         form.addRow("ComfyUI workflow", self.comfy_workflow)
+        form.addRow("Gemini API key (Veo)", self.gemini_key)
         layout.addLayout(form)
+        note = QLabel("API key chỉ được lưu trong cấu hình cục bộ trên máy này và không được ghi vào file project/Git.")
+        note.setWordWrap(True)
+        note.setObjectName("muted")
+        layout.addWidget(note)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -31,3 +39,4 @@ class SettingsDialog(QDialog):
         settings.ffprobe_path = self.ffprobe.text().strip() or "ffprobe"
         settings.comfyui_url = self.comfy_url.text().strip()
         settings.comfyui_workflow = self.comfy_workflow.text().strip()
+        settings.gemini_api_key = self.gemini_key.text().strip()

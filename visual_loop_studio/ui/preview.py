@@ -26,6 +26,7 @@ class CompositionPreview(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.background = ""
+        self.background_motion = "STATIC"
         self.ffmpeg_path = "ffmpeg"
         self.artwork = ""
         self.logo = ""
@@ -37,6 +38,7 @@ class CompositionPreview(QWidget):
         self.playlist = ""
         self.text_color = "#FFFFFF"
         self.waveform = "Smooth sine waveform"
+        self.waveform_media = ""
         self.effects: list[str] = []
         self.color_filter = "NONE"
         self.manual_color: dict[str, float] = {}
@@ -165,17 +167,18 @@ class CompositionPreview(QWidget):
         self._paint_selection(painter)
 
     def _paint_background(self, painter: QPainter, rect: QRectF, phase: float) -> None:
-        zoom = 1 + .02 * (1 - math.cos(math.tau * phase))
+        animate_frame = is_still_image(self.background) and self.background_motion.upper() not in {"NONE", "STATIC"}
+        zoom = 1 + .02 * (1 - math.cos(math.tau * phase)) if animate_frame else 1.0
         bg = self._images.get(self.background)
         if bg and not bg.isNull():
             scaled = bg.scaled(round(rect.width() * zoom), round(rect.height() * zoom), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-            x = rect.center().x() - scaled.width() / 2 + math.sin(math.tau * phase) * 4
-            y = rect.center().y() - scaled.height() / 2 + math.sin(math.tau * phase) * 3
+            x = rect.center().x() - scaled.width() / 2 + (math.sin(math.tau * phase) * 4 if animate_frame else 0)
+            y = rect.center().y() - scaled.height() / 2 + (math.sin(math.tau * phase) * 3 if animate_frame else 0)
             painter.drawPixmap(round(x), round(y), scaled)
         else:
             painter.fillRect(rect, QColor("#14213d"))
             painter.setPen(QColor("#64748b"))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Choose a background image or video")
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Hãy chọn ảnh hoặc video nền")
 
     def _paint_element(self, painter: QPainter, canvas: QRectF, element_id: str, layout: ElementLayout) -> None:
         x, y, width, height = to_top_left_rect(layout)
@@ -198,7 +201,12 @@ class CompositionPreview(QWidget):
             else:
                 _placeholder(painter, local, kind.replace("_", " ").title())
         elif kind == "waveform":
-            self._paint_wave(painter, local)
+            pixmap = self._images.get(self.waveform_media)
+            if pixmap and not pixmap.isNull():
+                scaled = pixmap.scaled(round(local.width()), round(local.height()), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                painter.drawPixmap(round(-scaled.width() / 2), round(-scaled.height() / 2), scaled)
+            elif self.waveform != "FILE":
+                self._paint_wave(painter, local)
         else:
             self._paint_text_element(painter, local, kind)
         painter.restore()

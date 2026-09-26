@@ -20,12 +20,12 @@ class ColorFilterPanel(QWidget):
         grid = QGridLayout()
         self.sliders: dict[str, QSlider] = {}
         definitions = (
-            ("brightness", "Brightness", -100, 100, 0), ("contrast", "Contrast", 0, 200, 100),
-            ("saturation", "Saturation", 0, 200, 100), ("temperature", "Temperature", -100, 100, 0),
-            ("tint", "Tint", -100, 100, 0), ("gamma", "Gamma", 10, 300, 100),
-            ("highlights", "Highlights", -100, 100, 0), ("shadows", "Shadows", -100, 100, 0),
-            ("sharpness", "Sharpness", 0, 100, 0), ("vignette", "Vignette", 0, 100, 0),
-            ("bloom", "Bloom", 0, 100, 0),
+            ("brightness", "Độ sáng", -100, 100, 0), ("contrast", "Tương phản", 0, 200, 100),
+            ("saturation", "Bão hòa", 0, 200, 100), ("temperature", "Nhiệt độ màu", -100, 100, 0),
+            ("tint", "Sắc màu", -100, 100, 0), ("gamma", "Gamma", 10, 300, 100),
+            ("highlights", "Vùng sáng", -100, 100, 0), ("shadows", "Vùng tối", -100, 100, 0),
+            ("sharpness", "Độ nét", 0, 100, 0), ("vignette", "Tối góc", 0, 100, 0),
+            ("bloom", "Quầng sáng", 0, 100, 0),
         )
         for index, (key, label, minimum, maximum, default) in enumerate(definitions):
             slider = QSlider(Qt.Orientation.Horizontal)
@@ -40,7 +40,7 @@ class ColorFilterPanel(QWidget):
             grid.addWidget(slider, row, column * 3 + 1)
             grid.addWidget(value_label, row, column * 3 + 2)
             self.sliders[key] = slider
-        self.lut = FileField("Custom .cube LUT", "Cube LUT (*.cube);;All files (*.*)", optional=True)
+        self.lut = FileField("File màu LUT .cube", "Cube LUT (*.cube);;Tất cả file (*.*)", optional=True)
         self.lut.changed.connect(lambda _text: self.changed.emit())
         layout.addWidget(self.preset)
         layout.addLayout(grid)

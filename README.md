@@ -15,6 +15,13 @@ Bản EXE đã đóng gói Python, Qt, FFmpeg và FFprobe; không cần cài Pyt
 
 Ứng dụng tự kiểm tra bản phát hành mới khi khởi động. Bạn cũng có thể bấm **Check for Updates** ở thanh bên hoặc menu **Help**. Bản cập nhật chỉ được cài sau khi SHA-256 khớp với checksum trên GitHub Release.
 
+## Chuyển động AI và file sóng
+
+- Ảnh nền mặc định dùng camera cố định, không còn tự zoom/pan gây rung toàn khung.
+- Có thể nhập prompt và dùng Veo 3.1 để tạo chuyển động tay/chân, người, khói, lửa hoặc ánh sáng từ ảnh nguồn. Cần Gemini API key và tài khoản có quyền dùng Veo.
+- File sóng dạng PNG/GIF/MOV/MP4 chạy lặp độc lập, không co giãn theo âm lượng nhạc; có tùy chọn xóa nền trắng.
+- Veo tạo video 24 fps nên ứng dụng tự chuyển FPS project về 24 sau khi tạo để giữ nhịp khung hình mượt.
+
 Mỗi lần có commit mới được push lên nhánh `main`, GitHub Actions sẽ:
 
 1. Chạy toàn bộ kiểm thử.

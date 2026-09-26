@@ -28,14 +28,14 @@ class FileField(QWidget):
         self.directory = directory
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        title = QLabel(label + (" (optional)" if optional else ""))
+        title = QLabel(label + (" (không bắt buộc)" if optional else ""))
         title.setObjectName("fieldLabel")
         layout.addWidget(title)
         row = QHBoxLayout()
         self.edit = QLineEdit()
         self.edit.setPlaceholderText("Chọn thư mục..." if directory else "Chọn file...")
         self.edit.textChanged.connect(self.changed)
-        browse = QPushButton("Browse")
+        browse = QPushButton("Chọn")
         browse.clicked.connect(self.browse)
         row.addWidget(self.edit, 1)
         row.addWidget(browse)
@@ -71,12 +71,12 @@ class RenderStatus(QWidget):
         self.info = QLabel("Sẵn sàng")
         self.info.setObjectName("muted")
         row = QHBoxLayout()
-        self.cancel = QPushButton("Cancel")
+        self.cancel = QPushButton("Hủy")
         self.cancel.setEnabled(False)
         self.cancel.clicked.connect(self.cancel_requested)
-        self.open_output = QPushButton("Play Output")
+        self.open_output = QPushButton("Mở video")
         self.open_output.setEnabled(False)
-        self.open_folder = QPushButton("Open Folder")
+        self.open_folder = QPushButton("Mở thư mục")
         self.open_folder.setEnabled(False)
         row.addWidget(self.cancel)
         row.addStretch()
@@ -104,7 +104,7 @@ class RenderStatus(QWidget):
         remaining = _clock(remaining_seconds) if remaining_seconds else "--:--:--"
         elapsed = _clock(time.monotonic() - self.started_at) if self.started_at else "00:00:00"
         size = value.total_size / 1024 / 1024
-        self.info.setText(f"{value.percent:5.1f}%  •  time {current}  •  {value.fps:.1f} fps  •  {value.speed:.2f}x  •  elapsed {elapsed}  •  còn {remaining}  •  {size:.1f} MB")
+        self.info.setText(f"{value.percent:5.1f}%  •  thời gian {current}  •  {value.fps:.1f} fps  •  {value.speed:.2f}x  •  đã chạy {elapsed}  •  còn {remaining}  •  {size:.1f} MB")
 
     def success(self, output: str) -> None:
         self.output_path = output

@@ -15,7 +15,7 @@ from ui.common import AUDIO_FILTER, VIDEO_FILTER, show_error
 
 
 class BatchRenderPage(QWidget):
-    COLUMNS = ["Video", "Main Music", "Background Audio", "Output Folder", "Output Name", "Status", "Progress", "ETA"]
+    COLUMNS = ["Video", "Nhạc chính", "Nhạc nền", "Thư mục lưu", "Tên đầu ra", "Trạng thái", "Tiến độ", "Còn lại"]
 
     def __init__(self, settings: AppSettings, parent=None):
         super().__init__(parent)
@@ -25,19 +25,19 @@ class BatchRenderPage(QWidget):
         self.active: dict[RenderWorker, int] = {}
         self.max_concurrent = 1
         root = QVBoxLayout(self)
-        title = QLabel("Batch Render")
+        title = QLabel("Render hàng loạt")
         title.setObjectName("pageTitle")
         root.addWidget(title)
         controls = QHBoxLayout()
-        add = QPushButton("Add Job")
-        remove = QPushButton("Remove Selected")
-        clear = QPushButton("Clear Completed")
+        add = QPushButton("Thêm tác vụ")
+        remove = QPushButton("Xóa mục đã chọn")
+        clear = QPushButton("Xóa mục hoàn tất")
         self.concurrency = QComboBox()
         self.concurrency.addItems(["1", "2", "3"])
         self.concurrency.setToolTip("Mặc định 1 để ổn định NVENC/RAM; chỉ tăng khi GPU đủ tài nguyên.")
-        start = QPushButton("Start Queue")
+        start = QPushButton("Chạy hàng đợi")
         start.setObjectName("primary")
-        stop = QPushButton("Cancel Running")
+        stop = QPushButton("Hủy tác vụ đang chạy")
         add.clicked.connect(self.add_job)
         remove.clicked.connect(self.remove_selected)
         clear.clicked.connect(self.clear_completed)
@@ -47,7 +47,7 @@ class BatchRenderPage(QWidget):
         controls.addWidget(remove)
         controls.addWidget(clear)
         controls.addStretch()
-        controls.addWidget(QLabel("Concurrent jobs"))
+        controls.addWidget(QLabel("Số tác vụ đồng thời"))
         controls.addWidget(self.concurrency)
         controls.addWidget(stop)
         controls.addWidget(start)

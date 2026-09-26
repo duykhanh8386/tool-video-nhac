@@ -19,10 +19,10 @@ class HomePage(QWidget):
         layout.addWidget(subtitle)
         grid = QGridLayout()
         cards = [
-            ("Visual Creator — 60 Seconds", "Background • text • logo • artwork • waveform • effects", 1),
-            ("Loop Video + Music", "Main audio là master clock; hỗ trợ video nhiều giờ", 2),
-            ("Audio Mixer", "Mix main, background, nature, water, rain, white noise", 3),
-            ("Batch Render", "Xếp hàng nhiều tác vụ với progress riêng", 4),
+            ("Tạo Visual — 60 giây", "Ảnh nền • chữ • logo • ảnh bìa • file sóng • hiệu ứng • Veo AI", 1),
+            ("Lặp Video + Nhạc", "Nhạc chính quyết định thời lượng; hỗ trợ video nhiều giờ", 2),
+            ("Trộn âm thanh", "Trộn nhạc chính, nhạc nền, thiên nhiên, nước, mưa và tiếng ồn trắng", 3),
+            ("Render hàng loạt", "Xếp hàng nhiều tác vụ với tiến độ riêng", 4),
         ]
         for index, (name, detail, page) in enumerate(cards):
             button = QPushButton(f"{name}\n{detail}")

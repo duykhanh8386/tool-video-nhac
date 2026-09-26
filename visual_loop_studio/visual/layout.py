@@ -11,9 +11,9 @@ from models.visual_project import ElementLayout, default_element_layouts
 PRESETS = ["Healing", "Sleep", "Christmas", "Reggae", "LoFi", "Retro", "Minimal", "Meditation", "Thai Music", "Brazil Music", "Salsa", "Gospel"]
 
 ELEMENT_LABELS = {
-    "title": "Title", "subtitle": "Subtitle", "artist": "Artist", "custom_text": "Custom text",
-    "playlist": "Playlist", "logo": "Logo", "platform_icons": "Platform icons",
-    "waveform": "Waveform", "artwork": "Artwork",
+    "title": "Tiêu đề", "subtitle": "Tiêu đề phụ", "artist": "Nghệ sĩ", "custom_text": "Nội dung thêm",
+    "playlist": "Danh sách bài hát", "logo": "Logo", "platform_icons": "Biểu tượng nền tảng",
+    "waveform": "File sóng", "artwork": "Ảnh bìa",
 }
 
 TEMPLATE_PREFERENCES: dict[str, dict[str, list[str]]] = {

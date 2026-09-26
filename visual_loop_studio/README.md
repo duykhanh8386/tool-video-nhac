@@ -49,7 +49,9 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 - Kéo trực tiếp để di chuyển; kéo handle góc phải-dưới để resize; `Ctrl + mouse wheel` để rotate.
 - Snap theo canvas center, safe margin, grid hoặc element khác; có alignment guides.
 - `AUTO COMPOSE`, `TRY ANOTHER LAYOUT`, `RESET`, lock/hide từng element, duplicate và căn giữa.
-- Hỗ trợ title, subtitle, artist, custom text, playlist nhiều dòng, logo, artwork, platform icons và waveform.
+- Hỗ trợ tiêu đề, phụ đề, nghệ sĩ, nội dung thêm, playlist nhiều dòng, logo, artwork, biểu tượng nền tảng và file sóng.
+- Camera nền mặc định đứng yên. Có thể dùng ảnh nguồn + prompt để tạo video image-to-video bằng Veo 3.1; ảnh nguồn được dùng làm cả khung đầu và cuối nhằm ưu tiên vòng lặp liền mạch.
+- File sóng PNG/GIF/MOV/MP4 chạy lặp theo thời gian riêng, không phản ứng theo âm lượng nhạc; có tùy chọn xóa nền trắng.
 - Preview nhẹ 16:9 cho image/video background, artwork, logo, text, waveform, color preset và nhiều full-frame effect.
 - Render visual đúng 60 giây ở 1080p/4K, 24–60 fps.
 - Effect stack có add/remove/reorder/enable/intensity; mặc định rỗng.
@@ -61,7 +63,7 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 - Batch queue hỗ trợ 1–3 job đồng thời, mặc định 1 để ổn định NVENC/RAM.
 - Lưu/mở project `.vls.json`; nhớ settings và output folder.
 - Log render trong `visual_loop_studio/logs/`.
-- ComfyUI client tùy chọn trong `ai/comfyui.py`; chức năng lõi không cần AI.
+- Gemini/Veo API và ComfyUI đều là tích hợp tùy chọn; chức năng render lõi không cần AI. Nhập Gemini API key trong Cài đặt hoặc biến môi trường `GEMINI_API_KEY` để gọi Veo.
 
 ## Kiểm thử
 

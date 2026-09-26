@@ -15,6 +15,7 @@ class AppSettings:
     fps: int = 30
     comfyui_url: str = "http://127.0.0.1:8188"
     comfyui_workflow: str = ""
+    gemini_api_key: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
