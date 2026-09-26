@@ -113,6 +113,13 @@ class VisualProject:
     ai_duration: int = 8
     ai_resolution: str = "720p"
     ai_aspect_ratio: str = "16:9"
+    ai_engine: str = "LOCAL"
+    local_resolution: str = "1280x704"
+    local_frames: int = 81
+    local_steps: int = 20
+    local_cfg: float = 5.0
+    local_seed: int = -1
+    local_negative_prompt: str = ""
     layout_mode: str = "AUTO"
     layout_template: str = "Minimal"
     layout_variant: int = 0

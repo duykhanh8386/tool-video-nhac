@@ -18,9 +18,21 @@ Bản EXE đã đóng gói Python, Qt, FFmpeg và FFprobe; không cần cài Pyt
 ## Chuyển động AI và file sóng
 
 - Ảnh nền mặc định dùng camera cố định, không còn tự zoom/pan gây rung toàn khung.
+- Có chế độ **Wan 2.2 TI2V 5B Native** chạy local qua ComfyUI: không token, không API key, không credit. Mã nguồn/model dùng giấy phép Apache 2.0.
+- Chọn một folder ảnh và một prompt dùng chung, tool sẽ tạo clip AI cho từng ảnh theo hàng đợi, đưa từng clip vào cùng bố cục, rồi xuất đủ số video.
 - Có thể nhập prompt và dùng Veo 3.1 để tạo chuyển động tay/chân, người, khói, lửa hoặc ánh sáng từ ảnh nguồn. Cần Gemini API key và tài khoản có quyền dùng Veo.
 - File sóng dạng PNG/GIF/MOV/MP4 chạy lặp độc lập, không co giãn theo âm lượng nhạc; có tùy chọn xóa nền trắng.
 - Veo tạo video 24 fps nên ứng dụng tự chuyển FPS project về 24 sau khi tạo để giữ nhịp khung hình mượt.
+
+## Thiết lập Wan 2.2 local cho RTX 3060
+
+EXE của Visual Loop Studio vẫn là portable; không cần chạy `install.bat` hay `run.bat`. Riêng AI local cần cài và mở [ComfyUI](https://docs.comfy.org/installation/desktop/windows) trên máy render, sau đó tải ba file theo [hướng dẫn Wan 2.2 chính thức](https://docs.comfy.org/tutorials/video/wan/wan2_2):
+
+- `wan2.2_ti2v_5B_fp16.safetensors` → `ComfyUI/models/diffusion_models/`
+- `umt5_xxl_fp8_e4m3fn_scaled.safetensors` → `ComfyUI/models/text_encoders/`
+- `wan2.2_vae.safetensors` → `ComfyUI/models/vae/`
+
+Mở ComfyUI ở `http://127.0.0.1:8188`. Trong Visual Loop Studio chọn **Wan 2.2 Native**, bấm **Kiểm tra ComfyUI + model**, rồi dùng preset `720p 1280×704 — RTX 3060`. ComfyUI Native có model offload; tài liệu chính thức nói bản 5B phù hợp với khoảng 8 GB VRAM, nhưng render 720p vẫn chậm và cần đủ dung lượng đĩa. Tool cố ý chạy từng video một trên RTX 3060 để hạn chế tràn VRAM.
 
 ## Chỉnh element và render hàng loạt
 

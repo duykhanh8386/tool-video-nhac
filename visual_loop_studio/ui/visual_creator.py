@@ -18,6 +18,7 @@ from models.visual_project import ElementLayout, TextStyle, VisualProject, defau
 from render.ffmpeg import build_visual_job
 from render.render_worker import RenderWorker
 from ui.ai_video import AiVideoWorker
+from ui.local_ai_video import LocalAiVideoWorker
 from ui.color_filter_panel import ColorFilterPanel
 from ui.common import AUDIO_FILTER, IMAGE_FILTER, MEDIA_FILTER, FileField, RenderStatus, show_error
 from ui.effect_panel import EffectPanel
@@ -35,6 +36,7 @@ class VisualCreatorPage(QWidget):
         self.settings = settings
         self.worker = RenderWorker(self)
         self.ai_worker = AiVideoWorker(self)
+        self.local_ai_worker = LocalAiVideoWorker(self)
         self.elements = default_element_layouts()
         self.text_styles = default_text_styles()
         self.analysis = None
@@ -47,6 +49,14 @@ class VisualCreatorPage(QWidget):
         self._batch_current = ""
         self._batch_mode = False
         self._batch_template: VisualProject | None = None
+        self._local_batch_queue: list[str] = []
+        self._local_batch_total = 0
+        self._local_batch_completed: list[str] = []
+        self._local_batch_failures: list[str] = []
+        self._local_batch_current = ""
+        self._local_batch_clip = ""
+        self._local_batch_mode = False
+        self._local_batch_template: VisualProject | None = None
         root = QVBoxLayout(self)
         heading = QLabel("Tạo Visual — 60 giây")
         heading.setObjectName("pageTitle")
@@ -101,6 +111,11 @@ class VisualCreatorPage(QWidget):
         self.ai_worker.finished.connect(self._ai_finished)
         self.ai_worker.failed.connect(self._ai_failed)
         self.ai_worker.canceled.connect(self._ai_canceled)
+        self.local_ai_worker.progress.connect(self._local_ai_progress)
+        self.local_ai_worker.finished.connect(self._local_ai_finished)
+        self.local_ai_worker.failed.connect(self._local_ai_failed)
+        self.local_ai_worker.canceled.connect(self._local_ai_canceled)
+        self.local_ai_worker.checked.connect(self._local_check_finished)
         self._connect_preview()
         self._refresh_element_combo("title")
 
@@ -257,7 +272,17 @@ class VisualCreatorPage(QWidget):
         self.ai_prompt.setPlaceholderText("Ví dụ: Người phụ nữ thở nhẹ và chớp mắt; hai bàn tay chuyển động rất nhẹ. Khói hương bay tự nhiên, lửa nến rung nhẹ. Không thay đổi khuôn mặt hoặc bố cục.")
         bg_layout.addWidget(QLabel("Prompt chuyển động AI"))
         bg_layout.addWidget(self.ai_prompt)
-        ai_config = QGridLayout()
+        self.ai_engine = QComboBox()
+        _add_options(self.ai_engine, [
+            ("Wan 2.2 TI2V 5B Native — Local, miễn phí", "LOCAL"),
+            ("Veo 3.1 — Cloud, dùng API credit", "VEO"),
+        ])
+        bg_layout.addWidget(QLabel("Bộ máy tạo chuyển động"))
+        bg_layout.addWidget(self.ai_engine)
+
+        self.veo_panel = QWidget()
+        ai_config = QGridLayout(self.veo_panel)
+        ai_config.setContentsMargins(0, 0, 0, 0)
         self.ai_model = QComboBox()
         _add_options(self.ai_model, [
             ("Veo 3.1 Fast — nhanh", "veo-3.1-fast-generate-preview"),
@@ -279,26 +304,82 @@ class VisualCreatorPage(QWidget):
         ai_config.addWidget(self.ai_resolution, 2, 1)
         ai_config.addWidget(QLabel("Tỷ lệ khung"), 3, 0)
         ai_config.addWidget(self.ai_aspect_ratio, 3, 1)
-        bg_layout.addLayout(ai_config)
+        bg_layout.addWidget(self.veo_panel)
         self.ai_resolution.currentTextChanged.connect(self._ai_resolution_changed)
+
+        self.local_panel = QWidget()
+        local_config = QGridLayout(self.local_panel)
+        local_config.setContentsMargins(0, 0, 0, 0)
+        self.local_resolution = QComboBox()
+        _add_options(self.local_resolution, [
+            ("720p 1280×704 — RTX 3060", "1280x704"),
+            ("Nhanh 832×480", "832x480"),
+        ])
+        self.local_frames = QComboBox()
+        _add_options(self.local_frames, [
+            ("49 frame — khoảng 2 giây", 49),
+            ("81 frame — khoảng 3,4 giây", 81),
+            ("121 frame — khoảng 5 giây", 121),
+        ])
+        _set_combo_value(self.local_frames, 81)
+        self.local_steps = QSpinBox()
+        self.local_steps.setRange(8, 40)
+        self.local_steps.setValue(20)
+        self.local_cfg = QDoubleSpinBox()
+        self.local_cfg.setRange(1.0, 15.0)
+        self.local_cfg.setSingleStep(.5)
+        self.local_cfg.setValue(5.0)
+        self.local_seed = QSpinBox()
+        self.local_seed.setRange(-1, 2147483647)
+        self.local_seed.setSpecialValueText("Ngẫu nhiên")
+        self.local_seed.setValue(-1)
+        self.local_negative_prompt = QPlainTextEdit()
+        self.local_negative_prompt.setMaximumHeight(70)
+        self.local_negative_prompt.setPlaceholderText("Tùy chọn; để trống dùng negative prompt an toàn tích hợp sẵn.")
+        local_config.addWidget(QLabel("Độ phân giải local"), 0, 0)
+        local_config.addWidget(self.local_resolution, 0, 1)
+        local_config.addWidget(QLabel("Thời lượng"), 1, 0)
+        local_config.addWidget(self.local_frames, 1, 1)
+        local_config.addWidget(QLabel("Số bước"), 2, 0)
+        local_config.addWidget(self.local_steps, 2, 1)
+        local_config.addWidget(QLabel("CFG"), 3, 0)
+        local_config.addWidget(self.local_cfg, 3, 1)
+        local_config.addWidget(QLabel("Seed"), 4, 0)
+        local_config.addWidget(self.local_seed, 4, 1)
+        local_config.addWidget(QLabel("Negative prompt"), 5, 0)
+        local_config.addWidget(self.local_negative_prompt, 5, 1)
+        self.local_check = QPushButton("Kiểm tra ComfyUI + model")
+        self.local_check.clicked.connect(self._check_local_ai)
+        local_config.addWidget(self.local_check, 6, 0, 1, 2)
+        bg_layout.addWidget(self.local_panel)
+        local_note = QLabel(
+            "Wan 2.2 Native chạy trên máy, không tốn token/credit. RTX 3060 dùng model offload "
+            "và tạo từng video tuần tự để giữ VRAM ổn định. Cần mở ComfyUI trước."
+        )
+        local_note.setWordWrap(True)
+        local_note.setObjectName("notice")
+        bg_layout.addWidget(local_note)
+
         ai_actions = QHBoxLayout()
-        self.ai_generate = QPushButton("Tạo video chuyển động bằng Veo")
+        self.ai_generate = QPushButton("Tạo video Wan 2.2 local")
         self.ai_generate.setObjectName("primary")
         self.ai_generate.clicked.connect(self.start_ai_video)
         self.ai_cancel = QPushButton("Hủy tạo AI")
         self.ai_cancel.setEnabled(False)
-        self.ai_cancel.clicked.connect(self.ai_worker.cancel)
+        self.ai_cancel.clicked.connect(self.cancel_ai_generation)
         ai_actions.addWidget(self.ai_generate, 1)
         ai_actions.addWidget(self.ai_cancel)
         bg_layout.addLayout(ai_actions)
         self.ai_progress = QProgressBar()
         self.ai_progress.setRange(0, 100)
         self.ai_progress.setValue(0)
-        self.ai_status = QLabel("Cần Gemini API key trong Cài đặt để gọi Veo.")
+        self.ai_status = QLabel("Wan 2.2 Native local không dùng token/credit. Hãy kiểm tra ComfyUI trước lần chạy đầu.")
         self.ai_status.setWordWrap(True)
         self.ai_status.setObjectName("muted")
         bg_layout.addWidget(self.ai_progress)
         bg_layout.addWidget(self.ai_status)
+        self.ai_engine.currentIndexChanged.connect(self._ai_engine_changed)
+        self._ai_engine_changed()
         self.form.addWidget(background_group)
 
         asset_group = QGroupBox("3–4. LOGO, BIỂU TƯỢNG VÀ ẢNH BÌA")
@@ -378,6 +459,9 @@ class VisualCreatorPage(QWidget):
         render_folder = QPushButton("Render toàn bộ background trong thư mục")
         render_folder.setObjectName("primary")
         render_folder.clicked.connect(self.start_batch_render)
+        render_local_ai_folder = QPushButton("AI Local Wan 2.2 + render toàn bộ folder")
+        render_local_ai_folder.setObjectName("primary")
+        render_local_ai_folder.clicked.connect(self.start_local_ai_batch)
         output_layout.addWidget(self.output_folder)
         output_layout.addWidget(QLabel("Tên file đầu ra tùy chọn"))
         output_layout.addWidget(self.output_name)
@@ -390,6 +474,14 @@ class VisualCreatorPage(QWidget):
         batch_note.setObjectName("muted")
         output_layout.addWidget(batch_note)
         output_layout.addWidget(render_folder)
+        local_batch_note = QLabel(
+            "Chế độ AI Local chỉ lấy file ảnh: mỗi ảnh dùng chung prompt, tạo một clip Wan 2.2 "
+            "rồi tự động đưa vào bố cục để xuất một video riêng. Các job chạy lần lượt."
+        )
+        local_batch_note.setWordWrap(True)
+        local_batch_note.setObjectName("notice")
+        output_layout.addWidget(local_batch_note)
+        output_layout.addWidget(render_local_ai_folder)
         self.form.addWidget(output_group)
         self.form.addStretch()
 
@@ -646,6 +738,10 @@ class VisualCreatorPage(QWidget):
             ai_prompt=self.ai_prompt.toPlainText(), ai_model=_combo_value(self.ai_model),
             ai_duration=int(_combo_value(self.ai_duration)), ai_resolution=self.ai_resolution.currentText(),
             ai_aspect_ratio=self.ai_aspect_ratio.currentText(),
+            ai_engine=str(_combo_value(self.ai_engine)), local_resolution=str(_combo_value(self.local_resolution)),
+            local_frames=int(_combo_value(self.local_frames)), local_steps=self.local_steps.value(),
+            local_cfg=self.local_cfg.value(), local_seed=self.local_seed.value(),
+            local_negative_prompt=self.local_negative_prompt.toPlainText(),
             layout_mode=self.layout_mode.currentText(), layout_template=self.layout_template.currentText(), layout_variant=self.layout_variant,
             elements={name: ElementLayout(**asdict(layout)) for name, layout in self.elements.items()},
             color_filter=self.color.preset.currentText(), manual_color=self.color.values(), lut=self.color.lut.text(), effects=self.effects.values(),
@@ -677,6 +773,14 @@ class VisualCreatorPage(QWidget):
         _set_combo_value(self.ai_duration, project.ai_duration)
         self.ai_resolution.setCurrentText(project.ai_resolution)
         self.ai_aspect_ratio.setCurrentText(project.ai_aspect_ratio)
+        _set_combo_value(self.ai_engine, project.ai_engine)
+        _set_combo_value(self.local_resolution, project.local_resolution)
+        _set_combo_value(self.local_frames, project.local_frames)
+        self.local_steps.setValue(project.local_steps)
+        self.local_cfg.setValue(project.local_cfg)
+        self.local_seed.setValue(project.local_seed)
+        self.local_negative_prompt.setPlainText(project.local_negative_prompt)
+        self._ai_engine_changed()
         self.layout_mode.setCurrentText(project.layout_mode)
         self.layout_template.setCurrentText(project.layout_template)
         self.layout_variant = project.layout_variant
@@ -694,6 +798,33 @@ class VisualCreatorPage(QWidget):
         else:
             self.ai_duration.setEnabled(True)
 
+    def _ai_engine_changed(self, *_args) -> None:
+        local = _combo_value(self.ai_engine) == "LOCAL"
+        self.local_panel.setVisible(local)
+        self.veo_panel.setVisible(not local)
+        self.ai_generate.setText("Tạo video Wan 2.2 local" if local else "Tạo video chuyển động bằng Veo")
+        if not self.local_ai_worker.running and not self.ai_worker.running:
+            self.ai_status.setText(
+                "Wan 2.2 Native local không dùng token/credit. Hãy kiểm tra ComfyUI trước lần chạy đầu."
+                if local else "Veo dùng Gemini API key và có thể tính credit."
+            )
+
+    def _local_options(self, project: VisualProject | None = None) -> dict:
+        project = project or self.collect()
+        width_text, height_text = project.local_resolution.lower().split("x", 1)
+        return {
+            "comfyui_url": self.settings.comfyui_url,
+            "workflow_path": self.settings.comfyui_workflow,
+            "prompt": project.ai_prompt.strip(),
+            "width": int(width_text),
+            "height": int(height_text),
+            "length": int(project.local_frames),
+            "steps": int(project.local_steps),
+            "cfg": float(project.local_cfg),
+            "seed": int(project.local_seed),
+            "negative_prompt": project.local_negative_prompt,
+        }
+
     def start_ai_video(self) -> None:
         try:
             source = self.background.text()
@@ -702,6 +833,22 @@ class VisualCreatorPage(QWidget):
             prompt = self.ai_prompt.toPlainText().strip()
             if not prompt:
                 raise ValueError("Hãy nhập prompt mô tả tay/chân, người hoặc hiệu ứng cần chuyển động.")
+            if self.ai_worker.running or self.local_ai_worker.running or self.worker.running:
+                raise RuntimeError("Một tác vụ AI/render khác đang chạy.")
+            if _combo_value(self.ai_engine) == "LOCAL":
+                folder = Path(self.output_folder.text() or str(Path(source).resolve().parent)) / "AI_Local_Clips"
+                output = unique_output(
+                    str(folder), f"wan22_{Path(source).stem}.mp4", f"wan22_{Path(source).stem}", ".mp4"
+                )
+                self.ai_generate.setEnabled(False)
+                self.ai_cancel.setEnabled(True)
+                self.ai_progress.setValue(1)
+                self.local_ai_worker.start(
+                    image_path=source,
+                    output_path=str(output),
+                    **self._local_options(),
+                )
+                return
             api_key = self.settings.gemini_api_key.strip() or os.environ.get("GEMINI_API_KEY", "").strip()
             if not api_key:
                 raise ValueError("Chưa có Gemini API key. Mở menu Cài đặt và nhập key cho Veo.")
@@ -722,6 +869,95 @@ class VisualCreatorPage(QWidget):
             )
         except Exception as exc:
             show_error(self, "Không thể tạo video AI", exc)
+
+    def cancel_ai_generation(self) -> None:
+        self._local_batch_queue.clear()
+        self._local_batch_mode = False
+        if self.local_ai_worker.running:
+            self.local_ai_worker.cancel()
+        if self.ai_worker.running:
+            self.ai_worker.cancel()
+        if self.worker.running:
+            self.worker.cancel()
+
+    def _check_local_ai(self) -> None:
+        try:
+            self.local_check.setEnabled(False)
+            self.ai_status.setText("Đang kiểm tra ComfyUI, node và model Wan 2.2…")
+            self.local_ai_worker.check(self.settings.comfyui_url, self.settings.comfyui_workflow)
+        except Exception as exc:
+            self.local_check.setEnabled(True)
+            show_error(self, "Không thể kiểm tra ComfyUI", exc)
+
+    def _local_check_finished(self, success: bool, message: str) -> None:
+        self.local_check.setEnabled(True)
+        self.ai_status.setText(message)
+        if not success:
+            show_error(self, "ComfyUI/Wan 2.2 chưa sẵn sàng", message)
+
+    def _local_ai_progress(self, value: int, message: str) -> None:
+        self.ai_progress.setValue(max(0, min(100, value)))
+        if self._local_batch_mode:
+            current = self._local_batch_total - len(self._local_batch_queue)
+            message = f"AI {current}/{self._local_batch_total} • {Path(self._local_batch_current).name} • {message}"
+        self.ai_status.setText(message)
+
+    def _local_ai_finished(self, output: str) -> None:
+        if self._local_batch_mode:
+            self._local_batch_clip = output
+            self.ai_progress.setValue(100)
+            try:
+                project = VisualProject.from_dict(self._local_batch_template.to_dict() if self._local_batch_template else {})
+                project.background = output
+                project.animation = "STATIC"
+                project.fps = 24
+                project.output_name = f"{Path(self._local_batch_current).stem}_visual.mp4"
+                job = build_visual_job(project, self.settings)
+                current = self._local_batch_total - len(self._local_batch_queue)
+                self.status.begin()
+                self.status.info.setText(
+                    f"Đang ghép bố cục {current}/{self._local_batch_total}: {Path(self._local_batch_current).name}"
+                )
+                self.worker.start(job)
+            except Exception as exc:
+                self._local_batch_failures.append(f"{Path(self._local_batch_current).name}: {exc}")
+                QTimer.singleShot(0, self._start_next_local_ai)
+            return
+        self.ai_generate.setEnabled(True)
+        self.ai_cancel.setEnabled(False)
+        self.ai_progress.setValue(100)
+        self.ai_status.setText(f"Đã tạo Wan 2.2 local và chọn làm video nền: {output}")
+        self.background.setText(output)
+        _set_combo_value(self.animation, "STATIC")
+        self.fps.setValue(24)
+        QMessageBox.information(
+            self,
+            "Tạo video local hoàn tất",
+            "Video Wan 2.2 đã được chọn làm nền. Camera toàn khung cố định và FPS đã đặt về 24.",
+        )
+
+    def _local_ai_failed(self, message: str) -> None:
+        if self._local_batch_mode:
+            self._local_batch_failures.append(f"{Path(self._local_batch_current).name}: {message}")
+            if self._local_batch_queue:
+                QTimer.singleShot(0, self._start_next_local_ai)
+            else:
+                self._finish_local_batch()
+            return
+        self.ai_generate.setEnabled(True)
+        self.ai_cancel.setEnabled(False)
+        self.ai_progress.setValue(0)
+        self.ai_status.setText("Tạo video Wan 2.2 local thất bại.")
+        show_error(self, "Tạo video Wan 2.2 thất bại", message)
+
+    def _local_ai_canceled(self) -> None:
+        self._local_batch_queue.clear()
+        self._local_batch_mode = False
+        self.ai_generate.setEnabled(True)
+        self.ai_cancel.setEnabled(False)
+        self.ai_progress.setValue(0)
+        self.ai_status.setText("Đã hủy tạo video Wan 2.2 local.")
+        self.status.stopped("Đã hủy hàng đợi AI local.")
 
     def _ai_progress(self, value: int, message: str) -> None:
         self.ai_progress.setValue(max(0, min(100, value)))
@@ -756,10 +992,12 @@ class VisualCreatorPage(QWidget):
 
     def start_render(self) -> None:
         try:
-            if self.worker.running:
-                raise RuntimeError("Một render khác đang chạy.")
+            if self.worker.running or self.local_ai_worker.running or self.ai_worker.running:
+                raise RuntimeError("Một tác vụ AI/render khác đang chạy.")
             self._batch_mode = False
             self._batch_queue.clear()
+            self._local_batch_mode = False
+            self._local_batch_queue.clear()
             project = self.collect()
             job = build_visual_job(project, self.settings)
             self.settings.last_output_folder = project.output_folder
@@ -772,8 +1010,8 @@ class VisualCreatorPage(QWidget):
 
     def start_batch_render(self) -> None:
         try:
-            if self.worker.running:
-                raise RuntimeError("Một render khác đang chạy.")
+            if self.worker.running or self.local_ai_worker.running or self.ai_worker.running:
+                raise RuntimeError("Một tác vụ AI/render khác đang chạy.")
             folder = Path(self.background_folder.text())
             if not folder.is_dir():
                 raise ValueError("Hãy chọn thư mục chứa background cần render hàng loạt.")
@@ -790,12 +1028,77 @@ class VisualCreatorPage(QWidget):
             self._batch_failures = []
             self._batch_current = ""
             self._batch_mode = True
+            self._local_batch_mode = False
+            self._local_batch_queue.clear()
             self.settings.last_output_folder = template.output_folder
             self.settings.encoder = template.encoder
             self.settings_changed.emit()
             self._start_next_batch()
         except Exception as exc:
             show_error(self, "Không thể render hàng loạt", exc)
+
+    def start_local_ai_batch(self) -> None:
+        try:
+            if self.worker.running or self.local_ai_worker.running or self.ai_worker.running:
+                raise RuntimeError("Một tác vụ AI/render khác đang chạy.")
+            folder = Path(self.background_folder.text())
+            if not folder.is_dir():
+                raise ValueError("Hãy chọn thư mục chứa ảnh nguồn cho Wan 2.2.")
+            images = [
+                path for path in background_files(str(folder), self.batch_recursive.isChecked())
+                if is_still_image(path)
+            ]
+            if not images:
+                raise ValueError("Thư mục không có ảnh PNG/JPG/WebP được hỗ trợ.")
+            template = self.collect()
+            if not template.ai_prompt.strip():
+                raise ValueError("Hãy nhập prompt chuyển động dùng chung cho cả folder.")
+            if not template.output_folder:
+                raise ValueError("Hãy chọn thư mục lưu video đầu ra.")
+            self._local_options(template)
+            self._batch_mode = False
+            self._batch_queue.clear()
+            self._local_batch_template = template
+            self._local_batch_queue = images
+            self._local_batch_total = len(images)
+            self._local_batch_completed = []
+            self._local_batch_failures = []
+            self._local_batch_current = ""
+            self._local_batch_clip = ""
+            self._local_batch_mode = True
+            self.ai_generate.setEnabled(False)
+            self.ai_cancel.setEnabled(True)
+            self.settings.last_output_folder = template.output_folder
+            self.settings.encoder = template.encoder
+            self.settings_changed.emit()
+            self._start_next_local_ai()
+        except Exception as exc:
+            show_error(self, "Không thể chạy AI local hàng loạt", exc)
+
+    def _start_next_local_ai(self) -> None:
+        while self._local_batch_mode and self._local_batch_queue:
+            source = self._local_batch_queue.pop(0)
+            self._local_batch_current = source
+            current = self._local_batch_total - len(self._local_batch_queue)
+            clip_folder = Path(self._local_batch_template.output_folder) / "AI_Local_Clips"
+            clip = unique_output(
+                str(clip_folder), f"wan22_{Path(source).stem}.mp4", f"wan22_{Path(source).stem}", ".mp4"
+            )
+            try:
+                self.ai_progress.setValue(1)
+                self.ai_status.setText(
+                    f"AI {current}/{self._local_batch_total} • đang gửi {Path(source).name} sang ComfyUI…"
+                )
+                self.local_ai_worker.start(
+                    image_path=source,
+                    output_path=str(clip),
+                    **self._local_options(self._local_batch_template),
+                )
+                return
+            except Exception as exc:
+                self._local_batch_failures.append(f"{Path(source).name}: {exc}")
+        if self._local_batch_mode:
+            self._finish_local_batch()
 
     def _start_next_batch(self) -> None:
         while self._batch_mode and self._batch_queue:
@@ -819,12 +1122,23 @@ class VisualCreatorPage(QWidget):
     def cancel_render(self) -> None:
         self._batch_queue.clear()
         self._batch_mode = False
+        self._local_batch_queue.clear()
+        self._local_batch_mode = False
+        if self.local_ai_worker.running:
+            self.local_ai_worker.cancel()
         if self.worker.running:
             self.worker.cancel()
         else:
             self.status.stopped("Đã hủy render.")
 
     def _finished(self, output: str, _log: str) -> None:
+        if self._local_batch_mode:
+            self._local_batch_completed.append(output)
+            if self._local_batch_queue:
+                QTimer.singleShot(0, self._start_next_local_ai)
+            else:
+                self._finish_local_batch(output)
+            return
         if self._batch_mode:
             self._batch_completed.append(output)
             if self._batch_queue:
@@ -836,6 +1150,16 @@ class VisualCreatorPage(QWidget):
         QMessageBox.information(self, "Render hoàn tất", f"Visual 60 giây đã được tạo:\n{output}")
 
     def _failed(self, message: str, log_path: str) -> None:
+        if self._local_batch_mode:
+            detail = f"{Path(self._local_batch_current).name}: {message}"
+            if log_path:
+                detail += f" (log: {log_path})"
+            self._local_batch_failures.append(detail)
+            if self._local_batch_queue:
+                QTimer.singleShot(0, self._start_next_local_ai)
+            else:
+                self._finish_local_batch()
+            return
         if self._batch_mode:
             detail = f"{Path(self._batch_current).name}: {message}"
             if log_path:
@@ -852,7 +1176,36 @@ class VisualCreatorPage(QWidget):
     def _canceled(self) -> None:
         self._batch_queue.clear()
         self._batch_mode = False
+        self._local_batch_queue.clear()
+        self._local_batch_mode = False
+        self.ai_generate.setEnabled(True)
+        self.ai_cancel.setEnabled(False)
         self.status.stopped("Đã hủy render.")
+
+    def _finish_local_batch(self, last_output: str = "") -> None:
+        self._local_batch_mode = False
+        self.ai_generate.setEnabled(True)
+        self.ai_cancel.setEnabled(False)
+        success_count = len(self._local_batch_completed)
+        failure_count = len(self._local_batch_failures)
+        if last_output or self._local_batch_completed:
+            self.status.success(last_output or self._local_batch_completed[-1])
+        else:
+            self.status.stopped("Không có video AI local nào render thành công.")
+        self.ai_progress.setValue(100 if success_count else 0)
+        self.ai_status.setText(
+            f"Đã xong hàng đợi Wan 2.2 local: {success_count}/{self._local_batch_total} video."
+        )
+        message = (
+            f"Đã hoàn tất: {success_count}/{self._local_batch_total} video thành công.\n"
+            "Clip AI trung gian được giữ trong thư mục AI_Local_Clips."
+        )
+        if failure_count:
+            preview = "\n".join(self._local_batch_failures[:8])
+            if failure_count > 8:
+                preview += f"\n... và {failure_count - 8} lỗi khác"
+            message += f"\n\nCó {failure_count} file lỗi:\n{preview}"
+        QMessageBox.information(self, "AI local hàng loạt hoàn tất", message)
 
     def _finish_batch(self, last_output: str = "") -> None:
         self._batch_mode = False

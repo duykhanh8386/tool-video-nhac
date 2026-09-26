@@ -180,7 +180,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         workers = (self.visual.worker, self.loop.worker, self.audio.worker)
-        if any(worker.running for worker in workers) or self.batch.running or self.visual.ai_worker.running:
+        if (
+            any(worker.running for worker in workers)
+            or self.batch.running
+            or self.visual.ai_worker.running
+            or self.visual.local_ai_worker.running
+        ):
             answer = QMessageBox.question(self, "Render đang chạy", "Cancel render và thoát ứng dụng?")
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
@@ -189,6 +194,7 @@ class MainWindow(QMainWindow):
                 worker.cancel()
             self.batch.cancel_all()
             self.visual.ai_worker.cancel()
+            self.visual.local_ai_worker.cancel()
         self._save_settings()
         event.accept()
 

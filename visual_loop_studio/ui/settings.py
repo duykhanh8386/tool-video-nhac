@@ -16,16 +16,21 @@ class SettingsDialog(QDialog):
         self.ffprobe = QLineEdit(settings.ffprobe_path)
         self.comfy_url = QLineEdit(settings.comfyui_url)
         self.comfy_workflow = QLineEdit(settings.comfyui_workflow)
+        self.comfy_url.setPlaceholderText("http://127.0.0.1:8188")
+        self.comfy_workflow.setPlaceholderText("Để trống dùng workflow Wan 2.2 Native tích hợp sẵn")
         self.gemini_key = QLineEdit(settings.gemini_api_key)
         self.gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.gemini_key.setPlaceholderText("Có thể dùng biến môi trường GEMINI_API_KEY")
         form.addRow("FFmpeg", self.ffmpeg)
         form.addRow("FFprobe", self.ffprobe)
         form.addRow("ComfyUI URL", self.comfy_url)
-        form.addRow("ComfyUI workflow", self.comfy_workflow)
+        form.addRow("Workflow API JSON (tùy chọn)", self.comfy_workflow)
         form.addRow("Gemini API key (Veo)", self.gemini_key)
         layout.addLayout(form)
-        note = QLabel("API key chỉ được lưu trong cấu hình cục bộ trên máy này và không được ghi vào file project/Git.")
+        note = QLabel(
+            "Wan 2.2 Native kết nối ComfyUI localhost và không dùng token/credit; nên để trống "
+            "workflow để dùng bản tích hợp. Gemini API key chỉ dùng cho Veo và chỉ được lưu cục bộ."
+        )
         note.setWordWrap(True)
         note.setObjectName("muted")
         layout.addWidget(note)

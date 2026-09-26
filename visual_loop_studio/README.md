@@ -54,6 +54,8 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 - Bộ chọn font hệ thống kiểu Word, cỡ chữ/đậm/nghiêng riêng cho từng loại text; preview và FFmpeg dùng cùng thang cỡ chữ 1080p để tránh chữ bị nhỏ khi render.
 - Mỗi element ảnh hỗ trợ hòa trộn `Lighten` bên cạnh chế độ bình thường.
 - Camera nền mặc định đứng yên. Có thể dùng ảnh nguồn + prompt để tạo video image-to-video bằng Veo 3.1; ảnh nguồn được dùng làm cả khung đầu và cuối nhằm ưu tiên vòng lặp liền mạch.
+- Tích hợp Wan 2.2 TI2V 5B Native qua ComfyUI localhost. Workflow mặc định chỉ dùng core node local, từ chối node API/Cloud, nên không tiêu hao token/credit.
+- Pipeline folder AI: một prompt dùng chung → mỗi ảnh tạo một clip Wan local → tự ghép cùng text/logo/effect/bố cục → mỗi ảnh xuất một video. GPU xử lý tuần tự.
 - File sóng PNG/GIF/MOV/MP4 chạy lặp theo thời gian riêng, không phản ứng theo âm lượng nhạc; có tùy chọn xóa nền trắng.
 - Preview nhẹ 16:9 cho image/video background, artwork, logo, text, waveform, color preset và nhiều full-frame effect.
 - Render visual đúng 60 giây ở 1080p/4K, 24–60 fps.
@@ -68,6 +70,16 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 - Lưu/mở project `.vls.json`; nhớ settings và output folder.
 - Log render trong `visual_loop_studio/logs/`.
 - Gemini/Veo API và ComfyUI đều là tích hợp tùy chọn; chức năng render lõi không cần AI. Nhập Gemini API key trong Cài đặt hoặc biến môi trường `GEMINI_API_KEY` để gọi Veo.
+
+## Wan 2.2 Native local
+
+1. Cài/cập nhật [ComfyUI cho Windows](https://docs.comfy.org/installation/desktop/windows) và chạy server ở `http://127.0.0.1:8188`.
+2. Làm theo [workflow Wan 2.2 Native chính thức](https://docs.comfy.org/tutorials/video/wan/wan2_2), đặt model diffusion, text encoder và VAE vào đúng ba thư mục model.
+3. Trong **Cài đặt**, giữ URL mặc định và để trống Workflow API JSON. Trong Visual Creator chọn **Wan 2.2 TI2V 5B Native — Local, miễn phí**.
+4. Bấm **Kiểm tra ComfyUI + model**. Với RTX 3060 + 32 GB RAM, chọn `1280×704`, 81 frame, 20 step. Nếu thiếu VRAM hoặc muốn thử nhanh, chọn `832×480` hoặc 49 frame.
+5. Để bulk, chọn **Thư mục background**, nhập prompt chung và bấm **AI Local Wan 2.2 + render toàn bộ folder**.
+
+Wan 2.2 dùng Apache 2.0 và ComfyUI chạy trên máy, do đó không có phí token/credit. Chi phí thực tế là điện, thời gian GPU và dung lượng đĩa. Không bật Comfy Cloud/Partner/API node nếu muốn bảo đảm chạy local hoàn toàn.
 
 ## Kiểm thử
 

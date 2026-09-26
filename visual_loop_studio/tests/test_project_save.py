@@ -18,6 +18,12 @@ class ProjectModelTests(unittest.TestCase):
         original.text_styles["title"] = TextStyle("Arial", 112, True, True)
         original.background_folder = "C:/backgrounds"
         original.batch_recursive = True
+        original.ai_engine = "LOCAL"
+        original.local_resolution = "1280x704"
+        original.local_frames = 81
+        original.local_steps = 20
+        original.local_cfg = 5.0
+        original.local_seed = 42
         restored = VisualProject.from_dict(original.to_dict())
         self.assertEqual(restored, original)
 
