@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ from version import __repository__, __version__
 API_URL = f"https://api.github.com/repos/{__repository__}/releases/latest"
 RELEASES_URL = f"https://github.com/{__repository__}/releases/latest"
 USER_AGENT = f"VisualLoopStudio/{__version__}"
+HELPER_START_TIMEOUT_SECONDS = 8.0
 
 
 @dataclass
@@ -109,13 +111,43 @@ def can_self_update() -> bool:
     return bool(getattr(sys, "frozen", False)) and Path(sys.executable).name.lower().endswith(".exe")
 
 
+def update_state_dir() -> Path:
+    """Return a durable updater folder so failures survive TEMP cleanup."""
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    base = Path(local_app_data) if local_app_data else Path(tempfile.gettempdir())
+    return base / "VisualLoopStudio" / "Updater"
+
+
+def update_log_path() -> Path:
+    return update_state_dir() / "update.log"
+
+
+def _wait_for_helper_ready(process, ready_path: Path, log_path: Path) -> None:
+    deadline = time.monotonic() + HELPER_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if ready_path.is_file():
+            return
+        exit_code = process.poll()
+        if exit_code is not None:
+            raise RuntimeError(
+                f"Bộ cập nhật không khởi động được (mã {exit_code}). Xem log: {log_path}"
+            )
+        time.sleep(0.05)
+    try:
+        process.terminate()
+    except Exception:
+        pass
+    raise RuntimeError(f"Bộ cập nhật không phản hồi. Xem log: {log_path}")
+
+
 def build_self_update_script() -> str:
     return r'''param(
     [Parameter(Mandatory=$true)][string]$Old,
     [Parameter(Mandatory=$true)][string]$New,
     [Parameter(Mandatory=$true)][int]$AppPid,
     [Parameter(Mandatory=$true)][string]$TargetVersion,
-    [Parameter(Mandatory=$true)][string]$LogPath
+    [Parameter(Mandatory=$true)][string]$LogPath,
+    [Parameter(Mandatory=$true)][string]$ReadyPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -125,9 +157,24 @@ function Write-UpdateLog([string]$Message) {
     Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
 }
 
+function Start-UpdatedApplication([string]$Path, [bool]$Fallback) {
+    $arguments = @("--updated-to=$TargetVersion")
+    if ($Fallback) {
+        $arguments += "--update-fallback"
+    }
+    $workingDirectory = Split-Path -Parent $Path
+    $started = Start-Process -FilePath $Path -WorkingDirectory $workingDirectory -ArgumentList $arguments -PassThru -ErrorAction Stop
+    Write-UpdateLog "Relaunch requested: $Path (PID $($started.Id), fallback=$Fallback)."
+    Start-Sleep -Seconds 4
+    if ($started.HasExited) {
+        throw "The updated application exited immediately with code $($started.ExitCode)."
+    }
+}
+
 try {
+    Set-Content -LiteralPath $ReadyPath -Value $PID -Encoding ASCII -ErrorAction Stop
     Write-UpdateLog "Updater started. Waiting for PID $AppPid."
-    $deadline = (Get-Date).AddSeconds(90)
+    $deadline = (Get-Date).AddSeconds(20)
     while (Get-Process -Id $AppPid -ErrorAction SilentlyContinue) {
         if ((Get-Date) -gt $deadline) {
             throw "Timed out waiting for the old application to exit."
@@ -162,16 +209,23 @@ try {
     }
 
     Write-UpdateLog "Update installed successfully: $Old"
-    Start-Process -FilePath $Old -WorkingDirectory (Split-Path -Parent $Old) -ArgumentList "--updated-to=$TargetVersion"
+    Start-UpdatedApplication -Path $Old -Fallback $false
     Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ReadyPath -Force -ErrorAction SilentlyContinue
     exit 0
 }
 catch {
     Write-UpdateLog "Update failed: $($_.Exception.Message)"
     if (Test-Path -LiteralPath $New -PathType Leaf) {
-        Write-UpdateLog "Launching the verified downloaded EXE as fallback."
-        Start-Process -FilePath $New -WorkingDirectory (Split-Path -Parent $New) -ArgumentList "--updated-to=$TargetVersion", "--update-fallback"
+        try {
+            Write-UpdateLog "Launching the verified downloaded EXE as fallback."
+            Start-UpdatedApplication -Path $New -Fallback $true
+        }
+        catch {
+            Write-UpdateLog "Fallback launch failed: $($_.Exception.Message)"
+        }
     }
+    Remove-Item -LiteralPath $ReadyPath -Force -ErrorAction SilentlyContinue
     exit 1
 }
 '''
@@ -184,29 +238,39 @@ def schedule_self_update(downloaded_exe: str | Path, target_version: str = "") -
     downloaded = Path(downloaded_exe).resolve()
     if not downloaded.is_file():
         raise ValueError(f"Không tìm thấy EXE cập nhật đã tải: {downloaded}")
-    temp_dir = Path(tempfile.gettempdir())
-    script = temp_dir / f"visual_loop_studio_update_{os.getpid()}.ps1"
-    log_path = temp_dir / "VisualLoopStudio-update.log"
+    state_dir = update_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    script = state_dir / f"update_{os.getpid()}.ps1"
+    ready_path = state_dir / f"update_{os.getpid()}.ready"
+    log_path = update_log_path()
+    ready_path.unlink(missing_ok=True)
     # UTF-8 BOM is required for Windows PowerShell 5.1 to parse Unicode paths reliably.
     script.write_text(build_self_update_script(), encoding="utf-8-sig")
     powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
     executable = str(powershell) if powershell.is_file() else "powershell.exe"
     flags = (
         getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        | getattr(subprocess, "DETACHED_PROCESS", 0)
         | getattr(subprocess, "CREATE_NO_WINDOW", 0)
     )
-    subprocess.Popen(
-        [
-            executable, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-            "-WindowStyle", "Hidden", "-File", str(script),
-            "-Old", str(current), "-New", str(downloaded), "-AppPid", str(os.getpid()),
-            "-TargetVersion", target_version or __version__, "-LogPath", str(log_path),
-        ],
-        creationflags=flags,
-        close_fds=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    with log_path.open("a", encoding="utf-8") as log_stream:
+        log_stream.write(
+            f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} Scheduling update "
+            f"from {current} to {target_version or __version__}.\n"
+        )
+        log_stream.flush()
+        process = subprocess.Popen(
+            [
+                executable, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-WindowStyle", "Hidden", "-File", str(script),
+                "-Old", str(current), "-New", str(downloaded), "-AppPid", str(os.getpid()),
+                "-TargetVersion", target_version or __version__, "-LogPath", str(log_path),
+                "-ReadyPath", str(ready_path),
+            ],
+            creationflags=flags,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=log_stream,
+            stderr=subprocess.STDOUT,
+        )
+        _wait_for_helper_ready(process, ready_path, log_path)
     return script

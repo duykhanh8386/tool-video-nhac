@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog, QWidge
 
 from utils.updater import (
     RELEASES_URL, can_self_update, check_latest_release, download_release,
-    is_newer_version, schedule_self_update,
+    is_newer_version, schedule_self_update, update_log_path,
 )
 from version import __version__
 
@@ -106,10 +106,23 @@ class UpdateController(QObject):
         QMessageBox.information(
             self.parent_window,
             "Sẵn sàng cập nhật",
-            "Đã tải và xác minh SHA-256. Ứng dụng sẽ đóng, thay EXE và tự mở lại. "
+            "Đã tải, xác minh SHA-256 và khởi động thành công bộ cập nhật. "
+            "Ứng dụng sẽ đóng, thay EXE và tự mở lại. "
             "Sau khi mở lại sẽ có thông báo Cập nhật hoàn tất.",
         )
-        QApplication.quit()
+        # Closing the main window runs its cleanup code (workers, local runtime,
+        # settings). QApplication.quit() alone can bypass that closeEvent and
+        # leave the old process alive while the updater is waiting for it.
+        if not self.parent_window.close():
+            QMessageBox.warning(
+                self.parent_window,
+                "Chưa thể khởi động lại",
+                f"Ứng dụng chưa đóng được. Hãy dừng tác vụ đang chạy rồi thoát ứng dụng.\n\nLog: {update_log_path()}",
+            )
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def _handle_error(self, message: str, silent: bool) -> None:
         self.busy = False

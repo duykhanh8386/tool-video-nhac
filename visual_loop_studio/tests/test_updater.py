@@ -40,7 +40,10 @@ class UpdaterTests(unittest.TestCase):
         script = build_self_update_script()
         self.assertIn("for ($attempt = 1; $attempt -le 30", script)
         self.assertIn("Get-FileHash -Algorithm SHA256", script)
-        self.assertIn("Start-Process -FilePath $Old", script)
+        self.assertIn("Set-Content -LiteralPath $ReadyPath", script)
+        self.assertIn("Start-UpdatedApplication -Path $Old", script)
+        self.assertIn("-PassThru", script)
+        self.assertIn("$started.HasExited", script)
         self.assertIn("--updated-to=$TargetVersion", script)
         self.assertIn("--update-fallback", script)
 
@@ -55,7 +58,8 @@ class UpdaterTests(unittest.TestCase):
             with (
                 patch.object(updater.sys, "frozen", True, create=True),
                 patch.object(updater.sys, "executable", str(current)),
-                patch.object(updater.tempfile, "gettempdir", return_value=folder),
+                patch.object(updater, "update_state_dir", return_value=root / "updater"),
+                patch.object(updater, "_wait_for_helper_ready") as wait_ready,
                 patch.object(updater.subprocess, "Popen") as popen,
             ):
                 script_path = updater.schedule_self_update(downloaded, "1.2.3.4")
@@ -66,7 +70,15 @@ class UpdaterTests(unittest.TestCase):
             self.assertIn("-TargetVersion", command)
             self.assertIn("1.2.3.4", command)
             self.assertIn(str(current.resolve()), command)
+            self.assertIn("-ReadyPath", command)
+            self.assertNotEqual(
+                popen.call_args.kwargs["stderr"], updater.subprocess.DEVNULL
+            )
+            wait_ready.assert_called_once()
             self.assertEqual(script_path.read_bytes()[:3], b"\xef\xbb\xbf")
+            log_path = root / "updater" / "update.log"
+            self.assertTrue(log_path.is_file())
+            self.assertIn("Scheduling update", log_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
