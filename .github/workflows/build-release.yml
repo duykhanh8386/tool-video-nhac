@@ -17,12 +17,12 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -46,14 +46,7 @@ jobs:
       - name: Bundle FFmpeg and stamp version
         shell: pwsh
         run: |
-          try {
-            & tools/bundle_ffmpeg.ps1 -Destination visual_loop_studio/vendor/bin
-          }
-          catch {
-            Write-Host "A portable FFmpeg pair was not found on the runner; installing ffmpeg-full."
-            choco install ffmpeg-full -y --no-progress
-            & tools/bundle_ffmpeg.ps1 -Destination visual_loop_studio/vendor/bin
-          }
+          & tools/bundle_ffmpeg.ps1 -Destination visual_loop_studio/vendor/bin -Download
           $version = "1.0.${{ github.run_number }}.${{ github.run_attempt }}"
           python tools/stamp_version.py --version $version --commit "${{ github.sha }}"
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -75,7 +68,7 @@ jobs:
           Get-Item $asset, "$asset.sha256" | Select-Object Name, Length
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: VisualLoopStudio-Windows-x64-${{ env.VERSION }}
           path: |
