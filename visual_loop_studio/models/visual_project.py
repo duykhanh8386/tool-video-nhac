@@ -102,6 +102,7 @@ class VisualProject:
     effect_overlay: str = ""
     effect_overlay_blend: str = "lighten"
     effect_overlay_opacity: int = 100
+    effect_overlay_remove_white: bool = False
     output_folder: str = ""
     background_folder: str = ""
     batch_recursive: bool = False

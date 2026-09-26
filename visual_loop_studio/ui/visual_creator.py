@@ -449,6 +449,7 @@ class VisualCreatorPage(QWidget):
         self.logo = FileField("Logo", IMAGE_FILTER, optional=True)
         self.artwork = FileField("Biểu tượng / Ảnh bìa", IMAGE_FILTER, optional=True)
         self.platform_icons = FileField("Biểu tượng nền tảng", IMAGE_FILTER, optional=True)
+        self.input_blends: dict[str, QComboBox] = {}
         self.artwork_motion = QComboBox()
         _add_options(self.artwork_motion, [
             ("Đứng yên", "STATIC"), ("Trôi nhẹ", "FLOAT"), ("Nhịp phồng", "PULSE"),
@@ -456,12 +457,27 @@ class VisualCreatorPage(QWidget):
             ("Nhịp theo beat", "BEAT_PULSE"),
         ])
         _set_combo_value(self.artwork_motion, "FLOAT")
-        asset_layout.addWidget(self.logo)
-        asset_layout.addWidget(self.artwork)
-        asset_layout.addWidget(self.platform_icons)
+        for kind, label, field in (
+            ("logo", "Hòa trộn Logo", self.logo),
+            ("artwork", "Hòa trộn Ảnh bìa", self.artwork),
+            ("platform_icons", "Hòa trộn Icon nền tảng", self.platform_icons),
+        ):
+            asset_layout.addWidget(field)
+            row = QHBoxLayout()
+            combo = QComboBox()
+            _add_options(combo, [
+                ("Ảnh gốc (Normal)", "normal"),
+                ("Lighten — bỏ nền đen", "lighten"),
+                ("Screen — bỏ nền đen, sáng mềm", "screen"),
+                ("Linear Dodge (Add)", "addition"),
+            ])
+            self.input_blends[kind] = combo
+            row.addWidget(QLabel(label))
+            row.addWidget(combo, 1)
+            asset_layout.addLayout(row)
         asset_blend_note = QLabel(
-            "Hòa trộn ảnh: click Logo/Ảnh bìa/Icon trên preview, rồi chọn Normal, Lighten, Screen "
-            "hoặc Linear Dodge ở mục ‘Hòa trộn ảnh’ trong Bố cục thông minh."
+            "Mỗi input có hòa trộn riêng. Chọn Ảnh gốc để giữ nguyên file; chọn Lighten/Screen để bỏ nền đen "
+            "trong cả preview và video render."
         )
         asset_blend_note.setWordWrap(True)
         asset_blend_note.setObjectName("muted")
@@ -476,15 +492,27 @@ class VisualCreatorPage(QWidget):
         self.audio = FileField("Nhạc kèm theo visual — không điều khiển sóng", AUDIO_FILTER, optional=True)
         self.waveform = QComboBox()
         _add_options(self.waveform, [("Chạy file sóng lặp độc lập", "FILE"), ("Tắt lớp sóng", "NONE")])
+        self.waveform_blend = QComboBox()
+        _add_options(self.waveform_blend, [
+            ("Ảnh gốc (Normal)", "normal"),
+            ("Lighten — bỏ nền đen", "lighten"),
+            ("Screen — bỏ nền đen, sáng mềm", "screen"),
+            ("Linear Dodge (Add)", "addition"),
+        ])
+        self.input_blends["waveform"] = self.waveform_blend
         self.waveform_remove_white = QCheckBox("Xóa nền trắng của file sóng")
         self.waveform_remove_white.setChecked(True)
         wave_layout.addWidget(self.waveform_media)
         wave_layout.addWidget(self.audio)
         wave_layout.addWidget(self.waveform)
+        wave_blend_row = QHBoxLayout()
+        wave_blend_row.addWidget(QLabel("Hòa trộn file sóng"))
+        wave_blend_row.addWidget(self.waveform_blend, 1)
+        wave_layout.addLayout(wave_blend_row)
         wave_layout.addWidget(self.waveform_remove_white)
         wave_note = QLabel(
             "File sóng chỉ chạy lặp theo thời gian của chính file, không tăng giảm theo âm lượng nhạc. "
-            "Click lớp Sóng trên preview để đặt Normal/Lighten/Screen/Linear Dodge."
+            "Chọn Lighten/Screen để bỏ nền đen; bật Xóa nền trắng nếu MOV không có alpha và bị đóng nền trắng."
         )
         wave_note.setWordWrap(True)
         wave_note.setObjectName("muted")
@@ -511,18 +539,22 @@ class VisualCreatorPage(QWidget):
         self.effect_overlay_opacity.setRange(0, 100)
         self.effect_overlay_opacity.setValue(100)
         self.effect_overlay_opacity.setToolTip("Độ mờ của overlay toàn cảnh")
+        self.effect_overlay_remove_white = QCheckBox("Xóa nền trắng của overlay toàn cảnh")
+        self.effect_overlay_remove_white.setChecked(False)
         overlay_controls.addWidget(QLabel("Hòa trộn"))
         overlay_controls.addWidget(self.effect_overlay_blend, 1)
         overlay_controls.addWidget(QLabel("Độ mờ"))
         overlay_controls.addWidget(self.effect_overlay_opacity, 1)
         overlay_note = QLabel(
             "MOV/GIF/MP4 được phát và lặp theo thời lượng gốc, không bị giữ ở frame đầu. "
-            "Dùng Lighten/Screen cho overlay nền đen; dùng Normal cho file có kênh alpha."
+            "Dùng Lighten/Screen cho overlay nền đen; dùng Normal cho file có kênh alpha. "
+            "Nếu file không có alpha thật và đã bị đóng nền trắng, bật ‘Xóa nền trắng’ ở trên."
         )
         overlay_note.setWordWrap(True)
         overlay_note.setObjectName("notice")
         effects_layout.addWidget(self.effect_overlay)
         effects_layout.addLayout(overlay_controls)
+        effects_layout.addWidget(self.effect_overlay_remove_white)
         effects_layout.addWidget(overlay_note)
         self.effects = EffectPanel()
         effects_layout.addWidget(self.effects)
@@ -584,12 +616,24 @@ class VisualCreatorPage(QWidget):
         self.logo.changed.connect(lambda value: self.preview.set_source("logo", value))
         self.platform_icons.changed.connect(lambda value: self.preview.set_source("platform_icons", value))
         self.waveform_media.changed.connect(lambda value: self.preview.set_source("waveform_media", value))
+        self.waveform_remove_white.toggled.connect(
+            lambda value: self._set_preview_value("waveform_remove_white", value)
+        )
+        for kind, combo in self.input_blends.items():
+            combo.currentIndexChanged.connect(
+                lambda _index, kind=kind, combo=combo: self._set_input_blend(
+                    kind, str(_combo_value(combo))
+                )
+            )
         self.effect_overlay.changed.connect(lambda value: self.preview.set_source("effect_overlay", value))
         self.effect_overlay_blend.currentIndexChanged.connect(
             lambda _index: self._set_preview_value("effect_overlay_blend", _combo_value(self.effect_overlay_blend))
         )
         self.effect_overlay_opacity.valueChanged.connect(
             lambda value: self._set_preview_value("effect_overlay_opacity", value / 100)
+        )
+        self.effect_overlay_remove_white.toggled.connect(
+            lambda value: self._set_preview_value("effect_overlay_remove_white", value)
         )
         self.title.textChanged.connect(lambda value: self._set_preview_value("title", value))
         self.subtitle.textChanged.connect(lambda value: self._set_preview_value("subtitle", value))
@@ -631,6 +675,25 @@ class VisualCreatorPage(QWidget):
         setattr(self.preview, name, value)
         self.preview.update()
 
+    def _set_input_blend(self, kind: str, value: str) -> None:
+        mode = value if value in {"normal", "lighten", "screen", "addition"} else "normal"
+        for element_id, layout in self.elements.items():
+            if element_id.split("_copy_", 1)[0] == kind:
+                layout.blend_mode = mode
+        selected = str(self.element_choice.currentData() or "")
+        if selected.split("_copy_", 1)[0] == kind:
+            self._load_element_controls()
+        self.preview.update()
+
+    def _sync_input_blend_controls(self) -> None:
+        for kind, combo in self.input_blends.items():
+            layout = self.elements.get(kind)
+            if not layout:
+                continue
+            combo.blockSignals(True)
+            _set_combo_value(combo, layout.blend_mode)
+            combo.blockSignals(False)
+
     def _preview_effects(self) -> None:
         self.preview.effects = [item for item in self.effects.values() if item.enabled]
         self.preview.color_filter = self.color.preset.currentText()
@@ -664,6 +727,7 @@ class VisualCreatorPage(QWidget):
             result = compose_layout(self.analysis, self.elements, template, self.layout_variant, active)
             self.elements = result.elements
             self.preview.set_layouts(self.elements)
+            self._sync_input_blend_controls()
             self.preview.subject_bbox = result.analysis.subject_bbox
             self.text_color.setText(result.text_color)
             self.analysis_info.setText(
@@ -682,6 +746,7 @@ class VisualCreatorPage(QWidget):
         self.layout_variant = 0
         self.preview.subject_bbox = None
         self.preview.set_layouts(self.elements)
+        self._sync_input_blend_controls()
         self._refresh_element_combo("title")
         self.analysis_info.setText("Đã đặt lại bố cục và bỏ toàn bộ khóa vị trí.")
 
@@ -816,6 +881,12 @@ class VisualCreatorPage(QWidget):
         layout.locked = self.element_lock.isChecked()
         layout.visible = self.element_visible.isChecked()
         layout.normalized()
+        kind = str(element_id).split("_copy_", 1)[0]
+        if element_id == kind and kind in self.input_blends:
+            combo = self.input_blends[kind]
+            combo.blockSignals(True)
+            _set_combo_value(combo, layout.blend_mode)
+            combo.blockSignals(False)
         self.layout_mode.setCurrentText("MANUAL")
         self.preview.update()
 
@@ -834,6 +905,7 @@ class VisualCreatorPage(QWidget):
             effect_overlay=self.effect_overlay.text(),
             effect_overlay_blend=str(_combo_value(self.effect_overlay_blend)),
             effect_overlay_opacity=self.effect_overlay_opacity.value(),
+            effect_overlay_remove_white=self.effect_overlay_remove_white.isChecked(),
             output_folder=self.output_folder.text(), background_folder=self.background_folder.text(),
             batch_recursive=self.batch_recursive.isChecked(), output_name=self.output_name.text(), resolution=self.resolution.currentText(),
             fps=self.fps.value(), encoder=self.encoder.currentText(), animation=_combo_value(self.animation),
@@ -878,6 +950,7 @@ class VisualCreatorPage(QWidget):
         self.waveform_remove_white.setChecked(project.waveform_remove_white)
         _set_combo_value(self.effect_overlay_blend, project.effect_overlay_blend)
         self.effect_overlay_opacity.setValue(project.effect_overlay_opacity)
+        self.effect_overlay_remove_white.setChecked(project.effect_overlay_remove_white)
         self.ai_prompt.setPlainText(project.ai_prompt)
         _set_combo_value(self.ai_model, project.ai_model)
         _set_combo_value(self.ai_duration, project.ai_duration)
@@ -900,6 +973,7 @@ class VisualCreatorPage(QWidget):
         self.layout_variant = project.layout_variant
         self.elements = {name: ElementLayout(**asdict(layout)) for name, layout in project.elements.items()}
         self.preview.set_layouts(self.elements)
+        self._sync_input_blend_controls()
         self._refresh_element_combo("title")
         self.color.preset.setCurrentText(project.color_filter)
         self.color.set_values(project.manual_color)

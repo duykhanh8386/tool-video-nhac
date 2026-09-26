@@ -43,6 +43,7 @@ class CompositorTests(unittest.TestCase):
         overlay_index = graph.inputs.index("particles.mov")
         self.assertEqual(graph.inputs[overlay_index - 3:overlay_index], ["-stream_loop", "-1", "-i"])
         self.assertIn("setpts=PTS-STARTPTS,fps=30", graph.filter_complex)
+        self.assertIn("premultiply=inplace=1", graph.filter_complex)
         self.assertIn("blend=all_mode=screen:all_opacity=0.6500", graph.filter_complex)
         self.assertIn("crop=1920:1080", graph.filter_complex)
 
@@ -57,6 +58,17 @@ class CompositorTests(unittest.TestCase):
         self.assertIn("-loop", graph.inputs)
         self.assertIn("colorchannelmixer=aa=0.8000", graph.filter_complex)
         self.assertIn("overlay=x=0:y=0", graph.filter_complex)
+
+    def test_full_frame_overlay_can_remove_white_matte(self):
+        project = VisualProject(
+            background="background.png",
+            effect_overlay="white-matte.mov",
+            effect_overlay_blend="addition",
+            effect_overlay_remove_white=True,
+        )
+        graph = build_visual_graph(project, 1920, 1080)
+        self.assertIn("colorkey=0xFFFFFF:0.18:0.08", graph.filter_complex)
+        self.assertIn("premultiply=inplace=1", graph.filter_complex)
 
 
 if __name__ == "__main__":

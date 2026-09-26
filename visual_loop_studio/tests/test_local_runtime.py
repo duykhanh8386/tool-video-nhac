@@ -3,10 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from ai.local_runtime import (
     MODEL_DOWNLOADS,
     build_runtime_command,
+    extract_7z_archive,
     is_runtime_installed,
     missing_runtime_files,
     runtime_paths,
@@ -17,6 +20,7 @@ class LocalRuntimeTests(unittest.TestCase):
     def test_runtime_layout_and_hidden_server_command(self):
         with tempfile.TemporaryDirectory() as folder:
             paths = runtime_paths(folder)
+            self.assertEqual(paths["seven_zip"].name, "7zr.exe")
             paths["python"].parent.mkdir(parents=True)
             paths["python"].write_bytes(b"exe")
             paths["main"].parent.mkdir(parents=True)
@@ -56,6 +60,22 @@ class LocalRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(RuntimeError, "localhost"):
                 build_runtime_command(folder, "http://192.168.1.4:8188")
+
+    def test_7zr_extract_command_supports_native_comfy_archive(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            archive = root / "ComfyUI.7z"
+            archive.write_bytes(b"archive")
+            seven_zip = root / "7zr.exe"
+            seven_zip.write_bytes(b"exe")
+            with patch(
+                "ai.local_runtime.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="Everything is Ok"),
+            ) as run:
+                extract_7z_archive(archive, root / "output", seven_zip)
+            command = run.call_args.args[0]
+            self.assertEqual(command[:3], [str(seven_zip.resolve()), "x", "-y"])
+            self.assertIn(f"-o{(root / 'output').resolve()}", command)
 
 
 if __name__ == "__main__":

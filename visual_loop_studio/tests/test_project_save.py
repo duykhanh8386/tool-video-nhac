@@ -19,6 +19,7 @@ class ProjectModelTests(unittest.TestCase):
         original.effect_overlay = "C:/effects/light.mov"
         original.effect_overlay_blend = "screen"
         original.effect_overlay_opacity = 72
+        original.effect_overlay_remove_white = True
         original.background_folder = "C:/backgrounds"
         original.batch_recursive = True
         original.ai_engine = "LOCAL"

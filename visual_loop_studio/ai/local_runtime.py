@@ -22,6 +22,8 @@ COMFY_PORTABLE_URL = (
     "https://github.com/Comfy-Org/ComfyUI/releases/latest/download/"
     "ComfyUI_windows_portable_nvidia.7z"
 )
+SEVEN_ZIP_URL = "https://github.com/ip7z/7zip/releases/download/26.03/7zr.exe"
+SEVEN_ZIP_SHA256 = "ad4c82fadcbdf93c03b4fc440f300509c7d60c5c2f4d183e35d9d70d6957037d"
 MIN_FREE_BYTES = 32 * 1024**3
 COMFY_ARCHIVE_BYTES = 1_925_204_508
 COMFY_EXTRACT_RESERVE_BYTES = 8 * 1024**3
@@ -97,6 +99,7 @@ def runtime_paths(install_root: str | Path) -> dict[str, Path]:
         "main": comfy / "main.py",
         "models": comfy / "models",
         "archive": root / "downloads" / "ComfyUI_windows_portable_nvidia.7z",
+        "seven_zip": root / "tools" / "7zr.exe",
         "portable_marker": root / ".comfy-portable-ok",
     }
 
@@ -153,13 +156,18 @@ def install_local_runtime(
                 cancelled,
             )
         _raise_if_cancelled(cancelled)
-        progress(19, "Đang giải nén ComfyUI Portable; bước này có thể mất vài phút…")
-        try:
-            import py7zr
-        except ModuleNotFoundError as exc:
-            raise RuntimeError("Thiếu thư viện py7zr. Hãy cập nhật/cài lại Visual Loop Studio.") from exc
-        with py7zr.SevenZipFile(paths["archive"], mode="r") as archive:
-            archive.extractall(path=root)
+        if not _matches_sha256(paths["seven_zip"], SEVEN_ZIP_SHA256, minimum_bytes=100_000):
+            progress(18, "Đang tải 7-Zip chính thức để giải nén ComfyUI…")
+            _download(
+                SEVEN_ZIP_URL,
+                paths["seven_zip"],
+                lambda _value, message: progress(18, message),
+                cancelled,
+                SEVEN_ZIP_SHA256,
+            )
+        _raise_if_cancelled(cancelled)
+        progress(19, "Đang giải nén ComfyUI Portable bằng 7-Zip; bước này có thể mất vài phút…")
+        extract_7z_archive(paths["archive"], root, paths["seven_zip"])
         paths = runtime_paths(root)
         if not paths["python"].is_file() or not paths["main"].is_file():
             raise RuntimeError("Đã giải nén nhưng không tìm thấy ComfyUI_windows_portable hợp lệ.")
@@ -225,6 +233,30 @@ def required_free_bytes(install_root: str | Path) -> int:
         has_progress = has_progress or have > 0
         remaining += max(0, item.size_bytes - have)
     return max(remaining, 8 * 1024**3 if has_progress else MIN_FREE_BYTES)
+
+
+def extract_7z_archive(archive: str | Path, destination: str | Path, seven_zip: str | Path) -> None:
+    archive_path = Path(archive).resolve()
+    destination_path = Path(destination).resolve()
+    seven_zip_path = Path(seven_zip).resolve()
+    destination_path.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [str(seven_zip_path), "x", "-y", f"-o{destination_path}", str(archive_path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        **hidden_process_kwargs(),
+    )
+    if result.returncode != 0:
+        details = (result.stdout or "").strip()[-2000:]
+        raise RuntimeError(
+            f"7-Zip không giải nén được ComfyUI (mã {result.returncode}). "
+            f"File tải vẫn được giữ để thử lại.\n{details}"
+        )
 
 
 class LocalRuntimeManager:
@@ -369,8 +401,8 @@ def _download(
         )
 
 
-def _matches_sha256(path: Path, expected: str) -> bool:
-    if not path.is_file() or path.stat().st_size < 1024 * 1024:
+def _matches_sha256(path: Path, expected: str, minimum_bytes: int = 1024 * 1024) -> bool:
+    if not path.is_file() or path.stat().st_size < minimum_bytes:
         return False
     marker = path.with_suffix(path.suffix + ".sha256-ok")
     try:

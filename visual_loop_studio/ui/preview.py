@@ -6,6 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import cv2
+import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QCloseEvent, QFont, QImage, QMouseEvent, QPainter,
@@ -46,9 +47,11 @@ class CompositionPreview(QWidget):
         self.text_styles: dict[str, TextStyle] = default_text_styles()
         self.waveform = "Smooth sine waveform"
         self.waveform_media = ""
+        self.waveform_remove_white = True
         self.effect_overlay = ""
         self.effect_overlay_blend = "lighten"
         self.effect_overlay_opacity = 1.0
+        self.effect_overlay_remove_white = False
         self.effects: list[object] = []
         self.color_filter = "NONE"
         self.manual_color: dict[str, float] = {}
@@ -87,7 +90,7 @@ class CompositionPreview(QWidget):
             else:
                 reader = self._video_readers.get(path)
                 if reader is None:
-                    reader = _VideoPreviewReader(path)
+                    reader = _VideoPreviewReader(path, self.ffmpeg_path)
                     self._video_readers[path] = reader
                 pixmap = reader.frame_at(self._time)
                 if pixmap is None or pixmap.isNull():
@@ -245,6 +248,8 @@ class CompositionPreview(QWidget):
         pixmap = self._images.get(self.effect_overlay)
         if pixmap is None or pixmap.isNull() or self.effect_overlay_opacity <= 0:
             return
+        if self.effect_overlay_remove_white:
+            pixmap = _white_key_pixmap(pixmap)
         scaled = pixmap.scaled(
             round(rect.width()),
             round(rect.height()),
@@ -288,6 +293,8 @@ class CompositionPreview(QWidget):
         elif kind == "waveform":
             pixmap = self._images.get(self.waveform_media)
             if pixmap and not pixmap.isNull():
+                if self.waveform_remove_white:
+                    pixmap = _white_key_pixmap(pixmap)
                 scaled = pixmap.scaled(round(local.width()), round(local.height()), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 painter.drawPixmap(round(-scaled.width() / 2), round(-scaled.height() / 2), scaled)
             elif self.waveform != "FILE":
@@ -558,36 +565,104 @@ def _set_painter_blend(painter: QPainter, mode: str) -> None:
 
 
 class _VideoPreviewReader:
-    def __init__(self, path: str):
+    """Decode preview frames through FFmpeg so MOV alpha is not discarded."""
+
+    def __init__(self, path: str, ffmpeg: str = "ffmpeg"):
         self.path = path
+        self.ffmpeg = ffmpeg
         self.capture = cv2.VideoCapture(path)
         self.fps = float(self.capture.get(cv2.CAP_PROP_FPS) or 0) or 30.0
         self.frame_count = max(0, int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
+        source_width = max(1, int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 960))
+        source_height = max(1, int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 540))
+        self.width = min(960, source_width)
+        self.height = max(1, round(source_height * self.width / source_width))
         self.current_index = -1
+        self.fallback_index = -1
+        self.process: subprocess.Popen | None = None
+        self.last_pixmap: QPixmap | None = None
+        self.ffmpeg_failed = False
 
     def frame_at(self, seconds: float) -> QPixmap | None:
-        if not self.capture.isOpened():
-            return None
         target = max(0, int(seconds * self.fps))
         if self.frame_count > 0:
             target %= self.frame_count
-        if target <= self.current_index or target - self.current_index > 4:
-            self.capture.set(cv2.CAP_PROP_POS_FRAMES, target)
+        if not self.ffmpeg_failed:
+            pixmap = self._ffmpeg_frame(target)
+            if pixmap is not None and not pixmap.isNull():
+                return pixmap
+            self.ffmpeg_failed = True
+            self._stop_ffmpeg()
+        return self._opencv_frame(target)
+
+    def _ffmpeg_frame(self, target: int) -> QPixmap | None:
+        if target == self.current_index and self.last_pixmap is not None:
+            return self.last_pixmap
+        restart_gap = max(6, round(self.fps * .5))
+        if self.process is None or target < self.current_index or target - self.current_index > restart_gap:
+            self._start_ffmpeg(target / self.fps)
             self.current_index = target - 1
-        while self.current_index + 1 < target:
+        if self.process is None or self.process.stdout is None:
+            return None
+        latest: QPixmap | None = None
+        while self.current_index < target:
+            payload = _read_exact(self.process.stdout, self.width * self.height * 4)
+            if payload is None:
+                return None
+            image = QImage(
+                payload,
+                self.width,
+                self.height,
+                self.width * 4,
+                QImage.Format.Format_RGBA8888,
+            )
+            latest = QPixmap.fromImage(image.copy())
+            self.current_index += 1
+        if latest is not None:
+            self.last_pixmap = latest
+        return self.last_pixmap
+
+    def _start_ffmpeg(self, seconds: float) -> None:
+        self._stop_ffmpeg()
+        command = [
+            self.ffmpeg, "-hide_banner", "-loglevel", "error", "-stream_loop", "-1",
+            "-ss", f"{max(0.0, seconds):.6f}", "-i", self.path,
+            "-an", "-sn", "-dn",
+            "-vf", f"fps={self.fps:.6f},scale={self.width}:{self.height}:flags=fast_bilinear",
+            "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1",
+        ]
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=self.width * self.height * 8,
+                **hidden_process_kwargs(),
+            )
+        except OSError:
+            self.process = None
+
+    def _opencv_frame(self, target: int) -> QPixmap | None:
+        if not self.capture.isOpened():
+            return None
+        if target <= self.fallback_index or target - self.fallback_index > 4:
+            self.capture.set(cv2.CAP_PROP_POS_FRAMES, target)
+            self.fallback_index = target - 1
+        while self.fallback_index + 1 < target:
             if not self.capture.grab():
                 self.capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                self.current_index = -1
+                self.fallback_index = -1
                 break
-            self.current_index += 1
+            self.fallback_index += 1
         ok, frame = self.capture.read()
         if not ok or frame is None:
             self.capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            self.current_index = -1
+            self.fallback_index = -1
             ok, frame = self.capture.read()
             if not ok or frame is None:
                 return None
-        self.current_index += 1
+        self.fallback_index += 1
         height, width = frame.shape[:2]
         maximum_width = 960
         if width > maximum_width:
@@ -598,7 +673,49 @@ class _VideoPreviewReader:
         return QPixmap.fromImage(image.copy())
 
     def close(self) -> None:
+        self._stop_ffmpeg()
         self.capture.release()
+
+    def _stop_ffmpeg(self) -> None:
+        process = self.process
+        self.process = None
+        if not process:
+            return
+        if process.stdout:
+            process.stdout.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
+
+
+def _read_exact(stream, size: int) -> bytes | None:
+    payload = bytearray()
+    while len(payload) < size:
+        chunk = stream.read(size - len(payload))
+        if not chunk:
+            return None
+        payload.extend(chunk)
+    return bytes(payload)
+
+
+def _white_key_pixmap(pixmap: QPixmap) -> QPixmap:
+    image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+    width, height = image.width(), image.height()
+    if width <= 0 or height <= 0:
+        return pixmap
+    rows = np.frombuffer(image.bits(), dtype=np.uint8, count=image.sizeInBytes()).reshape(
+        height, image.bytesPerLine()
+    )
+    pixels = rows[:, :width * 4].reshape(height, width, 4).copy()
+    distance = 255 - pixels[:, :, :3].min(axis=2).astype(np.int16)
+    alpha_factor = np.clip((distance - 12) / 42, 0.0, 1.0)
+    pixels[:, :, 3] = np.rint(pixels[:, :, 3].astype(np.float32) * alpha_factor).astype(np.uint8)
+    keyed = QImage(pixels.data, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
+    return QPixmap.fromImage(keyed)
 
 
 def _video_thumbnail(path: str, ffmpeg: str = "ffmpeg") -> QPixmap:

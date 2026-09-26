@@ -219,10 +219,11 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
         opacity = min(1.0, max(0.0, project.effect_overlay_opacity / 100))
         blend = str(project.effect_overlay_blend or "lighten").lower()
         overlay_label = "effectoverlay"
+        key_white = ",colorkey=0xFFFFFF:0.18:0.08" if project.effect_overlay_remove_white else ""
         base_chain = (
             f"[{input_index}:v]setpts=PTS-STARTPTS,fps={project.fps},"
             f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},format=rgba"
+            f"crop={width}:{height},format=rgba{key_white}"
         )
         if blend == "normal":
             filters.append(f"{base_chain},colorchannelmixer=aa={opacity:.4f}[{overlay_label}]")
@@ -231,7 +232,9 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
             )
         else:
             blend = blend if blend in {"lighten", "screen", "addition"} else "lighten"
-            filters.append(f"{base_chain}[{overlay_label}]")
+            # Blend filters operate on RGB even where alpha is zero. Premultiply
+            # first so transparent MOV pixels cannot wash the whole frame white.
+            filters.append(f"{base_chain},premultiply=inplace=1[{overlay_label}]")
             filters.append(
                 f"[{current}][{overlay_label}]blend=all_mode={blend}:all_opacity={opacity:.4f}:"
                 "shortest=1[effectlayer]"

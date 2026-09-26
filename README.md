@@ -25,6 +25,7 @@ FFmpeg, FFprobe, kiểm tra GPU và helper cập nhật đều chạy ẩn trong
 - Có thể nhập prompt và dùng Veo 3.1 để tạo chuyển động tay/chân, người, khói, lửa hoặc ánh sáng từ ảnh nguồn. Cần Gemini API key và tài khoản có quyền dùng Veo.
 - File sóng dạng PNG/GIF/MOV/MP4 chạy lặp độc lập, không co giãn theo âm lượng nhạc; có tùy chọn xóa nền trắng.
 - Có input **Overlay toàn cảnh** cho PNG/GIF/MOV/MP4. File động phát và tự lặp theo thời lượng gốc trong cả preview lẫn video xuất; hỗ trợ Normal, Lighten, Screen, Linear Dodge (Add) và độ mờ.
+- Preview MOV được giải mã thành RGBA để giữ kênh alpha. File sóng và overlay toàn cảnh đều có tùy chọn xóa nền trắng nếu video nguồn đã bị đóng nền trắng thay vì có alpha thật.
 - Preview giải mã frame thật của video nền, file sóng và overlay thay vì chỉ giữ frame đầu. Hiệu ứng toàn khung tích hợp cũng hiển thị theo cường độ đã chọn.
 - Veo tạo video 24 fps nên ứng dụng tự chuyển FPS project về 24 sau khi tạo để giữ nhịp khung hình mượt.
 
@@ -37,6 +38,8 @@ EXE của Visual Loop Studio là portable; không cần chạy `install.bat` hay
 - `wan2.2_vae.safetensors` → `ComfyUI/models/vae/`
 
 Sau khi cài xong, Visual Loop Studio tự khởi động ComfyUI ẩn ở `http://127.0.0.1:8188` khi mở app và tự tắt tiến trình do app mở khi thoát. Không có cửa sổ CMD nhấp nháy; log nằm trong `VisualLoopStudio/logs/comfyui.log`. File tải dở được giữ để tiếp tục nếu mạng bị ngắt. Dùng preset `720p 1280×704 — RTX 3060`; các video được chạy tuần tự để hạn chế tràn VRAM.
+
+Gói ComfyUI Portable được giải nén bằng `7zr.exe` chính thức của 7-Zip để hỗ trợ bộ lọc BCJ2; file 7zr được kiểm tra SHA-256 trước khi chạy. Nếu bản cũ đã tải xong archive ComfyUI nhưng lỗi ở bước BCJ2, bản mới sẽ dùng lại archive đó thay vì tải lại gần 2 GB.
 
 ## Chỉnh element và render hàng loạt
 

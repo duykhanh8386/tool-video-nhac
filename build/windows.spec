@@ -1,5 +1,4 @@
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules
 
 
 root = Path.cwd()
@@ -19,7 +18,7 @@ a = Analysis(
     pathex=[str(app_dir)],
     binaries=binaries,
     datas=[],
-    hiddenimports=["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "cv2", "numpy"] + collect_submodules("py7zr"),
+    hiddenimports=["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "cv2", "numpy"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
