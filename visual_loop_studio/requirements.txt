@@ -1,0 +1,4 @@
+# Widgets/Core/Gui only. This avoids the large Qt Multimedia/WebEngine addon bundle.
+PySide6-Essentials>=6.7,<7
+numpy>=1.26
+opencv-python-headless>=4.10

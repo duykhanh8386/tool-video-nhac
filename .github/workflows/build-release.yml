@@ -1,0 +1,98 @@
+name: Build and Release Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: visual_loop_studio/requirements.txt
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r visual_loop_studio/requirements.txt
+          python -m pip install pyinstaller==6.16.0
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          $env:PYTHONDONTWRITEBYTECODE = "1"
+          Push-Location visual_loop_studio
+          python -m unittest discover -s tests -v
+          Pop-Location
+
+      - name: Bundle FFmpeg and stamp version
+        shell: pwsh
+        run: |
+          try {
+            & tools/bundle_ffmpeg.ps1 -Destination visual_loop_studio/vendor/bin
+          }
+          catch {
+            Write-Host "A portable FFmpeg pair was not found on the runner; installing ffmpeg-full."
+            choco install ffmpeg-full -y --no-progress
+            & tools/bundle_ffmpeg.ps1 -Destination visual_loop_studio/vendor/bin
+          }
+          $version = "1.0.${{ github.run_number }}.${{ github.run_attempt }}"
+          python tools/stamp_version.py --version $version --commit "${{ github.sha }}"
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TAG=v$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build portable EXE
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --distpath dist --workpath .pyinstaller build/windows.spec
+          if (-not (Test-Path dist/VisualLoopStudio-Windows-x64.exe)) { throw "EXE was not created" }
+          & dist/VisualLoopStudio-Windows-x64.exe --version
+
+      - name: Generate SHA-256
+        shell: pwsh
+        run: |
+          $asset = "dist/VisualLoopStudio-Windows-x64.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant()
+          "$hash  VisualLoopStudio-Windows-x64.exe" | Set-Content -Encoding ascii "$asset.sha256"
+          Get-Item $asset, "$asset.sha256" | Select-Object Name, Length
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VisualLoopStudio-Windows-x64-${{ env.VERSION }}
+          path: |
+            dist/VisualLoopStudio-Windows-x64.exe
+            dist/VisualLoopStudio-Windows-x64.exe.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$env:TAG" `
+            "dist/VisualLoopStudio-Windows-x64.exe" `
+            "dist/VisualLoopStudio-Windows-x64.exe.sha256" `
+            --target "${{ github.sha }}" `
+            --title "Visual Loop Studio $env:VERSION" `
+            --generate-notes `
+            --latest

@@ -1,0 +1,13 @@
+visual_loop_studio/.venv/
+visual_loop_studio/__pycache__/
+visual_loop_studio/**/__pycache__/
+visual_loop_studio/cache/
+visual_loop_studio/logs/
+visual_loop_studio/data/settings.json
+.test_media/
+*.pyc
+.build-venv/
+.pyinstaller/
+dist/
+visual_loop_studio/vendor/bin/*.exe
+build/version_info.txt
