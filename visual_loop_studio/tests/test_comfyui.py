@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from ai.comfyui import (
+    WAN_DMD_LORA,
     WAN_MODEL,
+    WAN_VARIANT_DMD,
     WAN_TEXT_ENCODER,
     WAN_VAE,
     _find_video_file,
@@ -40,6 +42,21 @@ class ComfyUiWorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["9"]["inputs"]["seed"], 123)
         self.assertIn("Locked-off tripod camera", workflow["4"]["inputs"]["text"])
         self.assertIn("Khói bay nhẹ", workflow["4"]["inputs"]["text"])
+
+    def test_dmd_workflow_uses_base_model_lora_and_four_step_operating_point(self):
+        workflow = build_wan22_workflow(
+            "uploaded.png", "Nhân vật cử động nhẹ", steps=20, cfg=5.0,
+            wan_variant=WAN_VARIANT_DMD,
+        )
+        self.assertEqual(workflow["1"]["inputs"]["unet_name"], WAN_MODEL)
+        self.assertEqual(workflow["13"]["class_type"], "LoraLoaderModelOnly")
+        self.assertEqual(workflow["13"]["inputs"]["lora_name"], WAN_DMD_LORA)
+        self.assertEqual(workflow["13"]["inputs"]["strength_model"], 1.0)
+        self.assertEqual(workflow["8"]["inputs"]["model"], ["13", 0])
+        self.assertEqual(workflow["8"]["inputs"]["shift"], 5.0)
+        self.assertEqual(workflow["9"]["inputs"]["steps"], 4)
+        self.assertEqual(workflow["9"]["inputs"]["cfg"], 1.0)
+        self.assertEqual(workflow["9"]["inputs"]["sampler_name"], "uni_pc")
 
     def test_custom_api_workflow_is_injected(self):
         workflow = build_wan22_workflow("old.png", "old prompt")

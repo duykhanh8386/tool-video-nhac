@@ -20,7 +20,7 @@ FFmpeg, FFprobe, kiểm tra GPU và helper cập nhật đều chạy ẩn trong
 ## Chuyển động AI và file sóng
 
 - Ảnh nền mặc định dùng camera cố định, không còn tự zoom/pan gây rung toàn khung.
-- Có chế độ **Wan 2.2 TI2V 5B Native** chạy local qua ComfyUI: không token, không API key, không credit. Mã nguồn/model dùng giấy phép Apache 2.0.
+- Có hai chế độ Wan local qua ComfyUI: **Chất lượng 20 bước** và **DMD nhanh 4 bước**. Cả hai không dùng token/API key/credit và đều dùng thành phần được cấp phép Apache 2.0, phù hợp sử dụng thương mại theo các điều khoản của giấy phép.
 - Ngay trong phần **Nguồn ảnh AI**, có thể chọn một ảnh, chọn nhiều ảnh riêng lẻ hoặc chọn cả thư mục (kể cả thư mục con). Một prompt dùng chung sẽ tạo clip AI cho từng ảnh theo hàng đợi, đưa từng clip vào cùng bố cục, rồi xuất đủ số video.
 - Có thể nhập prompt và dùng Veo 3.1 để tạo chuyển động tay/chân, người, khói, lửa hoặc ánh sáng từ ảnh nguồn. Cần Gemini API key và tài khoản có quyền dùng Veo.
 - File sóng dạng PNG/GIF/MOV/MP4 chạy lặp độc lập, không co giãn theo âm lượng nhạc; có tùy chọn xóa nền trắng.
@@ -31,11 +31,14 @@ FFmpeg, FFprobe, kiểm tra GPU và helper cập nhật đều chạy ẩn trong
 
 ## Thiết lập Wan 2.2 local đa GPU
 
-EXE của Visual Loop Studio là portable; không cần chạy `install.bat` hay `run.bat`. Ở lần dùng AI Local đầu tiên, bấm **Cài AI Local tự động (chỉ lần đầu)**, chọn ổ đĩa còn tối thiểu 32 GB trống và xác nhận. Tool tự nhận diện GPU và tải đúng bản [ComfyUI Portable chính thức](https://github.com/Comfy-Org/ComfyUI/releases): NVIDIA CUDA, Intel Arc XPU, AMD hoặc chế độ CPU. Sau đó tool tải ba model theo [hướng dẫn Wan 2.2 chính thức](https://docs.comfy.org/tutorials/video/wan/wan2_2):
+EXE của Visual Loop Studio là portable; không cần chạy `install.bat` hay `run.bat`. Ở lần dùng AI Local đầu tiên, bấm **Cài AI Local tự động (chỉ lần đầu)**, chọn ổ đĩa còn tối thiểu 32 GB trống và xác nhận. Tool tự nhận diện GPU và tải đúng bản [ComfyUI Portable chính thức](https://github.com/Comfy-Org/ComfyUI/releases): NVIDIA CUDA, Intel Arc XPU, AMD hoặc chế độ CPU. Cả hai chế độ dùng chung checkpoint Wan, text encoder và VAE; chế độ DMD chỉ tải thêm LoRA:
 
-- `wan2.2_ti2v_5B_fp16.safetensors` → `ComfyUI/models/diffusion_models/`
+- **Chất lượng 20 bước:** `wan2.2_ti2v_5B_fp16.safetensors` (Apache 2.0) → `ComfyUI/models/diffusion_models/`
+- **DMD 4 bước:** `wan2.2_5b_nonar_dmd_4step_lora_r64_comfy.safetensors` (Apache 2.0, khoảng 645 MB) → `ComfyUI/models/loras/`
 - `umt5_xxl_fp8_e4m3fn_scaled.safetensors` → `ComfyUI/models/text_encoders/`
 - `wan2.2_vae.safetensors` → `ComfyUI/models/vae/`
+
+LoRA gốc dùng key PEFT. Tool kiểm tra SHA-256, tự đổi 600 tên tensor sang key native của ComfyUI mà không thay đổi dữ liệu trọng số, rồi mới cho phép chạy workflow 4 bước.
 
 Sau khi cài xong, Visual Loop Studio tự khởi động ComfyUI ẩn ở `http://127.0.0.1:8188` khi mở app và tự tắt tiến trình do app mở khi thoát. Không có cửa sổ CMD nhấp nháy; log nằm trong `VisualLoopStudio/logs/comfyui.log`. File tải dở được giữ để tiếp tục nếu mạng bị ngắt. Nếu chuyển sang máy dùng hãng GPU khác, tool thay riêng backend Python và giữ lại model Wan đã tải. Các video được chạy tuần tự để hạn chế tràn VRAM.
 

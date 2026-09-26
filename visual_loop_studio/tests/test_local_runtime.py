@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,14 +9,18 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ai.local_runtime import (
+    DMD_LORA_DOWNLOAD,
     MODEL_DOWNLOADS,
     RUNTIME_BACKENDS,
+    _convert_dmd_lora_for_comfyui,
+    _read_safetensors_header,
     build_runtime_command,
     detect_runtime_backend,
     extract_7z_archive,
     installed_runtime_backend,
     is_runtime_installed,
     missing_runtime_files,
+    model_downloads_for_variant,
     runtime_paths,
 )
 
@@ -58,6 +64,59 @@ class LocalRuntimeTests(unittest.TestCase):
             self.assertTrue(item.url.startswith("https://"))
             self.assertEqual(len(item.sha256), 64)
             int(item.sha256, 16)
+
+    def test_dmd_variant_keeps_base_checkpoint_and_adds_small_lora(self):
+        downloads = model_downloads_for_variant("dmd4")
+        self.assertEqual(len(downloads), 4)
+        self.assertEqual(downloads[:3], MODEL_DOWNLOADS)
+        self.assertEqual(downloads[3], DMD_LORA_DOWNLOAD)
+        self.assertEqual(DMD_LORA_DOWNLOAD.folder, "loras")
+        self.assertLess(DMD_LORA_DOWNLOAD.size_bytes, 700 * 1024**2)
+        self.assertEqual(len(DMD_LORA_DOWNLOAD.sha256), 64)
+
+    def test_runtime_readiness_is_specific_to_selected_wan_model(self):
+        with tempfile.TemporaryDirectory() as folder:
+            paths = runtime_paths(folder)
+            paths["python"].parent.mkdir(parents=True)
+            paths["python"].write_bytes(b"exe")
+            paths["main"].parent.mkdir(parents=True)
+            paths["main"].write_text("# comfy", encoding="utf-8")
+            paths["portable_marker"].write_text("ok", encoding="ascii")
+            for item in MODEL_DOWNLOADS:
+                model = paths["models"] / item.folder / item.filename
+                model.parent.mkdir(parents=True, exist_ok=True)
+                model.write_bytes(b"0" * 1024 * 1024)
+            self.assertTrue(is_runtime_installed(folder, wan_variant="quality"))
+            self.assertFalse(is_runtime_installed(folder, wan_variant="dmd4"))
+            self.assertIn(DMD_LORA_DOWNLOAD.filename, missing_runtime_files(folder, wan_variant="dmd4"))
+
+    def test_peft_dmd_keys_are_rewritten_for_native_comfyui(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.safetensors"
+            destination = Path(folder) / "converted.safetensors"
+            header = {"__metadata__": {"format": "pt"}}
+            offset = 0
+            for block in range(30):
+                for module in range(10):
+                    base = f"base_model.model.blocks.{block}.module_{module}"
+                    for side in ("A", "B"):
+                        header[f"{base}.lora_{side}.weight"] = {
+                            "dtype": "F16", "shape": [1], "data_offsets": [offset, offset + 2]
+                        }
+                        offset += 2
+            encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
+            encoded += b" " * (-len(encoded) % 8)
+            with source.open("wb") as stream:
+                stream.write(struct.pack("<Q", len(encoded)))
+                stream.write(encoded)
+                stream.write(b"\0" * offset)
+
+            _convert_dmd_lora_for_comfyui(source, destination)
+            converted, _length = _read_safetensors_header(destination)
+            keys = [key for key in converted if key != "__metadata__"]
+            self.assertEqual(len(keys), 600)
+            self.assertTrue(all(key.startswith("diffusion_model.blocks.") for key in keys))
+            self.assertFalse(any(key.startswith("base_model.model.") for key in keys))
 
     def test_gpu_vendor_detection_selects_matching_portable_backend(self):
         cases = (

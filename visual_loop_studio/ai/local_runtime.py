@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import threading
 import time
@@ -16,7 +17,15 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from ai.comfyui import WAN_MODEL, WAN_TEXT_ENCODER, WAN_VAE
+from ai.comfyui import (
+    WAN_DMD_LORA,
+    WAN_MODEL,
+    WAN_TEXT_ENCODER,
+    WAN_VAE,
+    WAN_VARIANT_DMD,
+    WAN_VARIANT_QUALITY,
+    normalize_wan_variant,
+)
 from utils.paths import LOG_DIR, USER_DATA_ROOT
 from utils.process import hidden_process_kwargs
 
@@ -86,6 +95,128 @@ MODEL_DOWNLOADS = (
         1_409_400_960,
     ),
 )
+
+DMD_LORA_DOWNLOAD = ModelDownload(
+    WAN_DMD_LORA,
+    "loras",
+    "https://huggingface.co/Perflow-Shuai/"
+    "Wan2.2-5B-NonAR-DMD-4Step-LoRA-r64-iter1600/resolve/main/adapter_model.safetensors",
+    "da4a75094b4afdf5fbdf47a07530151b9ef47f2fffebc4c8675683ad049c32dc",
+    644_949_280,
+)
+DMD_LORA_SOURCE_FILENAME = "wan2.2_5b_nonar_dmd_4step_lora_r64_peft.safetensors"
+DMD_LORA_TENSOR_COUNT = 600
+
+
+def model_downloads_for_variant(wan_variant: str = WAN_VARIANT_QUALITY) -> tuple[ModelDownload, ...]:
+    variant = normalize_wan_variant(wan_variant)
+    return (*MODEL_DOWNLOADS, DMD_LORA_DOWNLOAD) if variant == WAN_VARIANT_DMD else MODEL_DOWNLOADS
+
+
+def _install_model_download(
+    item: ModelDownload,
+    destination: Path,
+    install_root: Path,
+    progress: Callable[[int, str], None],
+    cancelled: Callable[[], bool],
+) -> None:
+    if item != DMD_LORA_DOWNLOAD:
+        _download(item.url, destination, progress, cancelled, item.sha256)
+        return
+
+    source = install_root / "downloads" / DMD_LORA_SOURCE_FILENAME
+    if not _matches_sha256(source, item.sha256):
+        _download(item.url, source, progress, cancelled, item.sha256)
+    _raise_if_cancelled(cancelled)
+    progress(97, "Đang chuyển key LoRA DMD sang định dạng ComfyUI…")
+    _convert_dmd_lora_for_comfyui(source, destination, cancelled)
+    if not _is_converted_dmd_lora(destination):
+        raise RuntimeError("Đã chuyển LoRA DMD nhưng file kết quả không tương thích ComfyUI.")
+    source.unlink(missing_ok=True)
+    progress(100, f"Đã kiểm tra tương thích ComfyUI: {destination.name}")
+
+
+def _model_download_ready(path: Path, item: ModelDownload) -> bool:
+    if item == DMD_LORA_DOWNLOAD:
+        return _is_converted_dmd_lora(path)
+    return _matches_sha256(path, item.sha256)
+
+
+def _read_safetensors_header(path: Path) -> tuple[dict, int]:
+    if not path.is_file() or path.stat().st_size < 8:
+        raise ValueError("File safetensors không tồn tại hoặc bị thiếu dữ liệu.")
+    with path.open("rb") as stream:
+        raw_length = stream.read(8)
+        header_length = struct.unpack("<Q", raw_length)[0]
+        if not 2 <= header_length <= 16 * 1024 * 1024:
+            raise ValueError("Header safetensors không hợp lệ.")
+        header = json.loads(stream.read(header_length).decode("utf-8"))
+    if not isinstance(header, dict):
+        raise ValueError("Header safetensors không phải object JSON.")
+    return header, header_length
+
+
+def _is_converted_dmd_lora(path: Path) -> bool:
+    try:
+        if path.stat().st_size < 600 * 1024**2:
+            return False
+        header, _header_length = _read_safetensors_header(path)
+    except (OSError, ValueError, json.JSONDecodeError, struct.error, UnicodeDecodeError):
+        return False
+    tensor_keys = [key for key in header if key != "__metadata__"]
+    return (
+        len(tensor_keys) == DMD_LORA_TENSOR_COUNT
+        and all(key.startswith("diffusion_model.blocks.") for key in tensor_keys)
+        and all(key.endswith((".lora_A.weight", ".lora_B.weight")) for key in tensor_keys)
+    )
+
+
+def _convert_dmd_lora_for_comfyui(
+    source: Path,
+    destination: Path,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    """Rewrite PEFT key names without loading or changing the tensor data."""
+    cancelled = cancelled or (lambda: False)
+    header, old_header_length = _read_safetensors_header(source)
+    converted: dict = {}
+    converted_count = 0
+    prefix = "base_model.model."
+    for key, value in header.items():
+        if key == "__metadata__":
+            new_key = key
+        elif key.startswith(prefix) and key.endswith((".lora_A.weight", ".lora_B.weight")):
+            new_key = "diffusion_model." + key[len(prefix):]
+            converted_count += 1
+        else:
+            raise RuntimeError(f"LoRA DMD có tensor không hỗ trợ: {key}")
+        if new_key in converted:
+            raise RuntimeError(f"LoRA DMD có tensor trùng sau khi chuyển đổi: {new_key}")
+        converted[new_key] = value
+    if converted_count != DMD_LORA_TENSOR_COUNT:
+        raise RuntimeError(
+            f"LoRA DMD cần {DMD_LORA_TENSOR_COUNT} tensor nhưng tìm thấy {converted_count}; "
+            "nguồn model có thể đã thay đổi."
+        )
+
+    header_bytes = json.dumps(converted, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    header_bytes += b" " * (-len(header_bytes) % 8)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".converting")
+    try:
+        with source.open("rb") as source_stream, temporary.open("wb") as output_stream:
+            source_stream.seek(8 + old_header_length)
+            output_stream.write(struct.pack("<Q", len(header_bytes)))
+            output_stream.write(header_bytes)
+            while True:
+                _raise_if_cancelled(cancelled)
+                chunk = source_stream.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                output_stream.write(chunk)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class RuntimeInstallCancelled(RuntimeError):
@@ -205,6 +336,7 @@ def installed_runtime_backend(paths: dict[str, Path | RuntimeBackend]) -> str:
 def missing_runtime_files(
     install_root: str | Path,
     expected_backend: RuntimeBackend | str | None = None,
+    wan_variant: str = WAN_VARIANT_QUALITY,
 ) -> list[str]:
     selected = RUNTIME_BACKENDS.get(expected_backend, None) if isinstance(expected_backend, str) else expected_backend
     selected = selected or detect_runtime_backend()
@@ -222,9 +354,14 @@ def missing_runtime_files(
             missing.append(label)
     if not paths["portable_marker"].is_file():
         missing.append("xác nhận cài đặt ComfyUI hoàn chỉnh")
-    for item in MODEL_DOWNLOADS:
+    for item in model_downloads_for_variant(wan_variant):
         model = paths["models"] / item.folder / item.filename
-        if not model.is_file() or model.stat().st_size < 1024 * 1024:
+        installed = (
+            _is_converted_dmd_lora(model)
+            if item == DMD_LORA_DOWNLOAD
+            else model.is_file() and model.stat().st_size >= 1024 * 1024
+        )
+        if not installed:
             missing.append(item.filename)
     return missing
 
@@ -232,11 +369,12 @@ def missing_runtime_files(
 def is_runtime_installed(
     install_root: str | Path,
     expected_backend: RuntimeBackend | str | None = None,
+    wan_variant: str = WAN_VARIANT_QUALITY,
 ) -> bool:
     if not str(install_root or "").strip():
         return False
     try:
-        return not missing_runtime_files(install_root, expected_backend)
+        return not missing_runtime_files(install_root, expected_backend, wan_variant)
     except OSError:
         return False
 
@@ -245,15 +383,18 @@ def install_local_runtime(
     install_root: str | Path,
     progress: Callable[[int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    wan_variant: str = WAN_VARIANT_QUALITY,
 ) -> str:
     progress = progress or (lambda _value, _message: None)
     cancelled = cancelled or (lambda: False)
+    wan_variant = normalize_wan_variant(wan_variant)
+    downloads = model_downloads_for_variant(wan_variant)
     root = Path(install_root).expanduser().resolve()
     backend = detect_runtime_backend()
     root.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(root).free
-    required = required_free_bytes(root, backend)
-    if free < required and not is_runtime_installed(root, backend):
+    required = required_free_bytes(root, backend, wan_variant)
+    if free < required and not is_runtime_installed(root, backend, wan_variant):
         raise RuntimeError(
             f"Ổ đĩa chỉ còn {free / 1024**3:.1f} GB. Cần thêm khoảng {required / 1024**3:.1f} GB trống "
             "để tải/tiếp tục cài ComfyUI + Wan 2.2."
@@ -301,22 +442,23 @@ def install_local_runtime(
     else:
         progress(20, f"Đã có ComfyUI Portable {backend.label}; bỏ qua phần tải chương trình.")
 
-    ranges = ((22, 62), (62, 91), (91, 99))
-    for item, (start, end) in zip(MODEL_DOWNLOADS, ranges):
+    total_bytes = sum(item.size_bytes for item in downloads)
+    consumed_bytes = 0
+    for item in downloads:
+        start = 22 + round(77 * consumed_bytes / total_bytes)
+        consumed_bytes += item.size_bytes
+        end = 22 + round(77 * consumed_bytes / total_bytes)
         _raise_if_cancelled(cancelled)
         destination = paths["models"] / item.folder / item.filename
-        if _matches_sha256(destination, item.sha256):
+        if _model_download_ready(destination, item):
             progress(end, f"Đã có model hợp lệ: {item.filename}")
             continue
         progress(start, f"Đang tải {item.filename}…")
-        _download(
-            item.url,
-            destination,
+        _install_model_download(
+            item, destination, root,
             lambda value, message, start=start, end=end: progress(
                 start + round(value * (end - start) / 100), message
-            ),
-            cancelled,
-            item.sha256,
+            ), cancelled,
         )
     marker = root / "installed.json"
     marker.write_text(
@@ -325,13 +467,15 @@ def install_local_runtime(
                 "runtime": str(paths["portable"]),
                 "backend": backend.key,
                 "backend_label": backend.label,
-                "models": [item.filename for item in MODEL_DOWNLOADS],
+                "wan_variant": wan_variant,
+                "models": [item.filename for item in downloads],
             },
             indent=2,
         ),
         encoding="utf-8",
     )
-    progress(100, f"Đã cài xong ComfyUI {backend.label} + Wan 2.2 Native.")
+    model_label = "Wan 2.2 DMD 4 bước" if wan_variant == WAN_VARIANT_DMD else "Wan 2.2 Chất lượng"
+    progress(100, f"Đã cài xong ComfyUI {backend.label} + {model_label}.")
     return str(root)
 
 
@@ -359,6 +503,7 @@ def build_runtime_command(
 def required_free_bytes(
     install_root: str | Path,
     backend: RuntimeBackend | str | None = None,
+    wan_variant: str = WAN_VARIANT_QUALITY,
 ) -> int:
     selected = RUNTIME_BACKENDS.get(backend, None) if isinstance(backend, str) else backend
     selected = selected or detect_runtime_backend()
@@ -374,7 +519,7 @@ def required_free_bytes(
             archive_partial.stat().st_size if archive_partial.is_file() else 0
         )
         remaining += max(0, COMFY_ARCHIVE_BYTES - archive_have) + COMFY_EXTRACT_RESERVE_BYTES
-    for item in MODEL_DOWNLOADS:
+    for item in model_downloads_for_variant(wan_variant):
         destination = paths["models"] / item.folder / item.filename
         partial = destination.with_suffix(destination.suffix + ".part")
         have = destination.stat().st_size if destination.is_file() else (partial.stat().st_size if partial.is_file() else 0)
@@ -436,13 +581,14 @@ class LocalRuntimeManager:
         progress: Callable[[int, str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
         timeout: int = 240,
+        wan_variant: str = WAN_VARIANT_QUALITY,
     ) -> None:
         progress = progress or (lambda _value, _message: None)
         cancelled = cancelled or (lambda: False)
         if server_ready(base_url):
             return
-        if not is_runtime_installed(install_root):
-            missing = ", ".join(missing_runtime_files(install_root)) if install_root else "ComfyUI + model Wan 2.2"
+        if not is_runtime_installed(install_root, wan_variant=wan_variant):
+            missing = ", ".join(missing_runtime_files(install_root, wan_variant=wan_variant)) if install_root else "ComfyUI + model Wan 2.2"
             raise RuntimeError(
                 "AI Local chưa được cài đầy đủ (thiếu: " + missing + "). "
                 "Bấm ‘Cài AI Local tự động’ trong phần Chuyển động AI."

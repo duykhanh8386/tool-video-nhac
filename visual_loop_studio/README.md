@@ -76,13 +76,13 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 
 ## Wan 2.2 Native local
 
-1. Trong Visual Creator chọn **Wan 2.2 TI2V 5B Native — Local, miễn phí** và bấm **Cài AI Local tự động (chỉ lần đầu)**.
-2. Chọn ổ còn tối thiểu 32 GB trống. Tool tự nhận diện NVIDIA CUDA, Intel Arc XPU, AMD hoặc CPU, rồi tải đúng ComfyUI Portable và ba model từ nguồn chính thức; tải dở có thể tiếp tục.
+1. Trong Visual Creator chọn **Wan 2.2 TI2V 5B Native — Local**, rồi chọn **Wan Chất lượng 20 bước** hoặc **Wan DMD 4 bước** và bấm nút cài/tải model đang chọn.
+2. Chọn ổ còn tối thiểu 32 GB trống. Tool tự nhận diện NVIDIA CUDA, Intel Arc XPU, AMD hoặc CPU, rồi tải đúng ComfyUI Portable, checkpoint Wan và các thành phần dùng chung; tải dở có thể tiếp tục. Chọn DMD sẽ chỉ tải thêm LoRA khoảng 645 MB.
 3. Sau khi cài, ComfyUI tự chạy ẩn cùng Visual Loop Studio và tự tắt khi thoát. Có thể bấm **Kiểm tra ComfyUI + model** để xác nhận.
-4. Với RTX 3060 + 32 GB RAM, chọn `1280×704`, 81 frame, 20 step. Nếu thiếu VRAM hoặc muốn thử nhanh, chọn `832×480` hoặc 49 frame.
+4. Bản Chất lượng mặc định 20 bước/CFG 5.0. Bản DMD được khóa đúng 4 bước/CFG 1.0/flow shift 5.0 và dùng checkpoint gốc cùng LoRA DMD. Nếu thiếu VRAM hoặc muốn thử nhanh, chọn `832×480` hoặc 49 frame.
 5. Để bulk, chọn **Toàn bộ ảnh trong một thư mục** ở **Nguồn ảnh AI**, chọn thư mục, nhập prompt chung và bấm **Tạo Wan 2.2 + render toàn bộ ảnh**.
 
-Wan 2.2 dùng Apache 2.0 và ComfyUI chạy trên máy, do đó không có phí token/credit. Chi phí thực tế là điện, thời gian GPU và dung lượng đĩa. Không bật Comfy Cloud/Partner/API node nếu muốn bảo đảm chạy local hoàn toàn.
+Wan 2.2 Chất lượng và LoRA DMD 4 bước đều dùng Apache 2.0. Tool tải LoRA PEFT, kiểm tra SHA-256 rồi tự đổi 600 key tensor sang định dạng native của ComfyUI trước khi sử dụng. Cả hai chạy trên máy nên không có phí token/credit; chi phí thực tế là điện, thời gian GPU và dung lượng đĩa. Không bật Comfy Cloud/Partner/API node nếu muốn bảo đảm chạy local hoàn toàn.
 
 ## Kiểm thử
 

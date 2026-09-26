@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QColorDialog, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
+from ai.comfyui import WAN_VARIANT_DMD, WAN_VARIANT_QUALITY
 from ai.local_runtime import (
     LocalRuntimeManager, default_runtime_root, detect_runtime_backend,
     is_runtime_installed, server_ready,
@@ -383,6 +384,12 @@ class VisualCreatorPage(QWidget):
         self.local_panel = QWidget()
         local_config = QGridLayout(self.local_panel)
         local_config.setContentsMargins(0, 0, 0, 0)
+        self.local_wan_variant = QComboBox()
+        _add_options(self.local_wan_variant, [
+            ("Wan 2.2 5B Chất lượng — 20 bước (~10 GB)", WAN_VARIANT_QUALITY),
+            ("Wan 2.2 5B DMD — 4 bước (+~645 MB, Apache 2.0)", WAN_VARIANT_DMD),
+        ])
+        self.local_wan_variant.currentIndexChanged.connect(self._local_wan_variant_changed)
         self.local_resolution = QComboBox()
         _add_options(self.local_resolution, [
             ("720p 1280×704 — RTX 3060", "1280x704"),
@@ -409,33 +416,36 @@ class VisualCreatorPage(QWidget):
         self.local_negative_prompt = QPlainTextEdit()
         self.local_negative_prompt.setMaximumHeight(70)
         self.local_negative_prompt.setPlaceholderText("Tùy chọn; để trống dùng negative prompt an toàn tích hợp sẵn.")
-        local_config.addWidget(QLabel("Độ phân giải local"), 0, 0)
-        local_config.addWidget(self.local_resolution, 0, 1)
-        local_config.addWidget(QLabel("Thời lượng"), 1, 0)
-        local_config.addWidget(self.local_frames, 1, 1)
-        local_config.addWidget(QLabel("Số bước"), 2, 0)
-        local_config.addWidget(self.local_steps, 2, 1)
-        local_config.addWidget(QLabel("CFG"), 3, 0)
-        local_config.addWidget(self.local_cfg, 3, 1)
-        local_config.addWidget(QLabel("Seed"), 4, 0)
-        local_config.addWidget(self.local_seed, 4, 1)
-        local_config.addWidget(QLabel("Negative prompt"), 5, 0)
-        local_config.addWidget(self.local_negative_prompt, 5, 1)
+        local_config.addWidget(QLabel("Model Wan"), 0, 0)
+        local_config.addWidget(self.local_wan_variant, 0, 1)
+        local_config.addWidget(QLabel("Độ phân giải local"), 1, 0)
+        local_config.addWidget(self.local_resolution, 1, 1)
+        local_config.addWidget(QLabel("Thời lượng"), 2, 0)
+        local_config.addWidget(self.local_frames, 2, 1)
+        local_config.addWidget(QLabel("Số bước"), 3, 0)
+        local_config.addWidget(self.local_steps, 3, 1)
+        local_config.addWidget(QLabel("CFG"), 4, 0)
+        local_config.addWidget(self.local_cfg, 4, 1)
+        local_config.addWidget(QLabel("Seed"), 5, 0)
+        local_config.addWidget(self.local_seed, 5, 1)
         self.local_check = QPushButton("Kiểm tra ComfyUI + model")
         self.local_check.clicked.connect(self._check_local_ai)
-        local_config.addWidget(self.local_check, 6, 0, 1, 2)
+        local_config.addWidget(self.local_check, 7, 0, 1, 2)
+        local_config.addWidget(QLabel("Negative prompt"), 6, 0)
         self.local_setup = QPushButton("Cài AI Local tự động (chỉ lần đầu)")
         self.local_setup.clicked.connect(self._start_local_setup)
-        local_config.addWidget(self.local_setup, 7, 0, 1, 2)
+        local_config.addWidget(self.local_setup, 8, 0, 1, 2)
+        local_config.addWidget(self.local_negative_prompt, 6, 1)
         bg_layout.addWidget(self.local_panel)
-        local_note = QLabel(
+        self.local_note = QLabel(
             "Wan 2.2 Native chạy trên máy, không tốn token/credit. RTX 3060 dùng model offload "
             "và tạo từng video tuần tự để giữ VRAM ổn định. Lần đầu bấm Cài AI Local; "
             "sau đó ComfyUI sẽ tự chạy ẩn cùng chương trình."
         )
-        local_note.setWordWrap(True)
-        local_note.setObjectName("notice")
-        bg_layout.addWidget(local_note)
+        self.local_note.setWordWrap(True)
+        self.local_note.setObjectName("notice")
+        bg_layout.addWidget(self.local_note)
+        self._local_wan_variant_changed()
 
         ai_actions = QHBoxLayout()
         self.ai_generate = QPushButton("Tạo video Wan 2.2 local")
@@ -970,6 +980,7 @@ class VisualCreatorPage(QWidget):
             ai_source_folder=self.ai_source_folder.text(),
             ai_source_images=list(self._ai_source_images),
             ai_source_recursive=self.ai_source_recursive.isChecked(),
+            local_wan_variant=self._selected_wan_variant(),
             local_resolution=str(_combo_value(self.local_resolution)),
             local_frames=int(_combo_value(self.local_frames)), local_steps=self.local_steps.value(),
             local_cfg=self.local_cfg.value(), local_seed=self.local_seed.value(),
@@ -1015,6 +1026,7 @@ class VisualCreatorPage(QWidget):
         self._ai_source_images = [str(path) for path in project.ai_source_images]
         self.ai_source_recursive.setChecked(project.ai_source_recursive)
         self._ai_source_mode_changed()
+        _set_combo_value(self.local_wan_variant, project.local_wan_variant)
         _set_combo_value(self.local_resolution, project.local_resolution)
         _set_combo_value(self.local_frames, project.local_frames)
         self.local_steps.setValue(project.local_steps)
@@ -1131,6 +1143,37 @@ class VisualCreatorPage(QWidget):
                 if local else "Veo dùng Gemini API key và có thể tính credit."
             )
 
+    def _selected_wan_variant(self) -> str:
+        value = str(_combo_value(self.local_wan_variant) or WAN_VARIANT_QUALITY)
+        return WAN_VARIANT_DMD if value == WAN_VARIANT_DMD else WAN_VARIANT_QUALITY
+
+    def _local_wan_variant_changed(self, _index: int = -1) -> None:
+        dmd = self._selected_wan_variant() == WAN_VARIANT_DMD
+        if dmd:
+            self.local_steps.setRange(4, 4)
+            self.local_steps.setValue(4)
+            self.local_cfg.setRange(1.0, 1.0)
+            self.local_cfg.setValue(1.0)
+            self.local_setup.setText("Cài / tải Wan DMD 4 bước đang chọn")
+            self.local_note.setText(
+                "Wan DMD dùng checkpoint Wan TI2V 5B gốc cùng LoRA DMD 4 bước, CFG 1.0. "
+                "Tool tự chuyển 600 tensor LoRA sang định dạng ComfyUI và kiểm tra trước khi chạy. "
+                "Model nền và LoRA đều dùng giấy phép Apache 2.0, phù hợp sử dụng thương mại. "
+                "Kết quả/thời gian còn phụ thuộc GPU, độ phân giải và số frame."
+            )
+        else:
+            self.local_steps.setRange(8, 40)
+            self.local_steps.setValue(20)
+            self.local_cfg.setRange(1.0, 15.0)
+            self.local_cfg.setValue(5.0)
+            self.local_setup.setText("Cài / tải Wan Chất lượng đang chọn")
+            self.local_note.setText(
+                "Wan 2.2 Chất lượng mặc định 20 bước, ưu tiên chi tiết và độ ổn định chuyển động. "
+                "Chạy hoàn toàn trên máy, không tốn token/credit; ComfyUI tự chạy ẩn sau khi cài."
+            )
+        self.local_steps.setEnabled(not dmd)
+        self.local_cfg.setEnabled(not dmd)
+
     def _local_options(self, project: VisualProject | None = None) -> dict:
         project = project or self.collect()
         width_text, height_text = project.local_resolution.lower().split("x", 1)
@@ -1138,6 +1181,7 @@ class VisualCreatorPage(QWidget):
             "comfyui_url": self.settings.comfyui_url,
             "workflow_path": self.settings.comfyui_workflow,
             "runtime_root": self.settings.local_ai_root,
+            "wan_variant": project.local_wan_variant,
             "prompt": project.ai_prompt.strip(),
             "width": int(width_text),
             "height": int(height_text),
@@ -1219,6 +1263,7 @@ class VisualCreatorPage(QWidget):
                 self.settings.comfyui_url,
                 self.settings.comfyui_workflow,
                 self.settings.local_ai_root,
+                self._selected_wan_variant(),
             )
         except Exception as exc:
             self.local_check.setEnabled(True)
@@ -1233,16 +1278,20 @@ class VisualCreatorPage(QWidget):
             show_error(self, "ComfyUI/Wan 2.2 chưa sẵn sàng", message)
 
     def _local_runtime_available(self) -> bool:
-        return server_ready(self.settings.comfyui_url) or is_runtime_installed(self.settings.local_ai_root)
+        return server_ready(self.settings.comfyui_url) or is_runtime_installed(
+            self.settings.local_ai_root, wan_variant=self._selected_wan_variant()
+        )
 
     def _offer_local_setup(self) -> None:
         backend = detect_runtime_backend()
+        variant = self._selected_wan_variant()
+        model_label = "Wan DMD 4 bước (Apache 2.0)" if variant == WAN_VARIANT_DMD else "Wan Chất lượng 20 bước"
         answer = QMessageBox.question(
             self,
             "Cài AI Local Wan 2.2",
             f"Đã nhận diện: {backend.label}.\n\n"
-            "Máy chưa có ComfyUI + model Wan 2.2 phù hợp. Tool có thể tự tải khoảng 20–25 GB, "
-            "cài một lần vào ổ đĩa anh chọn và tự chạy ẩn ở các lần sau. Cài ngay?",
+            f"Máy chưa có {model_label}. Tool sẽ tải model đang chọn cùng các thành phần dùng chung, "
+            "cài một lần và tự chạy ẩn ở các lần sau.\n\nCài ngay?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
@@ -1265,12 +1314,14 @@ class VisualCreatorPage(QWidget):
             selected_path = Path(selected).resolve()
             root = selected_path if selected_path.name.lower() == "visualloopstudio_ai" else selected_path / "VisualLoopStudio_AI"
             backend = detect_runtime_backend()
+            variant = self._selected_wan_variant()
+            model_label = "Wan DMD 4 bước (Apache 2.0)" if variant == WAN_VARIANT_DMD else "Wan Chất lượng 20 bước"
             answer = QMessageBox.question(
                 self,
                 "Xác nhận cài AI Local",
                 f"GPU/backend nhận diện: {backend.label}\n"
-                f"ComfyUI và Wan 2.2 sẽ được tải vào:\n{root}\n\n"
-                "Cần tối thiểu 32 GB trống. File tải dở sẽ được giữ để tiếp tục ở lần sau. Bắt đầu?",
+                f"ComfyUI và {model_label} sẽ được tải vào:\n{root}\n\n"
+                "Cần tối thiểu 32 GB trống. File tải dở sẽ được giữ để tiếp tục.\n\nBắt đầu?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Yes,
             )
@@ -1280,13 +1331,14 @@ class VisualCreatorPage(QWidget):
             self.settings.local_ai_auto_start = True
             self.settings_changed.emit()
             self.local_setup.setEnabled(False)
+            self.local_wan_variant.setEnabled(False)
             self.local_check.setEnabled(False)
             self.ai_generate.setEnabled(False)
             self.ai_generate_batch.setEnabled(False)
             self.ai_cancel.setEnabled(True)
             self.ai_progress.setValue(0)
             self.ai_status.setText("Đang chuẩn bị cài AI Local…")
-            self.local_setup_worker.start(str(root))
+            self.local_setup_worker.start(str(root), variant)
         except Exception as exc:
             show_error(self, "Không thể cài AI Local", exc)
 
@@ -1299,6 +1351,7 @@ class VisualCreatorPage(QWidget):
         self.settings.local_ai_auto_start = True
         self.settings_changed.emit()
         self.local_setup.setEnabled(True)
+        self.local_wan_variant.setEnabled(True)
         self.local_check.setEnabled(False)
         self.ai_generate.setEnabled(True)
         self.ai_generate_batch.setEnabled(True)
@@ -1309,6 +1362,7 @@ class VisualCreatorPage(QWidget):
                 self.settings.comfyui_url,
                 self.settings.comfyui_workflow,
                 root,
+                self._selected_wan_variant(),
             )
         except Exception as exc:
             self.local_check.setEnabled(True)
@@ -1316,6 +1370,7 @@ class VisualCreatorPage(QWidget):
 
     def _local_setup_failed(self, message: str) -> None:
         self.local_setup.setEnabled(True)
+        self.local_wan_variant.setEnabled(True)
         self.local_check.setEnabled(True)
         self.ai_generate.setEnabled(True)
         self.ai_generate_batch.setEnabled(True)
@@ -1326,6 +1381,7 @@ class VisualCreatorPage(QWidget):
 
     def _local_setup_canceled(self) -> None:
         self.local_setup.setEnabled(True)
+        self.local_wan_variant.setEnabled(True)
         self.local_check.setEnabled(True)
         self.ai_generate.setEnabled(True)
         self.ai_generate_batch.setEnabled(True)
@@ -1334,7 +1390,9 @@ class VisualCreatorPage(QWidget):
         self.ai_status.setText("Đã dừng cài AI Local. File tải dở được giữ để tiếp tục lần sau.")
 
     def _auto_start_local_ai(self) -> None:
-        if not self.settings.local_ai_auto_start or not is_runtime_installed(self.settings.local_ai_root):
+        if not self.settings.local_ai_auto_start or not is_runtime_installed(
+            self.settings.local_ai_root, wan_variant=self._selected_wan_variant()
+        ):
             return
         if self.local_ai_worker.running or self.local_ai_worker.checking or server_ready(self.settings.comfyui_url):
             return
@@ -1345,6 +1403,7 @@ class VisualCreatorPage(QWidget):
                 self.settings.comfyui_url,
                 self.settings.comfyui_workflow,
                 self.settings.local_ai_root,
+                self._selected_wan_variant(),
             )
         except Exception:
             self._silent_local_check = False

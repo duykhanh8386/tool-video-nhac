@@ -138,6 +138,7 @@ class VisualProject:
     ai_source_folder: str = ""
     ai_source_images: list[str] = field(default_factory=list)
     ai_source_recursive: bool = False
+    local_wan_variant: str = "quality"
     local_resolution: str = "1280x704"
     local_frames: int = 81
     local_steps: int = 20
@@ -204,6 +205,9 @@ class VisualProject:
                 loaded[name] = ElementLayout(**{k: v for k, v in base.items() if k in allowed_layout}).normalized()
         defaults.update(loaded)
         data["elements"] = defaults
+        wan_variant = str(data.get("local_wan_variant") or "quality").strip().casefold()
+        # Old projects using the removed non-commercial Turbo mode migrate to DMD.
+        data["local_wan_variant"] = "dmd4" if wan_variant in {"dmd4", "dmd", "turbo"} else "quality"
         overlay_blend = str(data.get("effect_overlay_blend") or "lighten").lower()
         data["effect_overlay_blend"] = overlay_blend if overlay_blend in {"normal", "lighten", "screen", "addition"} else "lighten"
         try:

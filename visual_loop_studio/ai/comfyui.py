@@ -16,7 +16,10 @@ from urllib.request import Request, urlopen
 from ai.veo import motion_prompt
 
 
+WAN_VARIANT_QUALITY = "quality"
+WAN_VARIANT_DMD = "dmd4"
 WAN_MODEL = "wan2.2_ti2v_5B_fp16.safetensors"
+WAN_DMD_LORA = "wan2.2_5b_nonar_dmd_4step_lora_r64_comfy.safetensors"
 WAN_TEXT_ENCODER = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 WAN_VAE = "wan2.2_vae.safetensors"
 DEFAULT_NEGATIVE_PROMPT = (
@@ -41,14 +44,21 @@ def build_wan22_workflow(
     seed: int | None = None,
     negative_prompt: str = "",
     output_prefix: str = "video/VisualLoopStudio",
+    wan_variant: str = WAN_VARIANT_QUALITY,
 ) -> dict:
+    wan_variant = normalize_wan_variant(wan_variant)
+    dmd = wan_variant == WAN_VARIANT_DMD
+    if dmd:
+        # The Apache-2.0 DMD adapter is distilled for this operating point.
+        steps, cfg = 4, 1.0
     _validate_video_settings(width, height, length, steps, cfg)
     seed = random.SystemRandom().randrange(0, 2**63 - 1) if seed is None or seed < 0 else int(seed)
-    return {
+    model_title = "Wan 2.2 TI2V 5B + DMD LoRA (4 bước)" if dmd else "Wan 2.2 TI2V 5B Chất lượng"
+    workflow = {
         "1": {
             "class_type": "UNETLoader",
             "inputs": {"unet_name": WAN_MODEL, "weight_dtype": "default"},
-            "_meta": {"title": "Wan 2.2 TI2V 5B"},
+            "_meta": {"title": model_title},
         },
         "2": {
             "class_type": "CLIPLoader",
@@ -85,14 +95,15 @@ def build_wan22_workflow(
         },
         "8": {
             "class_type": "ModelSamplingSD3",
-            "inputs": {"model": ["1", 0], "shift": 8.0},
+            "inputs": {"model": ["13", 0] if dmd else ["1", 0], "shift": 5.0 if dmd else 8.0},
         },
         "9": {
             "class_type": "KSampler",
             "inputs": {
                 "model": ["8", 0], "positive": ["4", 0], "negative": ["5", 0],
                 "latent_image": ["7", 0], "seed": seed, "steps": int(steps),
-                "cfg": float(cfg), "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1.0,
+                "cfg": float(cfg), "sampler_name": "uni_pc",
+                "scheduler": "simple", "denoise": 1.0,
             },
         },
         "10": {
@@ -109,6 +120,13 @@ def build_wan22_workflow(
             "_meta": {"title": "Visual Loop Studio Output"},
         },
     }
+    if dmd:
+        workflow["13"] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {"model": ["1", 0], "lora_name": WAN_DMD_LORA, "strength_model": 1.0},
+            "_meta": {"title": "Wan 2.2 DMD 4-step LoRA (Apache 2.0)"},
+        }
+    return workflow
 
 
 def prepare_workflow(
@@ -123,11 +141,17 @@ def prepare_workflow(
     seed: int | None,
     negative_prompt: str,
     output_prefix: str,
+    wan_variant: str = WAN_VARIANT_QUALITY,
 ) -> dict:
     if not workflow_path:
         return build_wan22_workflow(
             uploaded_image, prompt, width, height, length, steps, cfg, seed,
-            negative_prompt, output_prefix,
+            negative_prompt, output_prefix, wan_variant,
+        )
+    if normalize_wan_variant(wan_variant) != WAN_VARIANT_QUALITY:
+        raise ValueError(
+            "Chế độ Wan DMD 4 bước chỉ dùng với workflow tích hợp. "
+            "Hãy xóa đường dẫn workflow ComfyUI tùy chỉnh trong Cài đặt."
         )
     path = Path(workflow_path).expanduser()
     if not path.is_file():
@@ -150,15 +174,22 @@ def prepare_workflow(
     return workflow
 
 
-def check_comfyui(base_url: str, require_default_models: bool = True) -> dict:
+def check_comfyui(
+    base_url: str,
+    require_default_models: bool = True,
+    wan_variant: str = WAN_VARIANT_QUALITY,
+) -> dict:
     base = _base_url(base_url)
     stats = _request_json("GET", f"{base}/system_stats", timeout=15)
     object_info = _request_json("GET", f"{base}/object_info", timeout=30)
+    wan_variant = normalize_wan_variant(wan_variant)
     required_nodes = {
         "UNETLoader", "CLIPLoader", "VAELoader", "CLIPTextEncode", "LoadImage",
         "Wan22ImageToVideoLatent", "ModelSamplingSD3", "KSampler", "VAEDecode",
         "CreateVideo", "SaveVideo",
     }
+    if wan_variant == WAN_VARIANT_DMD:
+        required_nodes.add("LoraLoaderModelOnly")
     missing_nodes = sorted(required_nodes - set(object_info))
     if missing_nodes:
         raise RuntimeError(
@@ -167,17 +198,22 @@ def check_comfyui(base_url: str, require_default_models: bool = True) -> dict:
         )
     if require_default_models:
         missing_models = []
-        checks = (
+        checks = [
             ("UNETLoader", "unet_name", WAN_MODEL, "models/diffusion_models"),
             ("CLIPLoader", "clip_name", WAN_TEXT_ENCODER, "models/text_encoders"),
             ("VAELoader", "vae_name", WAN_VAE, "models/vae"),
-        )
+        ]
+        if wan_variant == WAN_VARIANT_DMD:
+            checks.append(("LoraLoaderModelOnly", "lora_name", WAN_DMD_LORA, "models/loras"))
         for node_name, input_name, filename, folder in checks:
             values = _input_choices(object_info, node_name, input_name)
             if not any(str(value).replace("\\", "/").endswith(filename) for value in values):
                 missing_models.append(f"{filename} → ComfyUI/{folder}")
         if missing_models:
-            raise RuntimeError("Thiếu model Wan 2.2 local:\n- " + "\n- ".join(missing_models))
+            raise RuntimeError(
+                "Thiếu model Wan 2.2 đang chọn:\n- " + "\n- ".join(missing_models)
+                + "\nBấm ‘Cài / tải model Wan đang chọn’ để tải bổ sung."
+            )
     return stats
 
 
@@ -194,10 +230,15 @@ def generate_local_image_to_video(
     cfg: float = 5.0,
     seed: int | None = None,
     negative_prompt: str = "",
+    wan_variant: str = WAN_VARIANT_QUALITY,
     progress: Callable[[int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
     timeout_seconds: int = 4 * 60 * 60,
 ) -> str:
+    wan_variant = normalize_wan_variant(wan_variant)
+    dmd = wan_variant == WAN_VARIANT_DMD
+    if dmd:
+        steps, cfg = 4, 1.0
     source = Path(image_path)
     if not source.is_file():
         raise ValueError(f"Không tìm thấy ảnh đầu vào: {image_path}")
@@ -207,15 +248,16 @@ def generate_local_image_to_video(
     base = _base_url(comfyui_url)
     progress = progress or (lambda _value, _message: None)
     cancelled = cancelled or (lambda: False)
-    progress(2, "Đang kiểm tra ComfyUI localhost và model Wan 2.2…")
-    check_comfyui(base, require_default_models=not bool(workflow_path))
+    variant_label = "Wan 2.2 DMD 4 bước" if dmd else "Wan 2.2 Chất lượng"
+    progress(2, f"Đang kiểm tra ComfyUI localhost và {variant_label}…")
+    check_comfyui(base, require_default_models=not bool(workflow_path), wan_variant=wan_variant)
     _raise_if_cancelled(cancelled, base)
     progress(5, f"Đang tải ảnh {source.name} vào ComfyUI…")
     uploaded = _upload_image(base, source)
     prefix = "video/VisualLoopStudio_" + re.sub(r"[^A-Za-z0-9_-]+", "_", source.stem)[:60]
     workflow = prepare_workflow(
         workflow_path, uploaded, prompt, width, height, length, steps, cfg,
-        seed, negative_prompt, prefix,
+        seed, negative_prompt, prefix, wan_variant,
     )
     _assert_local_only(workflow)
     _raise_if_cancelled(cancelled, base)
@@ -224,7 +266,7 @@ def generate_local_image_to_video(
     prompt_id = response.get("prompt_id")
     if not prompt_id:
         raise RuntimeError(f"ComfyUI không trả về prompt_id: {response}")
-    progress(8, "Đã xếp hàng Wan 2.2; đang tạo video local…")
+    progress(8, f"Đã xếp hàng {variant_label}; đang tạo video local…")
     started = time.monotonic()
     while True:
         _raise_if_cancelled(cancelled, base)
@@ -250,8 +292,14 @@ def generate_local_image_to_video(
                 return str(Path(output_path).resolve())
         minutes = elapsed / 60
         estimated = min(90, 10 + int(minutes * 4))
-        progress(estimated, f"Wan 2.2 đang chạy trên GPU… {minutes:.1f} phút")
+        progress(estimated, f"{variant_label} đang chạy trên GPU… {minutes:.1f} phút")
         time.sleep(2)
+
+
+def normalize_wan_variant(value: str) -> str:
+    normalized = str(value or WAN_VARIANT_QUALITY).strip().casefold()
+    # Migrate projects saved by the removed non-commercial Turbo option to DMD.
+    return WAN_VARIANT_DMD if normalized in {WAN_VARIANT_DMD, "dmd", "turbo"} else WAN_VARIANT_QUALITY
 
 
 def _inject_workflow_values(

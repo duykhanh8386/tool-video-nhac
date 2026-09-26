@@ -27,6 +27,7 @@ class ProjectModelTests(unittest.TestCase):
         original.ai_source_folder = "C:/ai-images"
         original.ai_source_images = ["C:/one.png", "C:/two.jpg"]
         original.ai_source_recursive = True
+        original.local_wan_variant = "dmd4"
         original.local_resolution = "1280x704"
         original.local_frames = 81
         original.local_steps = 20
@@ -34,6 +35,10 @@ class ProjectModelTests(unittest.TestCase):
         original.local_seed = 42
         restored = VisualProject.from_dict(original.to_dict())
         self.assertEqual(restored, original)
+
+    def test_legacy_turbo_project_migrates_to_commercial_dmd(self):
+        restored = VisualProject.from_dict({"local_wan_variant": "turbo"})
+        self.assertEqual(restored.local_wan_variant, "dmd4")
 
     def test_invalid_overlay_values_are_normalized(self):
         restored = VisualProject.from_dict({
