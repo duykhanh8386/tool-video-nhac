@@ -54,8 +54,8 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 - Bộ chọn font hệ thống kiểu Word, cỡ chữ/đậm/nghiêng riêng cho từng loại text; preview và FFmpeg dùng cùng thang cỡ chữ 1080p để tránh chữ bị nhỏ khi render.
 - Mỗi element ảnh hỗ trợ `Normal`, `Lighten`, `Screen` và `Linear Dodge (Add)`; click element trên preview để chọn chế độ trong **Bố cục thông minh**.
 - Camera nền mặc định đứng yên. Có thể dùng ảnh nguồn + prompt để tạo video image-to-video bằng Veo 3.1; ảnh nguồn được dùng làm cả khung đầu và cuối nhằm ưu tiên vòng lặp liền mạch.
-- Tích hợp Wan 2.2 TI2V 5B Native qua ComfyUI localhost. Workflow mặc định chỉ dùng core node local, từ chối node API/Cloud, nên không tiêu hao token/credit.
-- Nguồn ảnh AI có ba chế độ: một ảnh, chọn nhiều ảnh riêng lẻ hoặc toàn bộ thư mục. Một prompt dùng chung → mỗi ảnh tạo một clip Wan/Veo → tự ghép cùng text/logo/effect/bố cục → mỗi ảnh xuất một video. GPU local xử lý tuần tự.
+- Tích hợp Wan 2.2, Wan DMD, LTX-Video 2B Distilled và HunyuanVideo 1.5 qua ComfyUI localhost. Workflow mặc định chỉ dùng core node local, từ chối node API/Cloud, nên không tiêu hao token/credit.
+- Nguồn ảnh AI có ba chế độ: một ảnh, chọn nhiều ảnh riêng lẻ hoặc toàn bộ thư mục. Một prompt dùng chung → mỗi ảnh tạo một clip AI local/Veo → tự ghép cùng text/logo/effect/bố cục → mỗi ảnh xuất một video. GPU local xử lý tuần tự.
 - File sóng PNG/GIF/MOV/MP4 chạy lặp theo thời gian riêng, không phản ứng theo âm lượng nhạc; có tùy chọn xóa nền trắng.
 - Input **Overlay toàn cảnh** nhận PNG/GIF/MOV/MP4, crop phủ kín khung, phát/lặp đúng thời lượng file và có blend mode cùng độ mờ riêng. Preview giải mã frame video thật thay vì giữ frame đầu.
 - Các hiệu ứng toàn khung tích hợp hiển thị chuyển động/cường độ ngay trong preview; có thể chồng thêm overlay MOV bên ngoài để dùng hiệu ứng dựng sẵn như trong CapCut.
@@ -74,15 +74,15 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 - Log render trong `visual_loop_studio/logs/`.
 - Gemini/Veo API và ComfyUI đều là tích hợp tùy chọn; chức năng render lõi không cần AI. Nhập Gemini API key trong Cài đặt hoặc biến môi trường `GEMINI_API_KEY` để gọi Veo.
 
-## Wan 2.2 Native local
+## AI Video local
 
-1. Trong Visual Creator chọn **Wan 2.2 TI2V 5B Native — Local**, rồi chọn **Wan Chất lượng 20 bước** hoặc **Wan DMD 4 bước** và bấm nút cài/tải model đang chọn.
-2. Chọn ổ còn tối thiểu 32 GB trống. Tool tự nhận diện NVIDIA CUDA, Intel Arc XPU, AMD hoặc CPU, rồi tải đúng ComfyUI Portable, checkpoint Wan và các thành phần dùng chung; tải dở có thể tiếp tục. Chọn DMD sẽ chỉ tải thêm LoRA khoảng 645 MB.
+1. Trong Visual Creator chọn **AI Video Local**, rồi chọn Wan Chất lượng, Wan DMD, LTX-Video 2B Distilled hoặc HunyuanVideo 1.5 và bấm nút cài/tải model đang chọn.
+2. Chọn ổ lưu. Tool tự tính dung lượng còn thiếu, nhận diện NVIDIA CUDA, Intel Arc XPU, AMD hoặc CPU rồi tải đúng ComfyUI Portable và đúng bộ model; tải dở có thể tiếp tục.
 3. Sau khi cài, ComfyUI tự chạy ẩn cùng Visual Loop Studio và tự tắt khi thoát. Có thể bấm **Kiểm tra ComfyUI + model** để xác nhận.
-4. Bản Chất lượng mặc định 20 bước/CFG 5.0. Bản DMD được khóa đúng 4 bước/CFG 1.0/flow shift 5.0 và dùng checkpoint gốc cùng LoRA DMD. Nếu thiếu VRAM hoặc muốn thử nhanh, chọn `832×480` hoặc 49 frame.
-5. Để bulk, chọn **Toàn bộ ảnh trong một thư mục** ở **Nguồn ảnh AI**, chọn thư mục, nhập prompt chung và bấm **Tạo Wan 2.2 + render toàn bộ ảnh**.
+4. Wan Chất lượng dùng 20 bước/CFG 5. Wan DMD dùng 4 bước/CFG 1. LTX và Hunyuan Step Distilled dùng 8 bước/CFG 1. Hunyuan được khóa 832×480 và chỉ cho NVIDIA CUDA, khuyến nghị từ 16 GB VRAM.
+5. Để bulk, chọn **Toàn bộ ảnh trong một thư mục** ở **Nguồn ảnh AI**, chọn thư mục, nhập prompt chung và bấm **Tạo AI local + render toàn bộ ảnh**.
 
-Wan 2.2 Chất lượng và LoRA DMD 4 bước đều dùng Apache 2.0. Tool tải LoRA PEFT, kiểm tra SHA-256 rồi tự đổi 600 key tensor sang định dạng native của ComfyUI trước khi sử dụng. Cả hai chạy trên máy nên không có phí token/credit; chi phí thực tế là điện, thời gian GPU và dung lượng đĩa. Không bật Comfy Cloud/Partner/API node nếu muốn bảo đảm chạy local hoàn toàn.
+Wan 2.2 Chất lượng và LoRA DMD 4 bước đều dùng Apache 2.0. LTX dùng Open Weights License 0.X (thương mại miễn phí dưới ngưỡng doanh thu trong giấy phép; nội dung công khai phải đánh dấu AI). Hunyuan dùng Tencent Hunyuan Community License với giới hạn lãnh thổ/phân phối và yêu cầu đánh dấu AI. Tất cả chạy trên máy nên không có phí token/credit; chi phí thực tế là điện, thời gian GPU và dung lượng đĩa. Không bật Comfy Cloud/Partner/API node nếu muốn bảo đảm chạy local hoàn toàn.
 
 ## Kiểm thử
 

@@ -18,12 +18,22 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from ai.comfyui import (
+    HUNYUAN_BYT5_ENCODER,
+    HUNYUAN_CLIP_VISION,
+    HUNYUAN_MODEL,
+    HUNYUAN_TEXT_ENCODER,
+    HUNYUAN_VAE,
+    LOCAL_MODEL_HUNYUAN,
+    LOCAL_MODEL_LTX,
+    LTX_MODEL,
+    LTX_TEXT_ENCODER,
     WAN_DMD_LORA,
     WAN_MODEL,
     WAN_TEXT_ENCODER,
     WAN_VAE,
     WAN_VARIANT_DMD,
     WAN_VARIANT_QUALITY,
+    local_model_label,
     normalize_wan_variant,
 )
 from utils.paths import LOG_DIR, USER_DATA_ROOT
@@ -107,10 +117,78 @@ DMD_LORA_DOWNLOAD = ModelDownload(
 DMD_LORA_SOURCE_FILENAME = "wan2.2_5b_nonar_dmd_4step_lora_r64_peft.safetensors"
 DMD_LORA_TENSOR_COUNT = 600
 
+LTX_DOWNLOADS = (
+    ModelDownload(
+        LTX_MODEL,
+        "checkpoints",
+        "https://huggingface.co/Lightricks/LTX-Video/resolve/main/"
+        "ltxv-2b-0.9.6-distilled-04-25.safetensors",
+        "94891bd4bd08de30d484befbfc54fdcffe6d1596a131baad700b9baa5e1de86b",
+        6_340_744_028,
+    ),
+    ModelDownload(
+        LTX_TEXT_ENCODER,
+        "text_encoders",
+        "https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/"
+        "t5xxl_fp8_e4m3fn_scaled.safetensors",
+        "a498f0485dc9536735258018417c3fd7758dc3bccc0a645feaa472b34955557a",
+        5_157_348_688,
+    ),
+)
+
+HUNYUAN_DOWNLOADS = (
+    ModelDownload(
+        HUNYUAN_MODEL,
+        "diffusion_models",
+        "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/"
+        "split_files/diffusion_models/hunyuanvideo1.5_480p_i2v_step_distilled_fp8_scaled.safetensors",
+        "302636263ad01e2659a18b78e96e95f44433b92def7cae1dab29b5105eeb63b1",
+        8_335_127_098,
+    ),
+    ModelDownload(
+        HUNYUAN_TEXT_ENCODER,
+        "text_encoders",
+        "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/"
+        "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        "cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4",
+        9_384_670_680,
+    ),
+    ModelDownload(
+        HUNYUAN_BYT5_ENCODER,
+        "text_encoders",
+        "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/"
+        "split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors",
+        "516910bb4c9b225370290e40585d1b0e6c8cd3583690f7eec2f7fb593990fb48",
+        438_643_184,
+    ),
+    ModelDownload(
+        HUNYUAN_VAE,
+        "vae",
+        "https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/"
+        "split_files/vae/hunyuanvideo15_vae_fp16.safetensors",
+        "e7c3091949c27e2d55ae6d5df917b99dadfebbf308e5a50d0ade0d16c90297ae",
+        2_521_292_758,
+    ),
+    ModelDownload(
+        HUNYUAN_CLIP_VISION,
+        "clip_vision",
+        "https://huggingface.co/Comfy-Org/sigclip_vision_384/resolve/main/"
+        "sigclip_vision_patch14_384.safetensors",
+        "1fee501deabac72f0ed17610307d7131e3e9d1e838d0363aa3c2b97a6e03fb33",
+        856_505_640,
+    ),
+)
+
 
 def model_downloads_for_variant(wan_variant: str = WAN_VARIANT_QUALITY) -> tuple[ModelDownload, ...]:
     variant = normalize_wan_variant(wan_variant)
-    return (*MODEL_DOWNLOADS, DMD_LORA_DOWNLOAD) if variant == WAN_VARIANT_DMD else MODEL_DOWNLOADS
+    if variant == WAN_VARIANT_DMD:
+        return (*MODEL_DOWNLOADS, DMD_LORA_DOWNLOAD)
+    if variant == LOCAL_MODEL_LTX:
+        return LTX_DOWNLOADS
+    if variant == LOCAL_MODEL_HUNYUAN:
+        return HUNYUAN_DOWNLOADS
+    return MODEL_DOWNLOADS
 
 
 def _install_model_download(
@@ -273,6 +351,20 @@ def detect_runtime_backend(adapters: tuple[str, ...] | list[str] | None = None) 
     return RUNTIME_BACKENDS["cpu"]
 
 
+def validate_local_model_backend(
+    wan_variant: str,
+    backend: RuntimeBackend | str | None = None,
+) -> RuntimeBackend:
+    selected = RUNTIME_BACKENDS.get(backend, None) if isinstance(backend, str) else backend
+    selected = selected or detect_runtime_backend()
+    if normalize_wan_variant(wan_variant) == LOCAL_MODEL_HUNYUAN and selected.key != "nvidia":
+        raise RuntimeError(
+            "HunyuanVideo 1.5 trong tool chỉ hỗ trợ NVIDIA CUDA và khuyến nghị từ 16 GB VRAM. "
+            f"Máy hiện được nhận diện là {selected.label}; hãy chọn Wan hoặc LTX-Video cho máy này."
+        )
+    return selected
+
+
 def default_runtime_root() -> Path:
     return USER_DATA_ROOT / "ai_runtime"
 
@@ -342,6 +434,10 @@ def missing_runtime_files(
     selected = selected or detect_runtime_backend()
     paths = runtime_paths(install_root, selected)
     missing: list[str] = []
+    try:
+        validate_local_model_backend(wan_variant, selected)
+    except RuntimeError as exc:
+        missing.append(str(exc))
     if paths["portable_marker"].is_file():
         installed = installed_runtime_backend(paths)
         if installed and installed != selected.key:
@@ -390,14 +486,14 @@ def install_local_runtime(
     wan_variant = normalize_wan_variant(wan_variant)
     downloads = model_downloads_for_variant(wan_variant)
     root = Path(install_root).expanduser().resolve()
-    backend = detect_runtime_backend()
+    backend = validate_local_model_backend(wan_variant)
     root.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(root).free
     required = required_free_bytes(root, backend, wan_variant)
     if free < required and not is_runtime_installed(root, backend, wan_variant):
         raise RuntimeError(
             f"Ổ đĩa chỉ còn {free / 1024**3:.1f} GB. Cần thêm khoảng {required / 1024**3:.1f} GB trống "
-            "để tải/tiếp tục cài ComfyUI + Wan 2.2."
+            f"để tải/tiếp tục cài ComfyUI + {local_model_label(wan_variant)}."
         )
     _raise_if_cancelled(cancelled)
     paths = runtime_paths(root, backend)
@@ -430,7 +526,7 @@ def install_local_runtime(
             )
         _raise_if_cancelled(cancelled)
         if switching_backend:
-            progress(19, f"Đang chuyển backend {installed_backend} sang {backend.label}; giữ nguyên model Wan…")
+            progress(19, f"Đang chuyển backend {installed_backend} sang {backend.label}; giữ nguyên các model đã tải…")
             _prepare_backend_switch(paths)
         progress(19, f"Đang giải nén ComfyUI Portable {backend.label}; bước này có thể mất vài phút…")
         extract_7z_archive(paths["archive"], root, paths["seven_zip"])
@@ -468,13 +564,14 @@ def install_local_runtime(
                 "backend": backend.key,
                 "backend_label": backend.label,
                 "wan_variant": wan_variant,
+                "local_model": wan_variant,
                 "models": [item.filename for item in downloads],
             },
             indent=2,
         ),
         encoding="utf-8",
     )
-    model_label = "Wan 2.2 DMD 4 bước" if wan_variant == WAN_VARIANT_DMD else "Wan 2.2 Chất lượng"
+    model_label = local_model_label(wan_variant)
     progress(100, f"Đã cài xong ComfyUI {backend.label} + {model_label}.")
     return str(root)
 
@@ -585,10 +682,11 @@ class LocalRuntimeManager:
     ) -> None:
         progress = progress or (lambda _value, _message: None)
         cancelled = cancelled or (lambda: False)
+        validate_local_model_backend(wan_variant)
         if server_ready(base_url):
             return
         if not is_runtime_installed(install_root, wan_variant=wan_variant):
-            missing = ", ".join(missing_runtime_files(install_root, wan_variant=wan_variant)) if install_root else "ComfyUI + model Wan 2.2"
+            missing = ", ".join(missing_runtime_files(install_root, wan_variant=wan_variant)) if install_root else f"ComfyUI + {local_model_label(wan_variant)}"
             raise RuntimeError(
                 "AI Local chưa được cài đầy đủ (thiếu: " + missing + "). "
                 "Bấm ‘Cài AI Local tự động’ trong phần Chuyển động AI."
@@ -614,7 +712,7 @@ class LocalRuntimeManager:
         while time.monotonic() - started < timeout:
             _raise_if_cancelled(cancelled)
             if server_ready(base_url):
-                progress(3, "ComfyUI đã khởi động; đang nạp workflow Wan 2.2…")
+                progress(3, f"ComfyUI đã khởi động; đang nạp {local_model_label(wan_variant)}…")
                 return
             process = self.process
             if process and process.poll() is not None:

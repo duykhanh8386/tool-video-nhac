@@ -20,7 +20,7 @@ FFmpeg, FFprobe, kiểm tra GPU và helper cập nhật đều chạy ẩn trong
 ## Chuyển động AI và file sóng
 
 - Ảnh nền mặc định dùng camera cố định, không còn tự zoom/pan gây rung toàn khung.
-- Có hai chế độ Wan local qua ComfyUI: **Chất lượng 20 bước** và **DMD nhanh 4 bước**. Cả hai không dùng token/API key/credit và đều dùng thành phần được cấp phép Apache 2.0, phù hợp sử dụng thương mại theo các điều khoản của giấy phép.
+- Có bốn chế độ AI local qua ComfyUI: **Wan Chất lượng 20 bước**, **Wan DMD 4 bước**, **LTX-Video 2B Distilled 8 bước** và **HunyuanVideo 1.5 480p 8 bước**. Tất cả render bằng máy hiện tại, không dùng token/API key/credit.
 - Ngay trong phần **Nguồn ảnh AI**, có thể chọn một ảnh, chọn nhiều ảnh riêng lẻ hoặc chọn cả thư mục (kể cả thư mục con). Một prompt dùng chung sẽ tạo clip AI cho từng ảnh theo hàng đợi, đưa từng clip vào cùng bố cục, rồi xuất đủ số video.
 - Có thể nhập prompt và dùng Veo 3.1 để tạo chuyển động tay/chân, người, khói, lửa hoặc ánh sáng từ ảnh nguồn. Cần Gemini API key và tài khoản có quyền dùng Veo.
 - File sóng dạng PNG/GIF/MOV/MP4 chạy lặp độc lập, không co giãn theo âm lượng nhạc; có tùy chọn xóa nền trắng.
@@ -29,18 +29,22 @@ FFmpeg, FFprobe, kiểm tra GPU và helper cập nhật đều chạy ẩn trong
 - Preview giải mã frame thật của video nền, file sóng và overlay thay vì chỉ giữ frame đầu. Hiệu ứng toàn khung tích hợp cũng hiển thị theo cường độ đã chọn.
 - Veo tạo video 24 fps nên ứng dụng tự chuyển FPS project về 24 sau khi tạo để giữ nhịp khung hình mượt.
 
-## Thiết lập Wan 2.2 local đa GPU
+## Thiết lập AI Video local đa model
 
-EXE của Visual Loop Studio là portable; không cần chạy `install.bat` hay `run.bat`. Ở lần dùng AI Local đầu tiên, bấm **Cài AI Local tự động (chỉ lần đầu)**, chọn ổ đĩa còn tối thiểu 32 GB trống và xác nhận. Tool tự nhận diện GPU và tải đúng bản [ComfyUI Portable chính thức](https://github.com/Comfy-Org/ComfyUI/releases): NVIDIA CUDA, Intel Arc XPU, AMD hoặc chế độ CPU. Cả hai chế độ dùng chung checkpoint Wan, text encoder và VAE; chế độ DMD chỉ tải thêm LoRA:
+EXE của Visual Loop Studio là portable; không cần chạy `install.bat` hay `run.bat`. Ở lần dùng AI Local đầu tiên, chọn model rồi bấm nút cài/tải. Tool tính dung lượng còn thiếu, tự nhận diện GPU và tải đúng bản [ComfyUI Portable chính thức](https://github.com/Comfy-Org/ComfyUI/releases): NVIDIA CUDA, Intel Arc XPU, AMD hoặc CPU. Mỗi máy tự tải model và dùng GPU của chính máy đó.
 
 - **Chất lượng 20 bước:** `wan2.2_ti2v_5B_fp16.safetensors` (Apache 2.0) → `ComfyUI/models/diffusion_models/`
 - **DMD 4 bước:** `wan2.2_5b_nonar_dmd_4step_lora_r64_comfy.safetensors` (Apache 2.0, khoảng 645 MB) → `ComfyUI/models/loras/`
 - `umt5_xxl_fp8_e4m3fn_scaled.safetensors` → `ComfyUI/models/text_encoders/`
 - `wan2.2_vae.safetensors` → `ComfyUI/models/vae/`
+- **LTX-Video 2B Distilled 8 bước:** checkpoint 0.9.6 và T5 FP8, tổng khoảng 11,5 GB; khuyến nghị `832×480` để farm nhanh.
+- **HunyuanVideo 1.5 I2V Step Distilled 8 bước:** model FP8 480p cùng Qwen/ByT5/VAE/SigCLIP, tổng khoảng 21,5 GB; trong tool chỉ cho NVIDIA CUDA và khuyến nghị từ 16 GB VRAM.
 
 LoRA gốc dùng key PEFT. Tool kiểm tra SHA-256, tự đổi 600 tên tensor sang key native của ComfyUI mà không thay đổi dữ liệu trọng số, rồi mới cho phép chạy workflow 4 bước.
 
-Sau khi cài xong, Visual Loop Studio tự khởi động ComfyUI ẩn ở `http://127.0.0.1:8188` khi mở app và tự tắt tiến trình do app mở khi thoát. Không có cửa sổ CMD nhấp nháy; log nằm trong `VisualLoopStudio/logs/comfyui.log`. File tải dở được giữ để tiếp tục nếu mạng bị ngắt. Nếu chuyển sang máy dùng hãng GPU khác, tool thay riêng backend Python và giữ lại model Wan đã tải. Các video được chạy tuần tự để hạn chế tràn VRAM.
+Sau khi cài xong, Visual Loop Studio tự khởi động ComfyUI ẩn ở `http://127.0.0.1:8188` khi mở app và tự tắt tiến trình do app mở khi thoát. Không có cửa sổ CMD nhấp nháy; log nằm trong `VisualLoopStudio/logs/comfyui.log`. File tải dở được giữ để tiếp tục nếu mạng bị ngắt. Các video được chạy tuần tự để hạn chế tràn VRAM.
+
+Wan và Wan DMD dùng Apache 2.0. [LTX-Video Open Weights License](https://huggingface.co/Lightricks/LTX-Video/blob/main/LTX-Video-Open-Weights-License-0.X.txt) cho phép thương mại miễn phí dưới ngưỡng doanh thu năm nêu trong giấy phép và yêu cầu đánh dấu nội dung AI khi công bố. [HunyuanVideo 1.5 Community License](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5/blob/main/LICENSE) có điều kiện lãnh thổ/phân phối và yêu cầu đánh dấu nội dung AI; cần kiểm tra điều khoản trước khi dùng thương mại quốc tế.
 
 Gói ComfyUI Portable được giải nén bằng `7zr.exe` chính thức của 7-Zip để hỗ trợ bộ lọc BCJ2; file 7zr được kiểm tra SHA-256 trước khi chạy. Nếu bản cũ đã tải xong archive ComfyUI nhưng lỗi ở bước BCJ2, bản mới sẽ dùng lại archive đó thay vì tải lại gần 2 GB.
 

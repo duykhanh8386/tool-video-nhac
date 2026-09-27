@@ -18,10 +18,19 @@ from ai.veo import motion_prompt
 
 WAN_VARIANT_QUALITY = "quality"
 WAN_VARIANT_DMD = "dmd4"
+LOCAL_MODEL_LTX = "ltx2b"
+LOCAL_MODEL_HUNYUAN = "hunyuan15"
 WAN_MODEL = "wan2.2_ti2v_5B_fp16.safetensors"
 WAN_DMD_LORA = "wan2.2_5b_nonar_dmd_4step_lora_r64_comfy.safetensors"
 WAN_TEXT_ENCODER = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 WAN_VAE = "wan2.2_vae.safetensors"
+LTX_MODEL = "ltxv-2b-0.9.6-distilled-04-25.safetensors"
+LTX_TEXT_ENCODER = "t5xxl_fp8_e4m3fn_scaled.safetensors"
+HUNYUAN_MODEL = "hunyuanvideo1.5_480p_i2v_step_distilled_fp8_scaled.safetensors"
+HUNYUAN_TEXT_ENCODER = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+HUNYUAN_BYT5_ENCODER = "byt5_small_glyphxl_fp16.safetensors"
+HUNYUAN_VAE = "hunyuanvideo15_vae_fp16.safetensors"
+HUNYUAN_CLIP_VISION = "sigclip_vision_patch14_384.safetensors"
 DEFAULT_NEGATIVE_PROMPT = (
     "camera movement, camera shake, zoom, pan, tilt, scene cut, reframing, flicker, "
     "morphing, identity change, deformed face, deformed hands, extra fingers, extra limbs, "
@@ -129,6 +138,169 @@ def build_wan22_workflow(
     return workflow
 
 
+def build_ltx_workflow(
+    uploaded_image: str,
+    prompt: str,
+    width: int = 832,
+    height: int = 480,
+    length: int = 81,
+    steps: int = 8,
+    cfg: float = 1.0,
+    seed: int | None = None,
+    negative_prompt: str = "",
+    output_prefix: str = "video/VisualLoopStudio",
+) -> dict:
+    """Build a stock-ComfyUI LTX-Video 2B distilled image-to-video graph."""
+    steps, cfg = 8, 1.0
+    _validate_video_settings(width, height, length, steps, cfg, LOCAL_MODEL_LTX)
+    seed = random.SystemRandom().randrange(0, 2**63 - 1) if seed is None or seed < 0 else int(seed)
+    return {
+        "1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": LTX_MODEL},
+            "_meta": {"title": "LTX-Video 2B Distilled"},
+        },
+        "2": {
+            "class_type": "CLIPLoader",
+            "inputs": {"clip_name": LTX_TEXT_ENCODER, "type": "ltxv", "device": "default"},
+            "_meta": {"title": "LTX T5 text encoder"},
+        },
+        "3": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": motion_prompt(prompt), "clip": ["2", 0]},
+            "_meta": {"title": "Positive Prompt"},
+        },
+        "4": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": negative_prompt.strip() or DEFAULT_NEGATIVE_PROMPT, "clip": ["2", 0]},
+            "_meta": {"title": "Negative Prompt"},
+        },
+        "5": {
+            "class_type": "LoadImage",
+            "inputs": {"image": uploaded_image},
+            "_meta": {"title": "Start Image"},
+        },
+        "6": {
+            "class_type": "LTXVImgToVideo",
+            "inputs": {
+                "positive": ["3", 0], "negative": ["4", 0], "vae": ["1", 2],
+                "image": ["5", 0], "width": int(width), "height": int(height),
+                "length": int(length), "batch_size": 1, "strength": 0.15,
+            },
+            "_meta": {"title": "LTX image to video"},
+        },
+        "7": {
+            "class_type": "LTXVConditioning",
+            "inputs": {"positive": ["6", 0], "negative": ["6", 1], "frame_rate": 24.0},
+        },
+        "8": {
+            "class_type": "LTXVScheduler",
+            "inputs": {
+                "steps": steps, "max_shift": 2.05, "base_shift": 0.95,
+                "stretch": True, "terminal": 0.1, "latent": ["6", 2],
+            },
+        },
+        "9": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+        "10": {
+            "class_type": "SamplerCustom",
+            "inputs": {
+                "model": ["1", 0], "positive": ["7", 0], "negative": ["7", 1],
+                "sampler": ["9", 0], "sigmas": ["8", 0], "latent_image": ["6", 2],
+                "add_noise": True, "noise_seed": seed, "cfg": cfg,
+            },
+        },
+        "11": {"class_type": "VAEDecode", "inputs": {"samples": ["10", 0], "vae": ["1", 2]}},
+        "12": {"class_type": "CreateVideo", "inputs": {"images": ["11", 0], "fps": 24.0}},
+        "13": {
+            "class_type": "SaveVideo",
+            "inputs": {"video": ["12", 0], "filename_prefix": output_prefix, "format": "auto", "codec": "auto"},
+            "_meta": {"title": "Visual Loop Studio Output"},
+        },
+    }
+
+
+def build_hunyuan15_workflow(
+    uploaded_image: str,
+    prompt: str,
+    width: int = 832,
+    height: int = 480,
+    length: int = 81,
+    steps: int = 8,
+    cfg: float = 1.0,
+    seed: int | None = None,
+    negative_prompt: str = "",
+    output_prefix: str = "video/VisualLoopStudio",
+) -> dict:
+    """Build the official 480p step-distilled HunyuanVideo 1.5 I2V graph."""
+    steps, cfg = 8, 1.0
+    _validate_video_settings(width, height, length, steps, cfg, LOCAL_MODEL_HUNYUAN)
+    seed = random.SystemRandom().randrange(0, 2**63 - 1) if seed is None or seed < 0 else int(seed)
+    return {
+        "1": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": HUNYUAN_MODEL, "weight_dtype": "default"},
+            "_meta": {"title": "HunyuanVideo 1.5 480p I2V Step Distilled"},
+        },
+        "2": {
+            "class_type": "DualCLIPLoader",
+            "inputs": {
+                "clip_name1": HUNYUAN_TEXT_ENCODER, "clip_name2": HUNYUAN_BYT5_ENCODER,
+                "type": "hunyuan_video_15", "device": "default",
+            },
+        },
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": HUNYUAN_VAE}},
+        "4": {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": HUNYUAN_CLIP_VISION}},
+        "5": {"class_type": "LoadImage", "inputs": {"image": uploaded_image}},
+        "6": {
+            "class_type": "CLIPVisionEncode",
+            "inputs": {"clip_vision": ["4", 0], "image": ["5", 0], "crop": "center"},
+        },
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": motion_prompt(prompt), "clip": ["2", 0]},
+            "_meta": {"title": "Positive Prompt"},
+        },
+        "8": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": negative_prompt.strip() or DEFAULT_NEGATIVE_PROMPT, "clip": ["2", 0]},
+            "_meta": {"title": "Negative Prompt"},
+        },
+        "9": {
+            "class_type": "HunyuanVideo15ImageToVideo",
+            "inputs": {
+                "positive": ["7", 0], "negative": ["8", 0], "vae": ["3", 0],
+                "start_image": ["5", 0], "clip_vision_output": ["6", 0],
+                "width": int(width), "height": int(height), "length": int(length), "batch_size": 1,
+            },
+        },
+        "10": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": 7.0}},
+        "11": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+        "12": {
+            "class_type": "CFGGuider",
+            "inputs": {"model": ["10", 0], "positive": ["9", 0], "negative": ["9", 1], "cfg": cfg},
+        },
+        "13": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+        "14": {
+            "class_type": "BasicScheduler",
+            "inputs": {"model": ["10", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0},
+        },
+        "15": {
+            "class_type": "SamplerCustomAdvanced",
+            "inputs": {
+                "noise": ["11", 0], "guider": ["12", 0], "sampler": ["13", 0],
+                "sigmas": ["14", 0], "latent_image": ["9", 2],
+            },
+        },
+        "16": {"class_type": "VAEDecode", "inputs": {"samples": ["15", 0], "vae": ["3", 0]}},
+        "17": {"class_type": "CreateVideo", "inputs": {"images": ["16", 0], "fps": 24.0}},
+        "18": {
+            "class_type": "SaveVideo",
+            "inputs": {"video": ["17", 0], "filename_prefix": output_prefix, "format": "auto", "codec": "auto"},
+            "_meta": {"title": "Visual Loop Studio Output"},
+        },
+    }
+
+
 def prepare_workflow(
     workflow_path: str,
     uploaded_image: str,
@@ -143,14 +315,25 @@ def prepare_workflow(
     output_prefix: str,
     wan_variant: str = WAN_VARIANT_QUALITY,
 ) -> dict:
+    wan_variant = normalize_wan_variant(wan_variant)
     if not workflow_path:
+        if wan_variant == LOCAL_MODEL_LTX:
+            return build_ltx_workflow(
+                uploaded_image, prompt, width, height, length, steps, cfg, seed,
+                negative_prompt, output_prefix,
+            )
+        if wan_variant == LOCAL_MODEL_HUNYUAN:
+            return build_hunyuan15_workflow(
+                uploaded_image, prompt, width, height, length, steps, cfg, seed,
+                negative_prompt, output_prefix,
+            )
         return build_wan22_workflow(
             uploaded_image, prompt, width, height, length, steps, cfg, seed,
             negative_prompt, output_prefix, wan_variant,
         )
-    if normalize_wan_variant(wan_variant) != WAN_VARIANT_QUALITY:
+    if wan_variant != WAN_VARIANT_QUALITY:
         raise ValueError(
-            "Chế độ Wan DMD 4 bước chỉ dùng với workflow tích hợp. "
+            f"Chế độ {local_model_label(wan_variant)} chỉ dùng với workflow tích hợp. "
             "Hãy xóa đường dẫn workflow ComfyUI tùy chỉnh trong Cài đặt."
         )
     path = Path(workflow_path).expanduser()
@@ -182,6 +365,82 @@ def check_comfyui(
     base = _base_url(base_url)
     stats = _request_json("GET", f"{base}/system_stats", timeout=15)
     object_info = _request_json("GET", f"{base}/object_info", timeout=30)
+    return _check_local_model_files(stats, object_info, require_default_models, wan_variant)
+
+
+def _check_local_model_files(
+    stats: dict,
+    object_info: dict,
+    require_default_models: bool,
+    wan_variant: str,
+) -> dict:
+    wan_variant = normalize_wan_variant(wan_variant)
+    common_nodes = {"CLIPTextEncode", "LoadImage", "VAEDecode", "CreateVideo", "SaveVideo"}
+    if wan_variant == LOCAL_MODEL_LTX:
+        required_nodes = common_nodes | {
+            "CheckpointLoaderSimple", "CLIPLoader", "LTXVImgToVideo", "LTXVConditioning",
+            "LTXVScheduler", "KSamplerSelect", "SamplerCustom",
+        }
+        checks = [
+            ("CheckpointLoaderSimple", "ckpt_name", LTX_MODEL, "models/checkpoints"),
+            ("CLIPLoader", "clip_name", LTX_TEXT_ENCODER, "models/text_encoders"),
+        ]
+    elif wan_variant == LOCAL_MODEL_HUNYUAN:
+        required_nodes = common_nodes | {
+            "UNETLoader", "DualCLIPLoader", "VAELoader", "CLIPVisionLoader", "CLIPVisionEncode",
+            "HunyuanVideo15ImageToVideo", "ModelSamplingSD3", "RandomNoise", "CFGGuider",
+            "KSamplerSelect", "BasicScheduler", "SamplerCustomAdvanced",
+        }
+        checks = [
+            ("UNETLoader", "unet_name", HUNYUAN_MODEL, "models/diffusion_models"),
+            ("DualCLIPLoader", "clip_name1", HUNYUAN_TEXT_ENCODER, "models/text_encoders"),
+            ("DualCLIPLoader", "clip_name2", HUNYUAN_BYT5_ENCODER, "models/text_encoders"),
+            ("VAELoader", "vae_name", HUNYUAN_VAE, "models/vae"),
+            ("CLIPVisionLoader", "clip_name", HUNYUAN_CLIP_VISION, "models/clip_vision"),
+        ]
+    else:
+        required_nodes = common_nodes | {
+            "UNETLoader", "CLIPLoader", "VAELoader", "Wan22ImageToVideoLatent",
+            "ModelSamplingSD3", "KSampler",
+        }
+        if wan_variant == WAN_VARIANT_DMD:
+            required_nodes.add("LoraLoaderModelOnly")
+        checks = [
+            ("UNETLoader", "unet_name", WAN_MODEL, "models/diffusion_models"),
+            ("CLIPLoader", "clip_name", WAN_TEXT_ENCODER, "models/text_encoders"),
+            ("VAELoader", "vae_name", WAN_VAE, "models/vae"),
+        ]
+        if wan_variant == WAN_VARIANT_DMD:
+            checks.append(("LoraLoaderModelOnly", "lora_name", WAN_DMD_LORA, "models/loras"))
+
+    missing_nodes = sorted(required_nodes - set(object_info))
+    if missing_nodes:
+        raise RuntimeError(
+            f"ComfyUI đang thiếu node cho {local_model_label(wan_variant)}: "
+            + ", ".join(missing_nodes)
+            + ". Hãy cập nhật ComfyUI lên bản mới nhất."
+        )
+    if require_default_models:
+        missing_models = []
+        for node_name, input_name, filename, folder in checks:
+            values = _input_choices(object_info, node_name, input_name)
+            if not any(str(value).replace(chr(92), "/").endswith(filename) for value in values):
+                missing_models.append(f"{filename} → ComfyUI/{folder}")
+        if missing_models:
+            raise RuntimeError(
+                f"Thiếu model {local_model_label(wan_variant)} đang chọn:\n- "
+                + "\n- ".join(missing_models)
+                + "\nBấm ‘Cài / tải model đang chọn’ để tải bổ sung."
+            )
+    return stats
+
+
+def _legacy_check_comfyui_models(
+    object_info: dict,
+    wan_variant: str,
+    require_default_models: bool = True,
+) -> None:
+    """Kept below only to preserve source compatibility; new checks return above."""
     wan_variant = normalize_wan_variant(wan_variant)
     required_nodes = {
         "UNETLoader", "CLIPLoader", "VAELoader", "CLIPTextEncode", "LoadImage",
@@ -214,7 +473,7 @@ def check_comfyui(
                 "Thiếu model Wan 2.2 đang chọn:\n- " + "\n- ".join(missing_models)
                 + "\nBấm ‘Cài / tải model Wan đang chọn’ để tải bổ sung."
             )
-    return stats
+    return None
 
 
 def generate_local_image_to_video(
@@ -239,16 +498,18 @@ def generate_local_image_to_video(
     dmd = wan_variant == WAN_VARIANT_DMD
     if dmd:
         steps, cfg = 4, 1.0
+    elif wan_variant in {LOCAL_MODEL_LTX, LOCAL_MODEL_HUNYUAN}:
+        steps, cfg = 8, 1.0
     source = Path(image_path)
     if not source.is_file():
         raise ValueError(f"Không tìm thấy ảnh đầu vào: {image_path}")
     if not prompt.strip():
         raise ValueError("Prompt chuyển động local đang trống.")
-    _validate_video_settings(width, height, length, steps, cfg)
+    _validate_video_settings(width, height, length, steps, cfg, wan_variant)
     base = _base_url(comfyui_url)
     progress = progress or (lambda _value, _message: None)
     cancelled = cancelled or (lambda: False)
-    variant_label = "Wan 2.2 DMD 4 bước" if dmd else "Wan 2.2 Chất lượng"
+    variant_label = local_model_label(wan_variant)
     progress(2, f"Đang kiểm tra ComfyUI localhost và {variant_label}…")
     check_comfyui(base, require_default_models=not bool(workflow_path), wan_variant=wan_variant)
     _raise_if_cancelled(cancelled, base)
@@ -288,7 +549,7 @@ def generate_local_image_to_video(
                     raise RuntimeError("Workflow đã hoàn tất nhưng không tìm thấy video output. Hãy dùng node SaveVideo.")
                 progress(94, "Đang tải video từ ComfyUI về dự án…")
                 _download_output(base, file_info, Path(output_path), cancelled)
-                progress(100, "Hoàn tất video Wan 2.2 local.")
+                progress(100, f"Hoàn tất video {variant_label} local.")
                 return str(Path(output_path).resolve())
         minutes = elapsed / 60
         estimated = min(90, 10 + int(minutes * 4))
@@ -299,7 +560,33 @@ def generate_local_image_to_video(
 def normalize_wan_variant(value: str) -> str:
     normalized = str(value or WAN_VARIANT_QUALITY).strip().casefold()
     # Migrate projects saved by the removed non-commercial Turbo option to DMD.
-    return WAN_VARIANT_DMD if normalized in {WAN_VARIANT_DMD, "dmd", "turbo"} else WAN_VARIANT_QUALITY
+    aliases = {
+        WAN_VARIANT_DMD: WAN_VARIANT_DMD,
+        "dmd": WAN_VARIANT_DMD,
+        "turbo": WAN_VARIANT_DMD,
+        LOCAL_MODEL_LTX: LOCAL_MODEL_LTX,
+        "ltx": LOCAL_MODEL_LTX,
+        "ltx-video": LOCAL_MODEL_LTX,
+        LOCAL_MODEL_HUNYUAN: LOCAL_MODEL_HUNYUAN,
+        "hunyuan": LOCAL_MODEL_HUNYUAN,
+        "hunyuan1.5": LOCAL_MODEL_HUNYUAN,
+    }
+    return aliases.get(normalized, WAN_VARIANT_QUALITY)
+
+
+def normalize_local_model(value: str) -> str:
+    """Preferred generic name; normalize_wan_variant remains for saved-project compatibility."""
+    return normalize_wan_variant(value)
+
+
+def local_model_label(value: str) -> str:
+    labels = {
+        WAN_VARIANT_QUALITY: "Wan 2.2 Chất lượng 20 bước",
+        WAN_VARIANT_DMD: "Wan 2.2 DMD 4 bước",
+        LOCAL_MODEL_LTX: "LTX-Video 2B Distilled 8 bước",
+        LOCAL_MODEL_HUNYUAN: "HunyuanVideo 1.5 480p 8 bước",
+    }
+    return labels[normalize_wan_variant(value)]
 
 
 def _inject_workflow_values(
@@ -360,19 +647,31 @@ def _assert_local_only(workflow: dict) -> None:
     if cloud_nodes:
         raise ValueError(
             "Workflow chứa node API/Cloud có thể tính credit: " + ", ".join(sorted(set(cloud_nodes)))
-            + ". Hãy dùng workflow Wan 2.2 Native local."
+            + ". Hãy dùng workflow AI Video local tích hợp."
         )
 
 
-def _validate_video_settings(width: int, height: int, length: int, steps: int, cfg: float) -> None:
+def _validate_video_settings(
+    width: int,
+    height: int,
+    length: int,
+    steps: int,
+    cfg: float,
+    model_variant: str = WAN_VARIANT_QUALITY,
+) -> None:
+    model_variant = normalize_wan_variant(model_variant)
     if width < 256 or height < 256 or width % 32 or height % 32:
-        raise ValueError("Kích thước Wan 2.2 phải từ 256 px và chia hết cho 32.")
-    if length < 5 or (length - 1) % 4:
-        raise ValueError("Số frame Wan 2.2 phải có dạng 4n+1, ví dụ 49, 81 hoặc 121.")
+        raise ValueError("Kích thước AI local phải từ 256 px và chia hết cho 32.")
+    frame_multiple = 8 if model_variant == LOCAL_MODEL_LTX else 4
+    if length < 5 or (length - 1) % frame_multiple:
+        raise ValueError(
+            f"Số frame {local_model_label(model_variant)} phải có dạng "
+            f"{frame_multiple}n+1, ví dụ 49, 81 hoặc 121."
+        )
     if not 1 <= steps <= 100:
-        raise ValueError("Số bước Wan 2.2 phải từ 1 đến 100.")
+        raise ValueError("Số bước AI local phải từ 1 đến 100.")
     if not 0 < cfg <= 30:
-        raise ValueError("CFG Wan 2.2 phải lớn hơn 0 và không quá 30.")
+        raise ValueError("CFG AI local phải lớn hơn 0 và không quá 30.")
 
 
 def _input_choices(object_info: dict, node_name: str, input_name: str) -> list:
@@ -492,7 +791,7 @@ def _history_error(entry: dict) -> str:
             if isinstance(detail, dict):
                 return str(detail.get("exception_message") or detail.get("node_type") or detail)
             return str(detail)
-    return "ComfyUI không thể hoàn tất workflow Wan 2.2."
+    return "ComfyUI không thể hoàn tất workflow AI local."
 
 
 def _interrupt(base: str) -> None:

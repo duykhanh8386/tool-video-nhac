@@ -6,12 +6,18 @@ import unittest
 from pathlib import Path
 
 from ai.comfyui import (
+    HUNYUAN_MODEL,
+    LOCAL_MODEL_HUNYUAN,
+    LOCAL_MODEL_LTX,
+    LTX_MODEL,
     WAN_DMD_LORA,
     WAN_MODEL,
     WAN_VARIANT_DMD,
     WAN_TEXT_ENCODER,
     WAN_VAE,
     _find_video_file,
+    build_hunyuan15_workflow,
+    build_ltx_workflow,
     build_wan22_workflow,
     prepare_workflow,
 )
@@ -57,6 +63,44 @@ class ComfyUiWorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["9"]["inputs"]["steps"], 4)
         self.assertEqual(workflow["9"]["inputs"]["cfg"], 1.0)
         self.assertEqual(workflow["9"]["inputs"]["sampler_name"], "uni_pc")
+
+    def test_ltx_distilled_workflow_uses_native_eight_step_graph(self):
+        workflow = build_ltx_workflow(
+            "uploaded.png", "gentle hand movement", length=81, steps=20, cfg=5.0, seed=123
+        )
+        classes = {node["class_type"] for node in workflow.values()}
+        self.assertEqual(workflow["1"]["inputs"]["ckpt_name"], LTX_MODEL)
+        self.assertIn("LTXVImgToVideo", classes)
+        self.assertIn("LTXVScheduler", classes)
+        self.assertEqual(workflow["6"]["inputs"]["length"], 81)
+        self.assertEqual(workflow["8"]["inputs"]["steps"], 8)
+        self.assertEqual(workflow["10"]["inputs"]["cfg"], 1.0)
+        self.assertEqual(workflow["10"]["inputs"]["noise_seed"], 123)
+
+    def test_hunyuan_step_distilled_workflow_uses_native_eight_step_graph(self):
+        workflow = build_hunyuan15_workflow(
+            "uploaded.png", "subtle breathing", width=832, height=480, length=81,
+            steps=20, cfg=5.0, seed=456,
+        )
+        classes = {node["class_type"] for node in workflow.values()}
+        self.assertEqual(workflow["1"]["inputs"]["unet_name"], HUNYUAN_MODEL)
+        self.assertIn("HunyuanVideo15ImageToVideo", classes)
+        self.assertIn("SamplerCustomAdvanced", classes)
+        self.assertEqual(workflow["9"]["inputs"]["width"], 832)
+        self.assertEqual(workflow["10"]["inputs"]["shift"], 7.0)
+        self.assertEqual(workflow["11"]["inputs"]["noise_seed"], 456)
+        self.assertEqual(workflow["12"]["inputs"]["cfg"], 1.0)
+        self.assertEqual(workflow["14"]["inputs"]["steps"], 8)
+
+    def test_prepare_workflow_dispatches_new_local_models(self):
+        ltx = prepare_workflow("", "a.png", "move", 832, 480, 81, 20, 5, 1, "", "video/a", LOCAL_MODEL_LTX)
+        hunyuan = prepare_workflow("", "b.png", "move", 832, 480, 81, 20, 5, 1, "", "video/b", LOCAL_MODEL_HUNYUAN)
+        self.assertEqual(ltx["1"]["inputs"]["ckpt_name"], LTX_MODEL)
+        self.assertEqual(hunyuan["1"]["inputs"]["unet_name"], HUNYUAN_MODEL)
+
+    def test_ltx_requires_eight_n_plus_one_frames(self):
+        with self.assertRaisesRegex(ValueError, r"8n\+1"):
+            build_ltx_workflow("x.png", "move", length=77)
 
     def test_custom_api_workflow_is_injected(self):
         workflow = build_wan22_workflow("old.png", "old prompt")

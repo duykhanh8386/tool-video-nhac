@@ -207,7 +207,12 @@ class VisualProject:
         data["elements"] = defaults
         wan_variant = str(data.get("local_wan_variant") or "quality").strip().casefold()
         # Old projects using the removed non-commercial Turbo mode migrate to DMD.
-        data["local_wan_variant"] = "dmd4" if wan_variant in {"dmd4", "dmd", "turbo"} else "quality"
+        variant_aliases = {
+            "dmd4": "dmd4", "dmd": "dmd4", "turbo": "dmd4",
+            "ltx2b": "ltx2b", "ltx": "ltx2b", "ltx-video": "ltx2b",
+            "hunyuan15": "hunyuan15", "hunyuan": "hunyuan15", "hunyuan1.5": "hunyuan15",
+        }
+        data["local_wan_variant"] = variant_aliases.get(wan_variant, "quality")
         overlay_blend = str(data.get("effect_overlay_blend") or "lighten").lower()
         data["effect_overlay_blend"] = overlay_blend if overlay_blend in {"normal", "lighten", "screen", "addition"} else "lighten"
         try:

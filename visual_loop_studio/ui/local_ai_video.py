@@ -5,11 +5,10 @@ import threading
 from PySide6.QtCore import QObject, Signal
 
 from ai.comfyui import (
-    WAN_VARIANT_DMD,
     LocalGenerationCancelled,
     check_comfyui,
     generate_local_image_to_video,
-    normalize_wan_variant,
+    local_model_label,
 )
 from ai.local_runtime import LocalRuntimeManager, RuntimeInstallCancelled
 
@@ -30,7 +29,7 @@ class LocalAiVideoWorker(QObject):
 
     def start(self, **kwargs) -> None:
         if self.running:
-            raise RuntimeError("Một tác vụ Wan 2.2 local đang chạy.")
+            raise RuntimeError("Một tác vụ AI local đang chạy.")
         self.running = True
         self._cancel.clear()
         threading.Thread(target=self._run, args=(kwargs,), daemon=True).start()
@@ -94,8 +93,7 @@ class LocalAiVideoWorker(QObject):
             name = str(device.get("name") or device.get("type") or "GPU/CPU local")
             vram = device.get("vram_total")
             suffix = f" • VRAM {float(vram) / 1024**3:.1f} GB" if isinstance(vram, (int, float)) else ""
-            mode = "DMD 4 bước" if normalize_wan_variant(wan_variant) == WAN_VARIANT_DMD else "Chất lượng 20 bước"
-            message = f"ComfyUI sẵn sàng • {name}{suffix} • Wan 2.2 {mode} đã sẵn sàng."
+            message = f"ComfyUI sẵn sàng • {name}{suffix} • {local_model_label(wan_variant)} đã sẵn sàng."
         except Exception as exc:
             self.checked.emit(False, str(exc))
         else:

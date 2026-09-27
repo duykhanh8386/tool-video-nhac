@@ -40,6 +40,12 @@ class ProjectModelTests(unittest.TestCase):
         restored = VisualProject.from_dict({"local_wan_variant": "turbo"})
         self.assertEqual(restored.local_wan_variant, "dmd4")
 
+    def test_new_local_model_choices_round_trip(self):
+        for variant in ("ltx2b", "hunyuan15"):
+            with self.subTest(variant=variant):
+                restored = VisualProject.from_dict({"local_wan_variant": variant})
+                self.assertEqual(restored.local_wan_variant, variant)
+
     def test_invalid_overlay_values_are_normalized(self):
         restored = VisualProject.from_dict({
             "effect_overlay_blend": "unknown",

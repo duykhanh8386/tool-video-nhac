@@ -13,10 +13,13 @@ from PySide6.QtWidgets import (
     QColorDialog, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
-from ai.comfyui import WAN_VARIANT_DMD, WAN_VARIANT_QUALITY
+from ai.comfyui import (
+    LOCAL_MODEL_HUNYUAN, LOCAL_MODEL_LTX, WAN_VARIANT_DMD, WAN_VARIANT_QUALITY,
+    local_model_label, normalize_wan_variant,
+)
 from ai.local_runtime import (
     LocalRuntimeManager, default_runtime_root, detect_runtime_backend,
-    is_runtime_installed, server_ready,
+    is_runtime_installed, required_free_bytes, server_ready, validate_local_model_backend,
 )
 from models.settings_model import AppSettings
 from models.visual_project import ElementLayout, TextStyle, VisualProject, default_element_layouts, default_text_styles
@@ -348,7 +351,7 @@ class VisualCreatorPage(QWidget):
         bg_layout.addWidget(self.ai_prompt)
         self.ai_engine = QComboBox()
         _add_options(self.ai_engine, [
-            ("Wan 2.2 TI2V 5B Native — Local, miễn phí", "LOCAL"),
+            ("AI Video Local — Wan / LTX / Hunyuan, không token", "LOCAL"),
             ("Veo 3.1 — Cloud, dùng API credit", "VEO"),
         ])
         bg_layout.addWidget(QLabel("Bộ máy tạo chuyển động"))
@@ -388,6 +391,8 @@ class VisualCreatorPage(QWidget):
         _add_options(self.local_wan_variant, [
             ("Wan 2.2 5B Chất lượng — 20 bước (~10 GB)", WAN_VARIANT_QUALITY),
             ("Wan 2.2 5B DMD — 4 bước (+~645 MB, Apache 2.0)", WAN_VARIANT_DMD),
+            ("LTX-Video 2B Distilled — 8 bước (~11,5 GB)", LOCAL_MODEL_LTX),
+            ("HunyuanVideo 1.5 480p — 8 bước (~21,5 GB, NVIDIA 16 GB+)", LOCAL_MODEL_HUNYUAN),
         ])
         self.local_wan_variant.currentIndexChanged.connect(self._local_wan_variant_changed)
         self.local_resolution = QComboBox()
@@ -416,7 +421,7 @@ class VisualCreatorPage(QWidget):
         self.local_negative_prompt = QPlainTextEdit()
         self.local_negative_prompt.setMaximumHeight(70)
         self.local_negative_prompt.setPlaceholderText("Tùy chọn; để trống dùng negative prompt an toàn tích hợp sẵn.")
-        local_config.addWidget(QLabel("Model Wan"), 0, 0)
+        local_config.addWidget(QLabel("Model AI Local"), 0, 0)
         local_config.addWidget(self.local_wan_variant, 0, 1)
         local_config.addWidget(QLabel("Độ phân giải local"), 1, 0)
         local_config.addWidget(self.local_resolution, 1, 1)
@@ -448,7 +453,7 @@ class VisualCreatorPage(QWidget):
         self._local_wan_variant_changed()
 
         ai_actions = QHBoxLayout()
-        self.ai_generate = QPushButton("Tạo video Wan 2.2 local")
+        self.ai_generate = QPushButton("Tạo video AI local")
         self.ai_generate.setObjectName("primary")
         self.ai_generate.clicked.connect(self.start_ai_video)
         self.ai_generate_batch = QPushButton("Tạo AI + render toàn bộ ảnh đã chọn")
@@ -464,7 +469,7 @@ class VisualCreatorPage(QWidget):
         self.ai_progress = QProgressBar()
         self.ai_progress.setRange(0, 100)
         self.ai_progress.setValue(0)
-        self.ai_status = QLabel("Wan 2.2 Native local không dùng token/credit. Hãy kiểm tra ComfyUI trước lần chạy đầu.")
+        self.ai_status = QLabel("AI local chạy bằng GPU của máy này, không dùng token/credit. Hãy kiểm tra ComfyUI trước lần chạy đầu.")
         self.ai_status.setWordWrap(True)
         self.ai_status.setObjectName("muted")
         bg_layout.addWidget(self.ai_progress)
@@ -1028,6 +1033,8 @@ class VisualCreatorPage(QWidget):
         self._ai_source_mode_changed()
         _set_combo_value(self.local_wan_variant, project.local_wan_variant)
         _set_combo_value(self.local_resolution, project.local_resolution)
+        if self._selected_wan_variant() == LOCAL_MODEL_HUNYUAN:
+            _set_combo_value(self.local_resolution, "832x480")
         _set_combo_value(self.local_frames, project.local_frames)
         self.local_steps.setValue(project.local_steps)
         self.local_cfg.setValue(project.local_cfg)
@@ -1132,24 +1139,34 @@ class VisualCreatorPage(QWidget):
         local = _combo_value(self.ai_engine) == "LOCAL"
         self.local_panel.setVisible(local)
         self.veo_panel.setVisible(not local)
-        self.ai_generate.setText("Tạo video Wan 2.2 local" if local else "Tạo video chuyển động bằng Veo")
+        self.ai_generate.setText("Tạo video AI local" if local else "Tạo video chuyển động bằng Veo")
         self.ai_generate_batch.setText(
-            "Tạo Wan 2.2 + render toàn bộ ảnh"
+            "Tạo AI local + render toàn bộ ảnh"
             if local else "Tạo Veo + render toàn bộ ảnh"
         )
         if not self.local_ai_worker.running and not self.ai_worker.running:
             self.ai_status.setText(
-                "Wan 2.2 Native local không dùng token/credit. Hãy kiểm tra ComfyUI trước lần chạy đầu."
+                f"{local_model_label(self._selected_wan_variant())} chạy local, không dùng token/credit. Hãy kiểm tra ComfyUI trước lần chạy đầu."
                 if local else "Veo dùng Gemini API key và có thể tính credit."
             )
 
     def _selected_wan_variant(self) -> str:
         value = str(_combo_value(self.local_wan_variant) or WAN_VARIANT_QUALITY)
-        return WAN_VARIANT_DMD if value == WAN_VARIANT_DMD else WAN_VARIANT_QUALITY
+        return normalize_wan_variant(value)
+
+    @staticmethod
+    def _local_model_slug(value: str) -> str:
+        return {
+            WAN_VARIANT_QUALITY: "wan22",
+            WAN_VARIANT_DMD: "wan22_dmd",
+            LOCAL_MODEL_LTX: "ltx2b",
+            LOCAL_MODEL_HUNYUAN: "hunyuan15",
+        }[normalize_wan_variant(value)]
 
     def _local_wan_variant_changed(self, _index: int = -1) -> None:
-        dmd = self._selected_wan_variant() == WAN_VARIANT_DMD
-        if dmd:
+        variant = self._selected_wan_variant()
+        fixed_fast = variant in {WAN_VARIANT_DMD, LOCAL_MODEL_LTX, LOCAL_MODEL_HUNYUAN}
+        if variant == WAN_VARIANT_DMD:
             self.local_steps.setRange(4, 4)
             self.local_steps.setValue(4)
             self.local_cfg.setRange(1.0, 1.0)
@@ -1161,6 +1178,30 @@ class VisualCreatorPage(QWidget):
                 "Model nền và LoRA đều dùng giấy phép Apache 2.0, phù hợp sử dụng thương mại. "
                 "Kết quả/thời gian còn phụ thuộc GPU, độ phân giải và số frame."
             )
+        elif variant == LOCAL_MODEL_LTX:
+            self.local_steps.setRange(8, 8)
+            self.local_steps.setValue(8)
+            self.local_cfg.setRange(1.0, 1.0)
+            self.local_cfg.setValue(1.0)
+            _set_combo_value(self.local_resolution, "832x480")
+            self.local_setup.setText("Cài / tải LTX-Video 2B Distilled")
+            self.local_note.setText(
+                "LTX-Video 2B Distilled là chế độ render/farm nhanh, chạy local 8 bước, CFG 1 và không tốn token. "
+                "Giấy phép cho phép thương mại khi doanh thu năm dưới 10 triệu USD; nội dung công khai cần ghi là AI tạo. "
+                "Model khoảng 11,5 GB; 832×480 được khuyến nghị để ưu tiên tốc độ."
+            )
+        elif variant == LOCAL_MODEL_HUNYUAN:
+            self.local_steps.setRange(8, 8)
+            self.local_steps.setValue(8)
+            self.local_cfg.setRange(1.0, 1.0)
+            self.local_cfg.setValue(1.0)
+            _set_combo_value(self.local_resolution, "832x480")
+            self.local_setup.setText("Cài / tải HunyuanVideo 1.5 480p")
+            self.local_note.setText(
+                "HunyuanVideo 1.5 I2V Step Distilled chạy 8 bước, chỉ bật cho NVIDIA CUDA và khuyến nghị từ 16 GB VRAM. "
+                "Model khoảng 21,5 GB, chạy local không tốn token. Giấy phép Tencent có giới hạn vùng lãnh thổ "
+                "và yêu cầu đánh dấu nội dung AI khi công bố; hãy kiểm tra giấy phép trước khi phân phối quốc tế."
+            )
         else:
             self.local_steps.setRange(8, 40)
             self.local_steps.setValue(20)
@@ -1171,17 +1212,20 @@ class VisualCreatorPage(QWidget):
                 "Wan 2.2 Chất lượng mặc định 20 bước, ưu tiên chi tiết và độ ổn định chuyển động. "
                 "Chạy hoàn toàn trên máy, không tốn token/credit; ComfyUI tự chạy ẩn sau khi cài."
             )
-        self.local_steps.setEnabled(not dmd)
-        self.local_cfg.setEnabled(not dmd)
+        self.local_steps.setEnabled(not fixed_fast)
+        self.local_cfg.setEnabled(not fixed_fast)
+        self.local_resolution.setEnabled(variant != LOCAL_MODEL_HUNYUAN)
 
     def _local_options(self, project: VisualProject | None = None) -> dict:
         project = project or self.collect()
-        width_text, height_text = project.local_resolution.lower().split("x", 1)
+        variant = normalize_wan_variant(project.local_wan_variant)
+        resolution = "832x480" if variant == LOCAL_MODEL_HUNYUAN else project.local_resolution
+        width_text, height_text = resolution.lower().split("x", 1)
         return {
             "comfyui_url": self.settings.comfyui_url,
             "workflow_path": self.settings.comfyui_workflow,
             "runtime_root": self.settings.local_ai_root,
-            "wan_variant": project.local_wan_variant,
+            "wan_variant": variant,
             "prompt": project.ai_prompt.strip(),
             "width": int(width_text),
             "height": int(height_text),
@@ -1207,8 +1251,9 @@ class VisualCreatorPage(QWidget):
                     self._offer_local_setup()
                     return
                 folder = Path(self.output_folder.text() or str(Path(source).resolve().parent)) / "AI_Local_Clips"
+                slug = self._local_model_slug(self._selected_wan_variant())
                 output = unique_output(
-                    str(folder), f"wan22_{Path(source).stem}.mp4", f"wan22_{Path(source).stem}", ".mp4"
+                    str(folder), f"{slug}_{Path(source).stem}.mp4", f"{slug}_{Path(source).stem}", ".mp4"
                 )
                 self.ai_generate.setEnabled(False)
                 self.ai_cancel.setEnabled(True)
@@ -1258,7 +1303,7 @@ class VisualCreatorPage(QWidget):
                 self._offer_local_setup()
                 return
             self.local_check.setEnabled(False)
-            self.ai_status.setText("Đang kiểm tra ComfyUI, node và model Wan 2.2…")
+            self.ai_status.setText(f"Đang kiểm tra ComfyUI, node và {local_model_label(self._selected_wan_variant())}…")
             self.local_ai_worker.check(
                 self.settings.comfyui_url,
                 self.settings.comfyui_workflow,
@@ -1275,7 +1320,7 @@ class VisualCreatorPage(QWidget):
         silent = self._silent_local_check
         self._silent_local_check = False
         if not success and not silent:
-            show_error(self, "ComfyUI/Wan 2.2 chưa sẵn sàng", message)
+            show_error(self, "AI Local chưa sẵn sàng", message)
 
     def _local_runtime_available(self) -> bool:
         return server_ready(self.settings.comfyui_url) or is_runtime_installed(
@@ -1285,10 +1330,11 @@ class VisualCreatorPage(QWidget):
     def _offer_local_setup(self) -> None:
         backend = detect_runtime_backend()
         variant = self._selected_wan_variant()
-        model_label = "Wan DMD 4 bước (Apache 2.0)" if variant == WAN_VARIANT_DMD else "Wan Chất lượng 20 bước"
+        validate_local_model_backend(variant, backend)
+        model_label = local_model_label(variant)
         answer = QMessageBox.question(
             self,
-            "Cài AI Local Wan 2.2",
+            "Cài model AI Local",
             f"Đã nhận diện: {backend.label}.\n\n"
             f"Máy chưa có {model_label}. Tool sẽ tải model đang chọn cùng các thành phần dùng chung, "
             "cài một lần và tự chạy ẩn ở các lần sau.\n\nCài ngay?",
@@ -1306,7 +1352,7 @@ class VisualCreatorPage(QWidget):
             initial = configured if configured.exists() else configured.parent
             selected = QFileDialog.getExistingDirectory(
                 self,
-                "Chọn ổ hoặc thư mục lưu AI Local (cần tối thiểu 32 GB trống)",
+                "Chọn ổ hoặc thư mục lưu AI Local",
                 str(initial),
             )
             if not selected:
@@ -1315,13 +1361,15 @@ class VisualCreatorPage(QWidget):
             root = selected_path if selected_path.name.lower() == "visualloopstudio_ai" else selected_path / "VisualLoopStudio_AI"
             backend = detect_runtime_backend()
             variant = self._selected_wan_variant()
-            model_label = "Wan DMD 4 bước (Apache 2.0)" if variant == WAN_VARIANT_DMD else "Wan Chất lượng 20 bước"
+            validate_local_model_backend(variant, backend)
+            model_label = local_model_label(variant)
+            required_gb = required_free_bytes(root, backend, variant) / 1024**3
             answer = QMessageBox.question(
                 self,
                 "Xác nhận cài AI Local",
                 f"GPU/backend nhận diện: {backend.label}\n"
                 f"ComfyUI và {model_label} sẽ được tải vào:\n{root}\n\n"
-                "Cần tối thiểu 32 GB trống. File tải dở sẽ được giữ để tiếp tục.\n\nBắt đầu?",
+                f"Cần khoảng {required_gb:.1f} GB trống ở trạng thái hiện tại. File tải dở sẽ được giữ để tiếp tục.\n\nBắt đầu?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Yes,
             )
@@ -1423,14 +1471,14 @@ class VisualCreatorPage(QWidget):
         self.ai_generate_batch.setEnabled(True)
         self.ai_cancel.setEnabled(False)
         self.ai_progress.setValue(100)
-        self.ai_status.setText(f"Đã tạo Wan 2.2 local và chọn làm video nền: {output}")
+        self.ai_status.setText(f"Đã tạo {local_model_label(self._selected_wan_variant())} và chọn làm video nền: {output}")
         self.background.setText(output)
         _set_combo_value(self.animation, "STATIC")
         self.fps.setValue(24)
         QMessageBox.information(
             self,
             "Tạo video local hoàn tất",
-            "Video Wan 2.2 đã được chọn làm nền. Camera toàn khung cố định và FPS đã đặt về 24.",
+            "Video AI local đã được chọn làm nền. Camera toàn khung cố định và FPS đã đặt về 24.",
         )
 
     def _local_ai_failed(self, message: str) -> None:
@@ -1445,8 +1493,8 @@ class VisualCreatorPage(QWidget):
         self.ai_generate_batch.setEnabled(True)
         self.ai_cancel.setEnabled(False)
         self.ai_progress.setValue(0)
-        self.ai_status.setText("Tạo video Wan 2.2 local thất bại.")
-        show_error(self, "Tạo video Wan 2.2 thất bại", message)
+        self.ai_status.setText("Tạo video AI local thất bại.")
+        show_error(self, "Tạo video AI local thất bại", message)
 
     def _local_ai_canceled(self) -> None:
         self._local_batch_queue.clear()
@@ -1455,7 +1503,7 @@ class VisualCreatorPage(QWidget):
         self.ai_generate_batch.setEnabled(True)
         self.ai_cancel.setEnabled(False)
         self.ai_progress.setValue(0)
-        self.ai_status.setText("Đã hủy tạo video Wan 2.2 local.")
+        self.ai_status.setText("Đã hủy tạo video AI local.")
         self.status.stopped("Đã hủy hàng đợi AI local.")
 
     def _ai_progress(self, value: int, message: str) -> None:
@@ -1639,14 +1687,15 @@ class VisualCreatorPage(QWidget):
             source = self._local_batch_queue.pop(0)
             self._local_batch_current = source
             current = self._local_batch_total - len(self._local_batch_queue)
-            engine_label = "Wan 2.2" if self._ai_batch_engine == "LOCAL" else "Veo"
+            engine_label = local_model_label(self._local_batch_template.local_wan_variant) if self._ai_batch_engine == "LOCAL" else "Veo"
             clip_folder = Path(self._local_batch_template.output_folder) / (
                 "AI_Local_Clips" if self._ai_batch_engine == "LOCAL" else "AI_Veo_Clips"
             )
+            local_slug = self._local_model_slug(self._local_batch_template.local_wan_variant)
             clip = unique_output(
                 str(clip_folder),
-                f"{'wan22' if self._ai_batch_engine == 'LOCAL' else 'veo'}_{Path(source).stem}.mp4",
-                f"{'wan22' if self._ai_batch_engine == 'LOCAL' else 'veo'}_{Path(source).stem}",
+                f"{local_slug if self._ai_batch_engine == 'LOCAL' else 'veo'}_{Path(source).stem}.mp4",
+                f"{local_slug if self._ai_batch_engine == 'LOCAL' else 'veo'}_{Path(source).stem}",
                 ".mp4",
             )
             try:

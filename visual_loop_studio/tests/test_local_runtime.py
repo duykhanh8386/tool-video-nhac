@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from ai.local_runtime import (
     DMD_LORA_DOWNLOAD,
+    HUNYUAN_DOWNLOADS,
+    LTX_DOWNLOADS,
     MODEL_DOWNLOADS,
     RUNTIME_BACKENDS,
     _convert_dmd_lora_for_comfyui,
@@ -22,6 +24,7 @@ from ai.local_runtime import (
     missing_runtime_files,
     model_downloads_for_variant,
     runtime_paths,
+    validate_local_model_backend,
 )
 
 
@@ -73,6 +76,25 @@ class LocalRuntimeTests(unittest.TestCase):
         self.assertEqual(DMD_LORA_DOWNLOAD.folder, "loras")
         self.assertLess(DMD_LORA_DOWNLOAD.size_bytes, 700 * 1024**2)
         self.assertEqual(len(DMD_LORA_DOWNLOAD.sha256), 64)
+
+    def test_ltx_and_hunyuan_have_independent_verified_download_sets(self):
+        self.assertEqual(model_downloads_for_variant("ltx2b"), LTX_DOWNLOADS)
+        self.assertEqual(model_downloads_for_variant("hunyuan15"), HUNYUAN_DOWNLOADS)
+        self.assertEqual({item.folder for item in LTX_DOWNLOADS}, {"checkpoints", "text_encoders"})
+        self.assertEqual(
+            {item.folder for item in HUNYUAN_DOWNLOADS},
+            {"diffusion_models", "text_encoders", "vae", "clip_vision"},
+        )
+        for item in (*LTX_DOWNLOADS, *HUNYUAN_DOWNLOADS):
+            self.assertTrue(item.url.startswith("https://"))
+            self.assertEqual(len(item.sha256), 64)
+            int(item.sha256, 16)
+
+    def test_hunyuan_requires_nvidia_but_ltx_uses_detected_backend(self):
+        self.assertEqual(validate_local_model_backend("hunyuan15", "nvidia").key, "nvidia")
+        with self.assertRaisesRegex(RuntimeError, "NVIDIA CUDA"):
+            validate_local_model_backend("hunyuan15", "intel")
+        self.assertEqual(validate_local_model_backend("ltx2b", "intel").key, "intel")
 
     def test_runtime_readiness_is_specific_to_selected_wan_model(self):
         with tempfile.TemporaryDirectory() as folder:
