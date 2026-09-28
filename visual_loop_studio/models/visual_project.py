@@ -138,6 +138,8 @@ class VisualProject:
     ai_source_folder: str = ""
     ai_source_images: list[str] = field(default_factory=list)
     ai_source_recursive: bool = False
+    ai_generated_backgrounds: list[str] = field(default_factory=list)
+    vids_show_browser: bool = True
     local_wan_variant: str = "quality"
     local_resolution: str = "1280x704"
     local_frames: int = 81
@@ -160,6 +162,15 @@ class VisualProject:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def copy_for_background(self, background: str, ai_video: bool = False) -> "VisualProject":
+        """Clone the complete composition while replacing only its background source."""
+        project = type(self).from_dict(self.to_dict())
+        project.background = str(background)
+        if ai_video:
+            project.animation = "STATIC"
+            project.fps = 24
+        return project
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "VisualProject":

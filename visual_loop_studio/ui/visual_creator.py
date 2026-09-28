@@ -17,6 +17,7 @@ from ai.comfyui import (
     LOCAL_MODEL_HUNYUAN, LOCAL_MODEL_LTX, WAN_VARIANT_DMD, WAN_VARIANT_QUALITY,
     local_model_label, normalize_wan_variant,
 )
+from ai.google_vids_web import GOOGLE_VIDS_PROFILE_DIR, google_vids_profile_ready
 from ai.local_runtime import (
     LocalRuntimeManager, default_runtime_root, detect_runtime_backend,
     is_runtime_installed, required_free_bytes, server_ready, validate_local_model_backend,
@@ -31,6 +32,7 @@ from ui.local_ai_setup import LocalAiSetupWorker
 from ui.color_filter_panel import ColorFilterPanel
 from ui.common import AUDIO_FILTER, IMAGE_FILTER, MEDIA_FILTER, FileField, RenderStatus, show_error
 from ui.effect_panel import EffectPanel
+from ui.google_vids_video import GoogleVidsWorker
 from ui.preview import CompositionPreview
 from utils.media import background_files, is_still_image
 from utils.paths import unique_output
@@ -45,6 +47,7 @@ class VisualCreatorPage(QWidget):
         self.settings = settings
         self.worker = RenderWorker(self)
         self.ai_worker = AiVideoWorker(self)
+        self.google_vids_worker = GoogleVidsWorker(self)
         self.local_runtime = LocalRuntimeManager()
         self.local_ai_worker = LocalAiVideoWorker(self.local_runtime, self)
         self.local_setup_worker = LocalAiSetupWorker(self)
@@ -59,6 +62,7 @@ class VisualCreatorPage(QWidget):
         self._batch_failures: list[str] = []
         self._batch_current = ""
         self._batch_mode = False
+        self._batch_from_ai = False
         self._batch_template: VisualProject | None = None
         self._local_batch_queue: list[str] = []
         self._local_batch_total = 0
@@ -69,8 +73,11 @@ class VisualCreatorPage(QWidget):
         self._local_batch_mode = False
         self._local_batch_template: VisualProject | None = None
         self._ai_batch_engine = "LOCAL"
+        self._active_ai_engine = "LOCAL"
         self._ai_batch_api_key = ""
         self._ai_source_images: list[str] = []
+        self._ai_generated_backgrounds: list[str] = []
+        self._last_ai_source_mode = ""
         self._silent_local_check = False
         root = QVBoxLayout(self)
         heading = QLabel("Tạo Visual — 60 giây")
@@ -126,6 +133,12 @@ class VisualCreatorPage(QWidget):
         self.ai_worker.finished.connect(self._ai_finished)
         self.ai_worker.failed.connect(self._ai_failed)
         self.ai_worker.canceled.connect(self._ai_canceled)
+        self.google_vids_worker.progress.connect(self._ai_progress)
+        self.google_vids_worker.finished.connect(self._ai_finished)
+        self.google_vids_worker.failed.connect(self._ai_failed)
+        self.google_vids_worker.canceled.connect(self._ai_canceled)
+        self.google_vids_worker.login_finished.connect(self._vids_login_finished)
+        self.google_vids_worker.login_failed.connect(self._vids_login_failed)
         self.local_ai_worker.progress.connect(self._local_ai_progress)
         self.local_ai_worker.finished.connect(self._local_ai_finished)
         self.local_ai_worker.failed.connect(self._local_ai_failed)
@@ -341,8 +354,8 @@ class VisualCreatorPage(QWidget):
         source_layout.addWidget(self.ai_source_summary)
         bg_layout.addWidget(source_group)
         self.ai_source_mode.currentIndexChanged.connect(self._ai_source_mode_changed)
-        self.ai_source_folder.changed.connect(lambda _value: self._refresh_ai_source_summary())
-        self.ai_source_recursive.toggled.connect(lambda _checked: self._refresh_ai_source_summary())
+        self.ai_source_folder.changed.connect(self._ai_source_folder_changed)
+        self.ai_source_recursive.toggled.connect(self._ai_source_recursive_changed)
 
         self.ai_prompt = QPlainTextEdit()
         self.ai_prompt.setMaximumHeight(105)
@@ -353,6 +366,7 @@ class VisualCreatorPage(QWidget):
         _add_options(self.ai_engine, [
             ("AI Video Local — Wan / LTX / Hunyuan, không token", "LOCAL"),
             ("Veo 3.1 — Cloud, dùng API credit", "VEO"),
+            ("Google Vids Web — dùng quota Google AI Ultra (Beta)", "GOOGLE_VIDS"),
         ])
         bg_layout.addWidget(QLabel("Bộ máy tạo chuyển động"))
         bg_layout.addWidget(self.ai_engine)
@@ -383,6 +397,31 @@ class VisualCreatorPage(QWidget):
         ai_config.addWidget(self.ai_aspect_ratio, 3, 1)
         bg_layout.addWidget(self.veo_panel)
         self.ai_resolution.currentTextChanged.connect(self._ai_resolution_changed)
+
+        self.vids_panel = QWidget()
+        vids_layout = QVBoxLayout(self.vids_panel)
+        vids_layout.setContentsMargins(0, 0, 0, 0)
+        vids_actions = QHBoxLayout()
+        self.vids_login = QPushButton("Đăng nhập Google Vids (chỉ lần đầu)")
+        self.vids_login.clicked.connect(self._start_vids_login)
+        self.vids_check = QPushButton("Kiểm tra phiên đăng nhập")
+        self.vids_check.clicked.connect(self._check_vids_login)
+        vids_actions.addWidget(self.vids_login, 1)
+        vids_actions.addWidget(self.vids_check)
+        vids_layout.addLayout(vids_actions)
+        self.vids_show_browser = QCheckBox("Hiện Chrome khi chạy Vids (khuyên bật trong giai đoạn Beta)")
+        self.vids_show_browser.setChecked(True)
+        vids_layout.addWidget(self.vids_show_browser)
+        vids_note = QLabel(
+            "Tool dùng một profile Chrome riêng và chỉ lưu cookie/phiên do Chrome tạo, không lưu mật khẩu. "
+            "Google Vids Web hiện không có API tạo clip nên chế độ Beta điều khiển giao diện web; "
+            "nếu Google đổi giao diện, tool sẽ dừng item và lưu ảnh lỗi thay vì treo hàng đợi. "
+            "Đầu ra Vids hiện là MP4 720p, 24 FPS, khoảng 10 giây. Prompt tiếng Anh cho kết quả tốt nhất."
+        )
+        vids_note.setWordWrap(True)
+        vids_note.setObjectName("notice")
+        vids_layout.addWidget(vids_note)
+        bg_layout.addWidget(self.vids_panel)
 
         self.local_panel = QWidget()
         local_config = QGridLayout(self.local_panel)
@@ -605,6 +644,8 @@ class VisualCreatorPage(QWidget):
         output_layout = QVBoxLayout(output_group)
         self.output_folder = FileField("Thư mục lưu", directory=True)
         self.output_folder.setText(self.settings.last_output_folder)
+        # Kept only for loading older project files. New batch rendering reuses the
+        # multi-image AI source and generated clips instead of asking for a folder twice.
         self.background_folder = FileField("Thư mục background để render hàng loạt", directory=True, optional=True)
         self.batch_recursive = QCheckBox("Lấy cả ảnh/video trong thư mục con")
         self.output_name = QLineEdit()
@@ -626,26 +667,28 @@ class VisualCreatorPage(QWidget):
         render = QPushButton("Render video 1 phút")
         render.setObjectName("primary")
         render.clicked.connect(self.start_render)
-        render_folder = QPushButton("Render toàn bộ background trong thư mục")
-        render_folder.setObjectName("primary")
-        render_folder.clicked.connect(self.start_batch_render)
+        self.render_backgrounds = QPushButton("Render toàn bộ background đã chọn")
+        self.render_backgrounds.setObjectName("primary")
+        self.render_backgrounds.clicked.connect(self.start_batch_render)
         output_layout.addWidget(self.output_folder)
         output_layout.addWidget(QLabel("Tên file đầu ra tùy chọn"))
         output_layout.addWidget(self.output_name)
         output_layout.addLayout(config_row)
         output_layout.addWidget(render)
-        output_layout.addWidget(self.background_folder)
-        output_layout.addWidget(self.batch_recursive)
-        batch_note = QLabel("Bấm một lần để xếp hàng toàn bộ background. Mỗi file tạo một video riêng và giữ nguyên text, logo, hiệu ứng, font cùng bố cục hiện tại.")
-        batch_note.setWordWrap(True)
-        batch_note.setObjectName("muted")
-        output_layout.addWidget(batch_note)
-        output_layout.addWidget(render_folder)
+        self.batch_note = QLabel(
+            "Dùng chính các ảnh đã chọn ở phần AI phía trên; nếu đã tạo AI hàng loạt, nút này dùng lại các clip AI. "
+            "Mỗi background tạo một video 60 giây và giữ nguyên toàn bộ text, logo, ảnh, sóng, hiệu ứng, font và bố cục preview."
+        )
+        self.batch_note.setWordWrap(True)
+        self.batch_note.setObjectName("muted")
+        output_layout.addWidget(self.batch_note)
+        output_layout.addWidget(self.render_backgrounds)
         self.form.addWidget(output_group)
         self.form.addStretch()
 
     def _connect_preview(self) -> None:
         self.background.changed.connect(self._background_changed)
+        self.background.changed.connect(self._ai_background_source_changed)
         self.background.changed.connect(lambda _value: self._refresh_ai_source_summary())
         self.artwork.changed.connect(lambda value: self.preview.set_source("artwork", value))
         self.logo.changed.connect(lambda value: self.preview.set_source("logo", value))
@@ -985,6 +1028,8 @@ class VisualCreatorPage(QWidget):
             ai_source_folder=self.ai_source_folder.text(),
             ai_source_images=list(self._ai_source_images),
             ai_source_recursive=self.ai_source_recursive.isChecked(),
+            ai_generated_backgrounds=list(self._ai_generated_backgrounds),
+            vids_show_browser=self.vids_show_browser.isChecked(),
             local_wan_variant=self._selected_wan_variant(),
             local_resolution=str(_combo_value(self.local_resolution)),
             local_frames=int(_combo_value(self.local_frames)), local_steps=self.local_steps.value(),
@@ -1030,6 +1075,8 @@ class VisualCreatorPage(QWidget):
         _set_combo_value(self.ai_source_mode, project.ai_source_mode)
         self._ai_source_images = [str(path) for path in project.ai_source_images]
         self.ai_source_recursive.setChecked(project.ai_source_recursive)
+        self._ai_generated_backgrounds = [str(path) for path in project.ai_generated_backgrounds]
+        self.vids_show_browser.setChecked(project.vids_show_browser)
         self._ai_source_mode_changed()
         _set_combo_value(self.local_wan_variant, project.local_wan_variant)
         _set_combo_value(self.local_resolution, project.local_resolution)
@@ -1066,6 +1113,7 @@ class VisualCreatorPage(QWidget):
         )
         if not values:
             return
+        self._invalidate_generated_ai_backgrounds()
         self._ai_source_images = [str(Path(value).resolve()) for value in values if is_still_image(value)]
         if self._ai_source_images:
             self.background.setText(self._ai_source_images[0])
@@ -1073,12 +1121,32 @@ class VisualCreatorPage(QWidget):
 
     def _ai_source_mode_changed(self, *_args) -> None:
         mode = str(_combo_value(self.ai_source_mode))
+        if self._last_ai_source_mode and mode != self._last_ai_source_mode:
+            self._invalidate_generated_ai_backgrounds()
+        self._last_ai_source_mode = mode
         self.ai_multi_panel.setVisible(mode == "MULTI")
         self.ai_source_folder.setVisible(mode == "FOLDER")
         self.ai_source_recursive.setVisible(mode == "FOLDER")
         self.ai_generate.setVisible(mode == "SINGLE")
         self.ai_generate_batch.setVisible(mode != "SINGLE")
         self._refresh_ai_source_summary()
+
+    def _invalidate_generated_ai_backgrounds(self) -> None:
+        if self._local_batch_mode or self._batch_from_ai:
+            return
+        self._ai_generated_backgrounds.clear()
+
+    def _ai_source_folder_changed(self, _value: str) -> None:
+        self._invalidate_generated_ai_backgrounds()
+        self._refresh_ai_source_summary()
+
+    def _ai_source_recursive_changed(self, _checked: bool) -> None:
+        self._invalidate_generated_ai_backgrounds()
+        self._refresh_ai_source_summary()
+
+    def _ai_background_source_changed(self, _value: str) -> None:
+        if str(_combo_value(self.ai_source_mode)) == "SINGLE":
+            self._invalidate_generated_ai_backgrounds()
 
     def _selected_ai_sources(self, project: VisualProject | None = None) -> list[str]:
         project = project or self.collect()
@@ -1114,7 +1182,6 @@ class VisualCreatorPage(QWidget):
         elif mode == "MULTI":
             count = sum(Path(path).is_file() and is_still_image(path) for path in self._ai_source_images)
             text = f"Đã chọn {count} ảnh. Mỗi ảnh sẽ tạo một video riêng bằng cùng prompt."
-            self.ai_multi_summary.setText(text)
         else:
             try:
                 folder_text = self.ai_source_folder.text()
@@ -1126,7 +1193,17 @@ class VisualCreatorPage(QWidget):
                 text = f"Tìm thấy {count} ảnh. Mỗi ảnh sẽ tạo một video riêng bằng cùng prompt."
             except OSError:
                 text = "Không đọc được thư mục ảnh nguồn."
+        generated_count = sum(Path(path).is_file() for path in self._ai_generated_backgrounds)
+        if generated_count:
+            text += f" Đã lưu state {generated_count} clip AI để render/re-render bố cục 60 giây."
+        if mode == "MULTI":
+            self.ai_multi_summary.setText(text)
         self.ai_source_summary.setText(text)
+        if hasattr(self, "render_backgrounds"):
+            self.render_backgrounds.setText(
+                f"Render toàn bộ {generated_count} background AI đã tạo"
+                if generated_count else "Render toàn bộ background đã chọn"
+            )
 
     def _ai_resolution_changed(self, value: str) -> None:
         if value in {"1080p", "4k"}:
@@ -1136,19 +1213,97 @@ class VisualCreatorPage(QWidget):
             self.ai_duration.setEnabled(True)
 
     def _ai_engine_changed(self, *_args) -> None:
-        local = _combo_value(self.ai_engine) == "LOCAL"
+        engine = str(_combo_value(self.ai_engine) or "LOCAL").upper()
+        local = engine == "LOCAL"
+        veo = engine == "VEO"
+        vids = engine == "GOOGLE_VIDS"
         self.local_panel.setVisible(local)
-        self.veo_panel.setVisible(not local)
-        self.ai_generate.setText("Tạo video AI local" if local else "Tạo video chuyển động bằng Veo")
+        self.local_note.setVisible(local)
+        self.veo_panel.setVisible(veo)
+        self.vids_panel.setVisible(vids)
+        self.ai_generate.setText(
+            "Tạo video AI local"
+            if local else "Tạo video chuyển động bằng Veo"
+            if veo else "Tạo video bằng Google Vids Web"
+        )
         self.ai_generate_batch.setText(
             "Tạo AI local + render toàn bộ ảnh"
             if local else "Tạo Veo + render toàn bộ ảnh"
+            if veo else "Tạo Google Vids + render toàn bộ ảnh"
         )
-        if not self.local_ai_worker.running and not self.ai_worker.running:
+        if not self.local_ai_worker.running and not self.ai_worker.running and not self.google_vids_worker.busy:
+            if local:
+                text = (
+                    f"{local_model_label(self._selected_wan_variant())} chạy local, không dùng token/credit. "
+                    "Hãy kiểm tra ComfyUI trước lần chạy đầu."
+                )
+            elif veo:
+                text = "Veo dùng Gemini API key và có thể tính credit."
+            else:
+                text = (
+                    "Google Vids đã có phiên đăng nhập; có thể tạo clip bằng quota web."
+                    if google_vids_profile_ready()
+                    else "Chưa có phiên Google Vids. Hãy đăng nhập một lần trước khi tạo clip."
+                )
+            self.ai_status.setText(text)
+
+    def _start_vids_login(self) -> None:
+        try:
+            if self.worker.running or self.local_ai_worker.running or self.ai_worker.running or self.local_setup_worker.running or self.google_vids_worker.busy:
+                raise RuntimeError("Một tác vụ AI/render khác đang chạy.")
+            self.vids_login.setEnabled(False)
+            self.vids_check.setEnabled(False)
+            self.ai_generate.setEnabled(False)
+            self.ai_generate_batch.setEnabled(False)
+            self.ai_cancel.setEnabled(True)
+            self.ai_progress.setValue(1)
             self.ai_status.setText(
-                f"{local_model_label(self._selected_wan_variant())} chạy local, không dùng token/credit. Hãy kiểm tra ComfyUI trước lần chạy đầu."
-                if local else "Veo dùng Gemini API key và có thể tính credit."
+                "Đang mở Chrome riêng. Hãy tự đăng nhập Google, mở được Vids rồi đóng cửa sổ Chrome."
             )
+            self.google_vids_worker.login(str(GOOGLE_VIDS_PROFILE_DIR))
+        except Exception as exc:
+            self.vids_login.setEnabled(True)
+            self.vids_check.setEnabled(True)
+            show_error(self, "Không thể mở đăng nhập Google Vids", exc)
+
+    def _check_vids_login(self) -> None:
+        if google_vids_profile_ready():
+            QMessageBox.information(
+                self,
+                "Google Vids",
+                "Đã tìm thấy profile Google Vids riêng của Visual Loop Studio. Nếu Google đã hết phiên, lần tạo tiếp theo sẽ yêu cầu đăng nhập lại.",
+            )
+            self.ai_status.setText("Google Vids đã có profile đăng nhập trên máy này.")
+        else:
+            show_error(
+                self,
+                "Google Vids chưa đăng nhập",
+                "Chưa tìm thấy phiên đăng nhập. Hãy bấm ‘Đăng nhập Google Vids (chỉ lần đầu)’.",
+            )
+
+    def _vids_login_finished(self, _profile: str) -> None:
+        self.vids_login.setEnabled(True)
+        self.vids_check.setEnabled(True)
+        self.ai_generate.setEnabled(True)
+        self.ai_generate_batch.setEnabled(True)
+        self.ai_cancel.setEnabled(False)
+        self.ai_progress.setValue(100)
+        self.ai_status.setText("Đã lưu phiên Google Vids. Tool không lưu mật khẩu Google.")
+        QMessageBox.information(
+            self,
+            "Đăng nhập Google Vids hoàn tất",
+            "Đã lưu profile Chrome riêng trên máy này. Từ giờ có thể chọn ảnh/prompt và chạy Google Vids trong app.",
+        )
+
+    def _vids_login_failed(self, message: str) -> None:
+        self.vids_login.setEnabled(True)
+        self.vids_check.setEnabled(True)
+        self.ai_generate.setEnabled(True)
+        self.ai_generate_batch.setEnabled(True)
+        self.ai_cancel.setEnabled(False)
+        self.ai_progress.setValue(0)
+        self.ai_status.setText("Đăng nhập Google Vids chưa hoàn tất.")
+        show_error(self, "Đăng nhập Google Vids thất bại", message)
 
     def _selected_wan_variant(self) -> str:
         value = str(_combo_value(self.local_wan_variant) or WAN_VARIANT_QUALITY)
@@ -1176,7 +1331,8 @@ class VisualCreatorPage(QWidget):
                 "Wan DMD dùng checkpoint Wan TI2V 5B gốc cùng LoRA DMD 4 bước, CFG 1.0. "
                 "Tool tự chuyển 600 tensor LoRA sang định dạng ComfyUI và kiểm tra trước khi chạy. "
                 "Model nền và LoRA đều dùng giấy phép Apache 2.0, phù hợp sử dụng thương mại. "
-                "Kết quả/thời gian còn phụ thuộc GPU, độ phân giải và số frame."
+                "Để giảm rung, nên mô tả một hành động chính và ưu tiên 49/81 frame ở 832×480. "
+                "Nếu cần bám prompt và ổn định cao nhất, hãy dùng Wan Chất lượng 20 bước."
             )
         elif variant == LOCAL_MODEL_LTX:
             self.local_steps.setRange(8, 8)
@@ -1244,9 +1400,11 @@ class VisualCreatorPage(QWidget):
             prompt = self.ai_prompt.toPlainText().strip()
             if not prompt:
                 raise ValueError("Hãy nhập prompt mô tả tay/chân, người hoặc hiệu ứng cần chuyển động.")
-            if self.ai_worker.running or self.local_ai_worker.running or self.worker.running or self.local_setup_worker.running:
+            if self.ai_worker.running or self.local_ai_worker.running or self.google_vids_worker.busy or self.worker.running or self.local_setup_worker.running:
                 raise RuntimeError("Một tác vụ AI/render khác đang chạy.")
-            if _combo_value(self.ai_engine) == "LOCAL":
+            engine = str(_combo_value(self.ai_engine) or "LOCAL").upper()
+            self._active_ai_engine = engine
+            if engine == "LOCAL":
                 if not self._local_runtime_available():
                     self._offer_local_setup()
                     return
@@ -1262,6 +1420,29 @@ class VisualCreatorPage(QWidget):
                     image_path=source,
                     output_path=str(output),
                     **self._local_options(),
+                )
+                return
+            if engine == "GOOGLE_VIDS":
+                if not google_vids_profile_ready():
+                    raise ValueError(
+                        "Chưa đăng nhập Google Vids. Hãy bấm ‘Đăng nhập Google Vids (chỉ lần đầu)’ trước."
+                    )
+                folder = Path(self.output_folder.text() or str(Path(source).resolve().parent)) / "Google_Vids_Clips"
+                output = unique_output(
+                    str(folder), f"google_vids_{Path(source).stem}.mp4", f"google_vids_{Path(source).stem}", ".mp4"
+                )
+                self.ai_generate.setEnabled(False)
+                self.ai_generate_batch.setEnabled(False)
+                self.vids_login.setEnabled(False)
+                self.vids_check.setEnabled(False)
+                self.ai_cancel.setEnabled(True)
+                self.ai_progress.setValue(1)
+                self.google_vids_worker.start(
+                    image_path=source,
+                    prompt=prompt,
+                    output_path=str(output),
+                    profile_dir=str(GOOGLE_VIDS_PROFILE_DIR),
+                    show_browser=self.vids_show_browser.isChecked(),
                 )
                 return
             api_key = self.settings.gemini_api_key.strip() or os.environ.get("GEMINI_API_KEY", "").strip()
@@ -1294,6 +1475,8 @@ class VisualCreatorPage(QWidget):
             self.local_ai_worker.cancel()
         if self.ai_worker.running:
             self.ai_worker.cancel()
+        if self.google_vids_worker.busy:
+            self.google_vids_worker.cancel()
         if self.worker.running:
             self.worker.cancel()
 
@@ -1346,7 +1529,13 @@ class VisualCreatorPage(QWidget):
 
     def _start_local_setup(self) -> None:
         try:
-            if self.local_setup_worker.running or self.local_ai_worker.running or self.ai_worker.running or self.worker.running:
+            if (
+                self.local_setup_worker.running
+                or self.local_ai_worker.running
+                or self.ai_worker.running
+                or self.google_vids_worker.busy
+                or self.worker.running
+            ):
                 raise RuntimeError("Một tác vụ AI/render khác đang chạy.")
             configured = Path(self.settings.local_ai_root) if self.settings.local_ai_root else default_runtime_root()
             initial = configured if configured.exists() else configured.parent
@@ -1403,6 +1592,8 @@ class VisualCreatorPage(QWidget):
         self.local_check.setEnabled(False)
         self.ai_generate.setEnabled(True)
         self.ai_generate_batch.setEnabled(True)
+        self.vids_login.setEnabled(True)
+        self.vids_check.setEnabled(True)
         self.ai_cancel.setEnabled(False)
         self.ai_status.setText("Đã cài AI Local. Đang tự khởi động ComfyUI…")
         try:
@@ -1422,6 +1613,8 @@ class VisualCreatorPage(QWidget):
         self.local_check.setEnabled(True)
         self.ai_generate.setEnabled(True)
         self.ai_generate_batch.setEnabled(True)
+        self.vids_login.setEnabled(True)
+        self.vids_check.setEnabled(True)
         self.ai_cancel.setEnabled(False)
         self.ai_progress.setValue(0)
         self.ai_status.setText("Cài AI Local chưa hoàn tất; có thể chạy lại để tiếp tục tải.")
@@ -1484,10 +1677,7 @@ class VisualCreatorPage(QWidget):
     def _local_ai_failed(self, message: str) -> None:
         if self._local_batch_mode:
             self._local_batch_failures.append(f"{Path(self._local_batch_current).name}: {message}")
-            if self._local_batch_queue:
-                QTimer.singleShot(0, self._start_next_local_ai)
-            else:
-                self._finish_local_batch()
+            self._continue_ai_batch()
             return
         self.ai_generate.setEnabled(True)
         self.ai_generate_batch.setEnabled(True)
@@ -1502,8 +1692,13 @@ class VisualCreatorPage(QWidget):
         self.ai_generate.setEnabled(True)
         self.ai_generate_batch.setEnabled(True)
         self.ai_cancel.setEnabled(False)
-        self.ai_progress.setValue(0)
-        self.ai_status.setText("Đã hủy tạo video AI local.")
+        saved = len(self._ai_generated_backgrounds)
+        self.ai_progress.setValue(100 if saved else 0)
+        self.ai_status.setText(
+            f"Đã hủy AI local; vẫn giữ {saved} clip để render lại."
+            if saved else "Đã hủy tạo video AI local."
+        )
+        self._refresh_ai_source_summary()
         self.status.stopped("Đã hủy hàng đợi AI local.")
 
     def _ai_progress(self, value: int, message: str) -> None:
@@ -1519,28 +1714,31 @@ class VisualCreatorPage(QWidget):
             return
         self.ai_generate.setEnabled(True)
         self.ai_generate_batch.setEnabled(True)
+        self.vids_login.setEnabled(True)
+        self.vids_check.setEnabled(True)
         self.ai_cancel.setEnabled(False)
         self.ai_progress.setValue(100)
         self.ai_status.setText(f"Đã tạo và chọn làm video nền: {output}")
         self.background.setText(output)
         _set_combo_value(self.animation, "STATIC")
         self.fps.setValue(24)
+        engine_name = "Google Vids Web" if self._active_ai_engine == "GOOGLE_VIDS" else "Veo"
         QMessageBox.information(
             self,
             "Tạo video AI hoàn tất",
-            "Video Veo đã được chọn làm nền. Camera toàn khung đang ở chế độ cố định và FPS đã đặt về 24 để khớp video AI.",
+            f"Video {engine_name} đã được chọn làm nền. Camera toàn khung đang ở chế độ cố định "
+            "và FPS đã đặt về 24 để khớp video AI.",
         )
 
     def _ai_failed(self, message: str) -> None:
         if self._local_batch_mode:
             self._local_batch_failures.append(f"{Path(self._local_batch_current).name}: {message}")
-            if self._local_batch_queue:
-                QTimer.singleShot(0, self._start_next_local_ai)
-            else:
-                self._finish_local_batch()
+            self._continue_ai_batch()
             return
         self.ai_generate.setEnabled(True)
         self.ai_generate_batch.setEnabled(True)
+        self.vids_login.setEnabled(True)
+        self.vids_check.setEnabled(True)
         self.ai_cancel.setEnabled(False)
         self.ai_progress.setValue(0)
         self.ai_status.setText("Tạo video AI thất bại.")
@@ -1553,36 +1751,71 @@ class VisualCreatorPage(QWidget):
             self.status.stopped("Đã hủy hàng đợi AI.")
         self.ai_generate.setEnabled(True)
         self.ai_generate_batch.setEnabled(True)
+        self.vids_login.setEnabled(True)
+        self.vids_check.setEnabled(True)
         self.ai_cancel.setEnabled(False)
-        self.ai_progress.setValue(0)
-        self.ai_status.setText("Đã hủy tạo video AI.")
+        saved = len(self._ai_generated_backgrounds)
+        self.ai_progress.setValue(100 if saved else 0)
+        self.ai_status.setText(
+            f"Đã hủy AI; vẫn giữ {saved} clip để render lại."
+            if saved else "Đã hủy tạo video AI."
+        )
+        self._refresh_ai_source_summary()
 
     def _ai_batch_clip_finished(self, output: str) -> None:
         self._local_batch_clip = output
         self.ai_progress.setValue(100)
-        try:
-            project = VisualProject.from_dict(self._local_batch_template.to_dict() if self._local_batch_template else {})
-            project.background = output
-            project.animation = "STATIC"
-            project.fps = 24
-            project.output_name = f"{Path(self._local_batch_current).stem}_visual.mp4"
-            job = build_visual_job(project, self.settings)
-            current = self._local_batch_total - len(self._local_batch_queue)
-            self.status.begin()
-            self.status.info.setText(
-                f"Đang ghép bố cục {current}/{self._local_batch_total}: {Path(self._local_batch_current).name}"
-            )
-            self.worker.start(job)
-        except Exception as exc:
-            self._local_batch_failures.append(f"{Path(self._local_batch_current).name}: {exc}")
-            if self._local_batch_queue:
-                QTimer.singleShot(0, self._start_next_local_ai)
-            else:
-                self._finish_local_batch()
+        normalized = str(Path(output))
+        if normalized not in self._ai_generated_backgrounds:
+            self._ai_generated_backgrounds.append(normalized)
+        if normalized not in self._local_batch_completed:
+            self._local_batch_completed.append(normalized)
+        self.preview.set_source("background", normalized)
+        self._refresh_ai_source_summary()
+        self._continue_ai_batch()
+
+    def _continue_ai_batch(self) -> None:
+        if self._local_batch_queue:
+            QTimer.singleShot(0, self._start_next_local_ai)
+        else:
+            QTimer.singleShot(0, self._start_generated_ai_render_batch)
+
+    def _start_generated_ai_render_batch(self) -> None:
+        if not self._local_batch_mode:
+            return
+        generated = [
+            str(Path(path)) for path in self._ai_generated_backgrounds
+            if Path(path).is_file()
+        ]
+        if not generated:
+            self._finish_local_batch()
+            return
+        self._local_batch_mode = False
+        self._batch_from_ai = True
+        self._batch_template = VisualProject.from_dict(
+            self._local_batch_template.to_dict() if self._local_batch_template else {}
+        )
+        self._batch_template.ai_generated_backgrounds = list(generated)
+        self._batch_queue = list(dict.fromkeys(generated))
+        self._batch_total = len(self._batch_queue)
+        self._batch_completed = []
+        self._batch_failures = []
+        self._batch_current = ""
+        self._batch_mode = True
+        self.ai_status.setText(
+            f"Đã tạo {len(generated)}/{self._local_batch_total} clip AI. Đang render toàn bộ với bố cục preview đã lưu…"
+        )
+        self._start_next_batch()
 
     def start_render(self) -> None:
         try:
-            if self.worker.running or self.local_ai_worker.running or self.ai_worker.running or self.local_setup_worker.running:
+            if (
+                self.worker.running
+                or self.local_ai_worker.running
+                or self.ai_worker.running
+                or self.google_vids_worker.busy
+                or self.local_setup_worker.running
+            ):
                 raise RuntimeError("Một tác vụ AI/render khác đang chạy.")
             self._batch_mode = False
             self._batch_queue.clear()
@@ -1600,24 +1833,39 @@ class VisualCreatorPage(QWidget):
 
     def start_batch_render(self) -> None:
         try:
-            if self.worker.running or self.local_ai_worker.running or self.ai_worker.running or self.local_setup_worker.running:
+            if (
+                self.worker.running
+                or self.local_ai_worker.running
+                or self.ai_worker.running
+                or self.google_vids_worker.busy
+                or self.local_setup_worker.running
+            ):
                 raise RuntimeError("Một tác vụ AI/render khác đang chạy.")
-            folder = Path(self.background_folder.text())
-            if not folder.is_dir():
-                raise ValueError("Hãy chọn thư mục chứa background cần render hàng loạt.")
-            backgrounds = background_files(str(folder), self.batch_recursive.isChecked())
-            if not backgrounds:
-                raise ValueError("Thư mục không có ảnh hoặc video background được hỗ trợ.")
             template = self.collect()
             if not template.output_folder:
                 raise ValueError("Hãy chọn thư mục lưu video đầu ra.")
-            self._batch_template = template
+            generated = [
+                str(Path(path)) for path in self._ai_generated_backgrounds
+                if Path(path).is_file()
+            ]
+            if generated:
+                backgrounds = list(dict.fromkeys(generated))
+            elif str(template.ai_source_mode).upper() == "SINGLE":
+                backgrounds = [template.background] if Path(template.background).is_file() else []
+            else:
+                backgrounds = self._selected_ai_sources(template)
+            if not backgrounds:
+                raise ValueError(
+                    "Chưa có background để render. Hãy chọn nhiều ảnh ở phần nguồn AI hoặc tạo AI hàng loạt trước."
+                )
+            self._batch_template = VisualProject.from_dict(template.to_dict())
             self._batch_queue = backgrounds
             self._batch_total = len(backgrounds)
             self._batch_completed = []
             self._batch_failures = []
             self._batch_current = ""
             self._batch_mode = True
+            self._batch_from_ai = False
             self._local_batch_mode = False
             self._local_batch_queue.clear()
             self.settings.last_output_folder = template.output_folder
@@ -1629,7 +1877,13 @@ class VisualCreatorPage(QWidget):
 
     def start_ai_batch(self) -> None:
         try:
-            if self.worker.running or self.local_ai_worker.running or self.ai_worker.running or self.local_setup_worker.running:
+            if (
+                self.worker.running
+                or self.local_ai_worker.running
+                or self.ai_worker.running
+                or self.google_vids_worker.busy
+                or self.local_setup_worker.running
+            ):
                 raise RuntimeError("Một tác vụ AI/render khác đang chạy.")
             template = self.collect()
             if not template.ai_prompt.strip():
@@ -1644,6 +1898,11 @@ class VisualCreatorPage(QWidget):
                     self._offer_local_setup()
                     return
                 self._local_options(template)
+            elif engine == "GOOGLE_VIDS":
+                if not google_vids_profile_ready():
+                    raise ValueError(
+                        "Chưa đăng nhập Google Vids. Hãy bấm ‘Đăng nhập Google Vids (chỉ lần đầu)’ trước."
+                    )
             else:
                 self._ai_batch_api_key = self.settings.gemini_api_key.strip() or os.environ.get("GEMINI_API_KEY", "").strip()
                 if not self._ai_batch_api_key:
@@ -1658,8 +1917,12 @@ class VisualCreatorPage(QWidget):
                 if answer != QMessageBox.StandardButton.Yes:
                     return
             self._batch_mode = False
+            self._batch_from_ai = False
             self._batch_queue.clear()
-            self._local_batch_template = template
+            self._ai_generated_backgrounds.clear()
+            template.ai_generated_backgrounds = []
+            self._refresh_ai_source_summary()
+            self._local_batch_template = VisualProject.from_dict(template.to_dict())
             self._local_batch_queue = images
             self._local_batch_total = len(images)
             self._local_batch_completed = []
@@ -1668,8 +1931,12 @@ class VisualCreatorPage(QWidget):
             self._local_batch_clip = ""
             self._local_batch_mode = True
             self._ai_batch_engine = engine
+            self._active_ai_engine = engine
             self.ai_generate.setEnabled(False)
             self.ai_generate_batch.setEnabled(False)
+            if engine == "GOOGLE_VIDS":
+                self.vids_login.setEnabled(False)
+                self.vids_check.setEnabled(False)
             self.ai_cancel.setEnabled(True)
             self.settings.last_output_folder = template.output_folder
             self.settings.encoder = template.encoder
@@ -1687,15 +1954,27 @@ class VisualCreatorPage(QWidget):
             source = self._local_batch_queue.pop(0)
             self._local_batch_current = source
             current = self._local_batch_total - len(self._local_batch_queue)
-            engine_label = local_model_label(self._local_batch_template.local_wan_variant) if self._ai_batch_engine == "LOCAL" else "Veo"
-            clip_folder = Path(self._local_batch_template.output_folder) / (
-                "AI_Local_Clips" if self._ai_batch_engine == "LOCAL" else "AI_Veo_Clips"
-            )
+            engine_label = {
+                "LOCAL": local_model_label(self._local_batch_template.local_wan_variant),
+                "GOOGLE_VIDS": "Google Vids Web",
+                "VEO": "Veo",
+            }.get(self._ai_batch_engine, self._ai_batch_engine)
+            clip_folder_name = {
+                "LOCAL": "AI_Local_Clips",
+                "GOOGLE_VIDS": "Google_Vids_Clips",
+                "VEO": "AI_Veo_Clips",
+            }.get(self._ai_batch_engine, "AI_Clips")
+            clip_folder = Path(self._local_batch_template.output_folder) / clip_folder_name
             local_slug = self._local_model_slug(self._local_batch_template.local_wan_variant)
+            clip_slug = {
+                "LOCAL": local_slug,
+                "GOOGLE_VIDS": "google_vids",
+                "VEO": "veo",
+            }.get(self._ai_batch_engine, "ai")
             clip = unique_output(
                 str(clip_folder),
-                f"{local_slug if self._ai_batch_engine == 'LOCAL' else 'veo'}_{Path(source).stem}.mp4",
-                f"{local_slug if self._ai_batch_engine == 'LOCAL' else 'veo'}_{Path(source).stem}",
+                f"{clip_slug}_{Path(source).stem}.mp4",
+                f"{clip_slug}_{Path(source).stem}",
                 ".mp4",
             )
             try:
@@ -1708,6 +1987,15 @@ class VisualCreatorPage(QWidget):
                         image_path=source,
                         output_path=str(clip),
                         **self._local_options(self._local_batch_template),
+                    )
+                elif self._ai_batch_engine == "GOOGLE_VIDS":
+                    project = self._local_batch_template
+                    self.google_vids_worker.start(
+                        image_path=source,
+                        prompt=project.ai_prompt.strip(),
+                        output_path=str(clip),
+                        profile_dir=str(GOOGLE_VIDS_PROFILE_DIR),
+                        show_browser=project.vids_show_browser,
                     )
                 else:
                     project = self._local_batch_template
@@ -1725,14 +2013,17 @@ class VisualCreatorPage(QWidget):
             except Exception as exc:
                 self._local_batch_failures.append(f"{Path(source).name}: {exc}")
         if self._local_batch_mode:
-            self._finish_local_batch()
+            self._start_generated_ai_render_batch()
 
     def _start_next_batch(self) -> None:
         while self._batch_mode and self._batch_queue:
             source = self._batch_queue.pop(0)
             self._batch_current = source
-            project = VisualProject.from_dict(self._batch_template.to_dict() if self._batch_template else {})
-            project.background = source
+            template = self._batch_template or VisualProject()
+            project = template.copy_for_background(
+                source,
+                ai_video=self._batch_from_ai or source in self._ai_generated_backgrounds,
+            )
             project.output_name = f"{Path(source).stem}_visual.mp4"
             current = self._batch_total - len(self._batch_queue)
             try:
@@ -1753,6 +2044,10 @@ class VisualCreatorPage(QWidget):
         self._local_batch_mode = False
         if self.local_ai_worker.running:
             self.local_ai_worker.cancel()
+        if self.ai_worker.running:
+            self.ai_worker.cancel()
+        if self.google_vids_worker.busy:
+            self.google_vids_worker.cancel()
         if self.worker.running:
             self.worker.cancel()
         else:
@@ -1801,19 +2096,29 @@ class VisualCreatorPage(QWidget):
         show_error(self, "Render thất bại", message, log_path)
 
     def _canceled(self) -> None:
+        was_ai_batch = self._batch_from_ai
         self._batch_queue.clear()
         self._batch_mode = False
+        self._batch_from_ai = False
         self._local_batch_queue.clear()
         self._local_batch_mode = False
         self.ai_generate.setEnabled(True)
         self.ai_generate_batch.setEnabled(True)
+        self.vids_login.setEnabled(True)
+        self.vids_check.setEnabled(True)
         self.ai_cancel.setEnabled(False)
         self.status.stopped("Đã hủy render.")
+        if was_ai_batch and self._ai_generated_backgrounds:
+            self.ai_status.setText(
+                f"Đã hủy render; vẫn giữ {len(self._ai_generated_backgrounds)} clip AI để render lại."
+            )
 
     def _finish_local_batch(self, last_output: str = "") -> None:
         self._local_batch_mode = False
         self.ai_generate.setEnabled(True)
         self.ai_generate_batch.setEnabled(True)
+        self.vids_login.setEnabled(True)
+        self.vids_check.setEnabled(True)
         self.ai_cancel.setEnabled(False)
         success_count = len(self._local_batch_completed)
         failure_count = len(self._local_batch_failures)
@@ -1825,10 +2130,15 @@ class VisualCreatorPage(QWidget):
         self.ai_status.setText(
             f"Đã xong hàng đợi {self._ai_batch_engine}: {success_count}/{self._local_batch_total} video."
         )
+        clip_folder_name = {
+            "LOCAL": "AI_Local_Clips",
+            "GOOGLE_VIDS": "Google_Vids_Clips",
+            "VEO": "AI_Veo_Clips",
+        }.get(self._ai_batch_engine, "AI_Clips")
         message = (
             f"Đã hoàn tất: {success_count}/{self._local_batch_total} video thành công.\n"
             f"Clip AI trung gian được giữ trong thư mục "
-            f"{'AI_Local_Clips' if self._ai_batch_engine == 'LOCAL' else 'AI_Veo_Clips'}."
+            f"{clip_folder_name}."
         )
         if failure_count:
             preview = "\n".join(self._local_batch_failures[:8])
@@ -1838,20 +2148,46 @@ class VisualCreatorPage(QWidget):
         QMessageBox.information(self, "AI hàng loạt hoàn tất", message)
 
     def _finish_batch(self, last_output: str = "") -> None:
+        from_ai = self._batch_from_ai
         self._batch_mode = False
+        self._batch_from_ai = False
         success_count = len(self._batch_completed)
         failure_count = len(self._batch_failures)
         if last_output or self._batch_completed:
             self.status.success(last_output or self._batch_completed[-1])
         else:
             self.status.stopped("Không có video nào render thành công.")
-        message = f"Đã hoàn tất hàng đợi: {success_count}/{self._batch_total} video thành công."
+        if from_ai:
+            self.ai_generate.setEnabled(True)
+            self.ai_generate_batch.setEnabled(True)
+            self.vids_login.setEnabled(True)
+            self.vids_check.setEnabled(True)
+            self.ai_cancel.setEnabled(False)
+            self.ai_progress.setValue(100 if self._ai_generated_backgrounds else 0)
+            self.ai_status.setText(
+                f"Đã tạo {len(self._ai_generated_backgrounds)}/{self._local_batch_total} clip AI và "
+                f"render {success_count}/{self._batch_total} visual 60 giây."
+            )
+            message = (
+                f"AI: {len(self._ai_generated_backgrounds)}/{self._local_batch_total} clip đã tạo.\n"
+                f"Visual 60 giây: {success_count}/{self._batch_total} video đã render với đầy đủ bố cục preview."
+            )
+            if self._local_batch_failures:
+                ai_preview = "\n".join(self._local_batch_failures[:8])
+                message += f"\n\nCó {len(self._local_batch_failures)} ảnh tạo AI lỗi:\n{ai_preview}"
+        else:
+            message = f"Đã hoàn tất hàng đợi: {success_count}/{self._batch_total} video thành công."
         if failure_count:
             preview = "\n".join(self._batch_failures[:8])
             if failure_count > 8:
                 preview += f"\n... và {failure_count - 8} lỗi khác"
             message += f"\n\nCó {failure_count} file lỗi:\n{preview}"
-        QMessageBox.information(self, "Render hàng loạt hoàn tất", message)
+        self._refresh_ai_source_summary()
+        QMessageBox.information(
+            self,
+            "AI + render hàng loạt hoàn tất" if from_ai else "Render hàng loạt hoàn tất",
+            message,
+        )
 
 
 def _normalized_spin(minimum: float = 0.0) -> QDoubleSpinBox:

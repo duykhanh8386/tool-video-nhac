@@ -23,6 +23,7 @@ FFmpeg, FFprobe, kiểm tra GPU và helper cập nhật đều chạy ẩn trong
 - Có bốn chế độ AI local qua ComfyUI: **Wan Chất lượng 20 bước**, **Wan DMD 4 bước**, **LTX-Video 2B Distilled 8 bước** và **HunyuanVideo 1.5 480p 8 bước**. Tất cả render bằng máy hiện tại, không dùng token/API key/credit.
 - Ngay trong phần **Nguồn ảnh AI**, có thể chọn một ảnh, chọn nhiều ảnh riêng lẻ hoặc chọn cả thư mục (kể cả thư mục con). Một prompt dùng chung sẽ tạo clip AI cho từng ảnh theo hàng đợi, đưa từng clip vào cùng bố cục, rồi xuất đủ số video.
 - Có thể nhập prompt và dùng Veo 3.1 để tạo chuyển động tay/chân, người, khói, lửa hoặc ánh sáng từ ảnh nguồn. Cần Gemini API key và tài khoản có quyền dùng Veo.
+- Có chế độ **Google Vids Web — Beta** để dùng quota Google AI của tài khoản trên web thay cho GPU/API key: đăng nhập Google một lần trong profile Chrome riêng, chọn một hoặc nhiều ảnh và prompt trong app, tool lần lượt tạo/tải MP4 rồi đưa clip vào đúng bố cục để render visual 60 giây. Tool không lưu mật khẩu Google.
 - File sóng dạng PNG/GIF/MOV/MP4 chạy lặp độc lập, không co giãn theo âm lượng nhạc; có tùy chọn xóa nền trắng.
 - Có input **Overlay toàn cảnh** cho PNG/GIF/MOV/MP4. File động phát và tự lặp theo thời lượng gốc trong cả preview lẫn video xuất; hỗ trợ Normal, Lighten, Screen, Linear Dodge (Add) và độ mờ.
 - Preview MOV được giải mã thành RGBA để giữ kênh alpha. File sóng và overlay toàn cảnh đều có tùy chọn xóa nền trắng nếu video nguồn đã bị đóng nền trắng thay vì có alpha thật.
@@ -54,7 +55,17 @@ Gói ComfyUI Portable được giải nén bằng `7zr.exe` chính thức của 
 - Mỗi thành phần ảnh có chế độ hòa trộn `Normal`, `Lighten`, `Screen` hoặc `Linear Dodge (Add)` trong phần **Bố cục thông minh**.
 - Mỗi loại text có font, cỡ chữ, đậm và nghiêng riêng. Danh sách font lấy trực tiếp từ font đã cài trên Windows giống bộ chọn font trong Word.
 - Cỡ chữ dùng chung một thang thiết kế 1080p nên preview, video 1080p và video 4K giữ đúng tỷ lệ.
-- Có thể chọn **Thư mục background để render hàng loạt** rồi bấm một lần để xếp hàng toàn bộ ảnh/video trong thư mục; mỗi background tạo một video riêng với cùng thiết kế hiện tại.
+- Nút **Render toàn bộ background đã chọn** dùng lại trực tiếp danh sách ảnh ở **Nguồn ảnh AI**; sau khi tạo AI hàng loạt, nút tự dùng các clip AI đã lưu trong state/project nên không phải chọn thư mục lần hai.
+- Batch AI chạy hai pha: tạo và lưu toàn bộ clip trước, sau đó dùng một snapshot cố định của preview để render từng visual 60 giây với đầy đủ text, logo, ảnh, sóng, hiệu ứng và font.
+
+## Google Vids Web — Beta
+
+1. Cài Google Chrome hoặc Microsoft Edge trên máy, chọn engine **Google Vids Web — dùng quota Google AI Ultra (Beta)** rồi bấm **Đăng nhập Google Vids (chỉ lần đầu)**.
+2. Tự đăng nhập trong cửa sổ trình duyệt riêng, mở được Google Vids và đóng cửa sổ. Phiên đăng nhập chỉ nằm trong profile `VisualLoopStudio/GoogleVidsChromeProfile` của máy hiện tại; mỗi máy đăng nhập riêng.
+3. Chọn một ảnh hoặc danh sách/thư mục ảnh ở **Nguồn ảnh AI**, nhập prompt chung. Ảnh đơn dùng nút tạo clip; nhiều ảnh dùng nút tạo Google Vids + render toàn bộ.
+4. MP4 trung gian được tải vào `Google_Vids_Clips`. Với hàng loạt, tool chờ tạo đủ các clip có thể tạo rồi tự lặp từng clip trong visual 60 giây cùng toàn bộ text/logo/sóng/overlay/bố cục đã lưu.
+
+Google chưa cung cấp API công khai để tạo clip Google Vids, nên chế độ này điều khiển giao diện web và được đánh dấu Beta. Giao diện Google, CAPTCHA, chính sách tài khoản hoặc quota có thể làm tác vụ dừng; khi đó bật **Hiện Chrome khi chạy Vids** để xem bước cần xử lý. Bản EXE đóng gói bộ điều khiển Playwright nhưng dùng Chrome/Edge đã cài trên máy, không nhúng hoặc lưu mật khẩu trình duyệt.
 
 Mỗi lần có commit mới được push lên nhánh `main`, GitHub Actions sẽ:
 

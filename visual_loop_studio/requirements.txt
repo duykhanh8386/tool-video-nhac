@@ -2,3 +2,4 @@
 PySide6-Essentials>=6.7,<7
 numpy>=1.26
 opencv-python-headless>=4.10
+playwright>=1.52,<2

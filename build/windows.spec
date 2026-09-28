@@ -1,4 +1,5 @@
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_all
 
 
 root = Path.cwd()
@@ -13,12 +14,18 @@ for executable in ("ffmpeg.exe", "ffprobe.exe"):
         raise SystemExit(f"Missing bundled binary: {path}")
     binaries.append((str(path), "vendor/bin"))
 
+playwright_datas, playwright_binaries, playwright_hiddenimports = collect_all("playwright")
+binaries += playwright_binaries
+
 a = Analysis(
     [str(app_dir / "main.py")],
     pathex=[str(app_dir)],
     binaries=binaries,
-    datas=[],
-    hiddenimports=["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "cv2", "numpy"],
+    datas=playwright_datas,
+    hiddenimports=[
+        "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "cv2", "numpy",
+        *playwright_hiddenimports,
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

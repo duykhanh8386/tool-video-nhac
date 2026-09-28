@@ -50,8 +50,9 @@ class ComfyUiWorkflowTests(unittest.TestCase):
         self.assertIn("Khói bay nhẹ", workflow["4"]["inputs"]["text"])
 
     def test_dmd_workflow_uses_base_model_lora_and_four_step_operating_point(self):
+        requested_motion = "The woman slowly raises her right hand once"
         workflow = build_wan22_workflow(
-            "uploaded.png", "Nhân vật cử động nhẹ", steps=20, cfg=5.0,
+            "uploaded.png", requested_motion, steps=20, cfg=5.0,
             wan_variant=WAN_VARIANT_DMD,
         )
         self.assertEqual(workflow["1"]["inputs"]["unet_name"], WAN_MODEL)
@@ -63,6 +64,11 @@ class ComfyUiWorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["9"]["inputs"]["steps"], 4)
         self.assertEqual(workflow["9"]["inputs"]["cfg"], 1.0)
         self.assertEqual(workflow["9"]["inputs"]["sampler_name"], "uni_pc")
+        positive_prompt = workflow["4"]["inputs"]["text"]
+        self.assertTrue(positive_prompt.startswith(f"Requested motion (highest priority): {requested_motion}"))
+        self.assertNotIn("final frame must match the first frame", positive_prompt.lower())
+        self.assertIn("one coherent continuous action", positive_prompt)
+        self.assertIn("temporal stutter", workflow["5"]["inputs"]["text"])
 
     def test_ltx_distilled_workflow_uses_native_eight_step_graph(self):
         workflow = build_ltx_workflow(

@@ -3,10 +3,10 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar,
+    QAbstractSpinBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar,
     QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -17,6 +17,16 @@ MEDIA_FILTER = "All Supported Media (*.*)"
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff);;All files (*.*)"
 AUDIO_FILTER = "Audio (*.mp3 *.wav *.flac *.m4a *.aac *.ogg *.opus *.wma *.aiff);;All files (*.*)"
 VIDEO_FILTER = "Video (*.mp4 *.mov *.mkv *.avi *.webm *.m4v *.mpeg *.mpg *.ts);;All files (*.*)"
+
+
+class WheelValueGuard(QObject):
+    """Prevent page scrolling from accidentally changing closed selectors or numeric fields."""
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Wheel and isinstance(watched, (QComboBox, QAbstractSpinBox)):
+            event.ignore()
+            return True
+        return super().eventFilter(watched, event)
 
 
 class FileField(QWidget):

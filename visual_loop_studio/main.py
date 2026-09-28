@@ -28,6 +28,7 @@ from models.loop_project import LoopProject
 from models.visual_project import VisualProject
 from ui.audio_mixer import AudioMixerPage
 from ui.batch_render import BatchRenderPage
+from ui.common import WheelValueGuard
 from ui.home import HomePage
 from ui.loop_music import LoopMusicPage
 from ui.settings import SettingsDialog
@@ -47,6 +48,8 @@ class MainWindow(QMainWindow):
         self.resize(1440, 900)
         self.setMinimumSize(1080, 700)
         self._build_ui()
+        self._wheel_value_guard = WheelValueGuard(self)
+        QApplication.instance().installEventFilter(self._wheel_value_guard)
         self._build_menu()
         QTimer.singleShot(2500, lambda: self.updater.check(silent=True))
 
@@ -187,6 +190,7 @@ class MainWindow(QMainWindow):
             or self.visual.local_ai_worker.running
             or self.visual.local_ai_worker.checking
             or self.visual.local_setup_worker.running
+            or self.visual.google_vids_worker.busy
         ):
             answer = QMessageBox.question(self, "Render đang chạy", "Cancel render và thoát ứng dụng?")
             if answer != QMessageBox.StandardButton.Yes:
@@ -198,6 +202,7 @@ class MainWindow(QMainWindow):
             self.visual.ai_worker.cancel()
             self.visual.local_ai_worker.cancel()
             self.visual.local_setup_worker.cancel()
+            self.visual.google_vids_worker.cancel()
         self.visual.local_runtime.stop()
         self._save_settings()
         event.accept()

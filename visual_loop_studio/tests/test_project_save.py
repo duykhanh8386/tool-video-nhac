@@ -27,6 +27,8 @@ class ProjectModelTests(unittest.TestCase):
         original.ai_source_folder = "C:/ai-images"
         original.ai_source_images = ["C:/one.png", "C:/two.jpg"]
         original.ai_source_recursive = True
+        original.ai_generated_backgrounds = ["C:/outputs/one_ai.mp4", "C:/outputs/two_ai.mp4"]
+        original.vids_show_browser = False
         original.local_wan_variant = "dmd4"
         original.local_resolution = "1280x704"
         original.local_frames = 81
@@ -55,6 +57,31 @@ class ProjectModelTests(unittest.TestCase):
         self.assertEqual(restored.effect_overlay_blend, "lighten")
         self.assertEqual(restored.effect_overlay_opacity, 100)
         self.assertEqual(restored.elements["logo"].blend_mode, "screen")
+
+    def test_background_copy_preserves_full_composition_and_sets_ai_playback(self):
+        original = VisualProject(
+            title="Saved title",
+            logo="C:/assets/logo.png",
+            artwork="C:/assets/artwork.png",
+            waveform_media="C:/assets/wave.mov",
+            effect_overlay="C:/assets/effect.mov",
+            animation="Fog drift",
+            fps=60,
+        )
+        original.elements["logo"].x = .81
+        copied = original.copy_for_background("C:/clips/generated.mp4", ai_video=True)
+        self.assertEqual(copied.background, "C:/clips/generated.mp4")
+        self.assertEqual(copied.title, original.title)
+        self.assertEqual(copied.logo, original.logo)
+        self.assertEqual(copied.artwork, original.artwork)
+        self.assertEqual(copied.waveform_media, original.waveform_media)
+        self.assertEqual(copied.effect_overlay, original.effect_overlay)
+        self.assertEqual(copied.elements["logo"].x, .81)
+        self.assertIsNot(copied.elements["logo"], original.elements["logo"])
+        self.assertEqual(copied.animation, "STATIC")
+        self.assertEqual(copied.fps, 24)
+        self.assertEqual(original.animation, "Fog drift")
+        self.assertEqual(original.fps, 60)
 
     def test_loop_round_trip_ignores_future_fields(self):
         payload = LoopProject(main_volume=.8).to_dict()

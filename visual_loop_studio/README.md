@@ -55,13 +55,14 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 - Mỗi element ảnh hỗ trợ `Normal`, `Lighten`, `Screen` và `Linear Dodge (Add)`; click element trên preview để chọn chế độ trong **Bố cục thông minh**.
 - Camera nền mặc định đứng yên. Có thể dùng ảnh nguồn + prompt để tạo video image-to-video bằng Veo 3.1; ảnh nguồn được dùng làm cả khung đầu và cuối nhằm ưu tiên vòng lặp liền mạch.
 - Tích hợp Wan 2.2, Wan DMD, LTX-Video 2B Distilled và HunyuanVideo 1.5 qua ComfyUI localhost. Workflow mặc định chỉ dùng core node local, từ chối node API/Cloud, nên không tiêu hao token/credit.
+- Tích hợp **Google Vids Web — Beta** qua profile Chrome/Edge riêng: người dùng tự đăng nhập một lần trên từng máy, app lần lượt tải ảnh/prompt lên giao diện Vids, tải MP4 về và dùng clip trong pipeline bố cục/render 60 giây. Không lưu mật khẩu Google và không dùng GPU local cho bước tạo clip web.
 - Nguồn ảnh AI có ba chế độ: một ảnh, chọn nhiều ảnh riêng lẻ hoặc toàn bộ thư mục. Một prompt dùng chung → mỗi ảnh tạo một clip AI local/Veo → tự ghép cùng text/logo/effect/bố cục → mỗi ảnh xuất một video. GPU local xử lý tuần tự.
 - File sóng PNG/GIF/MOV/MP4 chạy lặp theo thời gian riêng, không phản ứng theo âm lượng nhạc; có tùy chọn xóa nền trắng.
 - Input **Overlay toàn cảnh** nhận PNG/GIF/MOV/MP4, crop phủ kín khung, phát/lặp đúng thời lượng file và có blend mode cùng độ mờ riêng. Preview giải mã frame video thật thay vì giữ frame đầu.
 - Các hiệu ứng toàn khung tích hợp hiển thị chuyển động/cường độ ngay trong preview; có thể chồng thêm overlay MOV bên ngoài để dùng hiệu ứng dựng sẵn như trong CapCut.
 - Preview nhẹ 16:9 cho image/video background, artwork, logo, text, waveform, color preset và nhiều full-frame effect.
 - Render visual đúng 60 giây ở 1080p/4K, 24–60 fps.
-- Chọn một thư mục background để xếp hàng và render hàng chục visual trong một lần bấm; tên output được tạo theo tên từng background.
+- Nút render toàn bộ dùng lại ảnh đã chọn ở **Nguồn ảnh AI** hoặc các clip AI vừa tạo, không yêu cầu chọn lại một thư mục background riêng. Danh sách clip AI được lưu trong project để có thể render lại với bố cục hiện tại.
 - Effect stack có add/remove/reorder/enable/intensity; mặc định rỗng.
 - Color filter và `.cube` LUT; mặc định `NONE`.
 - Dò media bằng FFprobe theo stream thực, không chỉ dựa vào đuôi file.
@@ -80,9 +81,18 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 2. Chọn ổ lưu. Tool tự tính dung lượng còn thiếu, nhận diện NVIDIA CUDA, Intel Arc XPU, AMD hoặc CPU rồi tải đúng ComfyUI Portable và đúng bộ model; tải dở có thể tiếp tục.
 3. Sau khi cài, ComfyUI tự chạy ẩn cùng Visual Loop Studio và tự tắt khi thoát. Có thể bấm **Kiểm tra ComfyUI + model** để xác nhận.
 4. Wan Chất lượng dùng 20 bước/CFG 5. Wan DMD dùng 4 bước/CFG 1. LTX và Hunyuan Step Distilled dùng 8 bước/CFG 1. Hunyuan được khóa 832×480 và chỉ cho NVIDIA CUDA, khuyến nghị từ 16 GB VRAM.
-5. Để bulk, chọn **Toàn bộ ảnh trong một thư mục** ở **Nguồn ảnh AI**, chọn thư mục, nhập prompt chung và bấm **Tạo AI local + render toàn bộ ảnh**.
+5. Để bulk, chọn nhiều ảnh hoặc cả thư mục ở **Nguồn ảnh AI**, nhập prompt chung và bấm **Tạo AI local + render toàn bộ ảnh**. Tool tạo đủ clip AI trước, sau đó tự render từng clip thành visual 60 giây bằng cùng snapshot bố cục.
 
 Wan 2.2 Chất lượng và LoRA DMD 4 bước đều dùng Apache 2.0. LTX dùng Open Weights License 0.X (thương mại miễn phí dưới ngưỡng doanh thu trong giấy phép; nội dung công khai phải đánh dấu AI). Hunyuan dùng Tencent Hunyuan Community License với giới hạn lãnh thổ/phân phối và yêu cầu đánh dấu AI. Tất cả chạy trên máy nên không có phí token/credit; chi phí thực tế là điện, thời gian GPU và dung lượng đĩa. Không bật Comfy Cloud/Partner/API node nếu muốn bảo đảm chạy local hoàn toàn.
+
+## Google Vids Web — Beta
+
+1. Máy cần có Google Chrome hoặc Microsoft Edge. Chọn engine Google Vids Web và bấm nút đăng nhập lần đầu.
+2. Người dùng tự đăng nhập trong cửa sổ browser riêng và đóng browser khi đã vào được Vids. Profile được lưu cục bộ trong thư mục dữ liệu Visual Loop Studio; không dùng chung tự động giữa các máy.
+3. Ảnh đơn tạo một MP4 và tự chọn làm background. Danh sách/thư mục ảnh chạy tuần tự với prompt chung, lưu trong `Google_Vids_Clips`, sau đó tự render đủ visual 60 giây với snapshot bố cục hiện tại.
+4. Có thể hủy hàng đợi; các clip đã tải xong vẫn được giữ để dùng lại. Ảnh lỗi không làm mất các clip đã hoàn tất.
+
+Google Vids hiện không có API công khai dành cho việc tạo clip. Adapter này dùng tự động hóa giao diện web bằng Playwright, vì vậy phụ thuộc giao diện/quota/chính sách tài khoản của Google và có thể cần cập nhật selector khi Google đổi UI. CAPTCHA hoặc xác minh bảo mật phải do người dùng xử lý trong browser. Bản EXE chỉ đóng gói Playwright, còn Chrome/Edge dùng bản đã cài trên máy.
 
 ## Kiểm thử
 

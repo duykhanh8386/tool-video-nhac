@@ -36,6 +36,26 @@ DEFAULT_NEGATIVE_PROMPT = (
     "morphing, identity change, deformed face, deformed hands, extra fingers, extra limbs, "
     "bad anatomy, duplicated body parts, blurry details, low quality, text, subtitles, watermark"
 )
+DMD_NEGATIVE_PROMPT = (
+    f"{DEFAULT_NEGATIVE_PROMPT}, jitter, temporal stutter, sudden acceleration, "
+    "back-and-forth oscillation, repeated micro-motion, unstable motion"
+)
+
+
+def _wan_positive_prompt(user_prompt: str, dmd: bool) -> str:
+    """Keep the 4-step adapter focused on the user's action before stability hints."""
+    if not dmd:
+        return motion_prompt(user_prompt)
+    prompt = user_prompt.strip()
+    if not prompt:
+        return motion_prompt(user_prompt)
+    return (
+        f"Requested motion (highest priority): {prompt}\n\n"
+        "Locked camera and stable composition. Preserve the source image identity, face, anatomy, "
+        "clothing, background, objects, colors and lighting. Perform only the requested motion as "
+        "one coherent continuous action with controlled amplitude, even timing and smooth temporal "
+        "consistency. Do not invent extra actions or oscillate back and forth unless explicitly requested."
+    )
 
 
 class LocalGenerationCancelled(RuntimeError):
@@ -81,12 +101,15 @@ def build_wan22_workflow(
         },
         "4": {
             "class_type": "CLIPTextEncode",
-            "inputs": {"text": motion_prompt(prompt), "clip": ["2", 0]},
+            "inputs": {"text": _wan_positive_prompt(prompt, dmd), "clip": ["2", 0]},
             "_meta": {"title": "Positive Prompt"},
         },
         "5": {
             "class_type": "CLIPTextEncode",
-            "inputs": {"text": negative_prompt.strip() or DEFAULT_NEGATIVE_PROMPT, "clip": ["2", 0]},
+            "inputs": {
+                "text": negative_prompt.strip() or (DMD_NEGATIVE_PROMPT if dmd else DEFAULT_NEGATIVE_PROMPT),
+                "clip": ["2", 0],
+            },
             "_meta": {"title": "Negative Prompt"},
         },
         "6": {
