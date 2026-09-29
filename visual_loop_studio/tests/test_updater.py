@@ -44,6 +44,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("Start-UpdatedApplication -Path $Old", script)
         self.assertIn("-PassThru", script)
         self.assertIn("$started.HasExited", script)
+        self.assertIn('$env:PYINSTALLER_RESET_ENVIRONMENT = "1"', script)
         self.assertIn("--updated-to=$TargetVersion", script)
         self.assertIn("--update-fallback", script)
 

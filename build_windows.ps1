@@ -11,7 +11,10 @@ if (-not (Test-Path '.build-venv\Scripts\python.exe')) {
 }
 & '.build-venv\Scripts\python.exe' -m pip install --upgrade pip
 & '.build-venv\Scripts\python.exe' -m pip install -r 'visual_loop_studio\requirements.txt'
-& '.build-venv\Scripts\python.exe' -m pip install pyinstaller==6.16.0
+# Keep local artifacts compatible with the updater bridge used by CI. Once a
+# release containing PYINSTALLER_RESET_ENVIRONMENT is widely installed, this
+# can be moved back to PyInstaller 6.16 or newer.
+& '.build-venv\Scripts\python.exe' -m pip install pyinstaller==6.8.0
 
 & 'tools\bundle_ffmpeg.ps1' -Destination 'visual_loop_studio\vendor\bin'
 

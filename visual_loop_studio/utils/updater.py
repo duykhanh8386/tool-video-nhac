@@ -163,6 +163,10 @@ function Start-UpdatedApplication([string]$Path, [bool]$Fallback) {
         $arguments += "--update-fallback"
     }
     $workingDirectory = Split-Path -Parent $Path
+    # A one-file PyInstaller child otherwise reuses the old process's _MEI
+    # directory. The old parent removes that directory while exiting, which
+    # can make the relaunched EXE fail to load python312.dll.
+    $env:PYINSTALLER_RESET_ENVIRONMENT = "1"
     $started = Start-Process -FilePath $Path -WorkingDirectory $workingDirectory -ArgumentList $arguments -PassThru -ErrorAction Stop
     Write-UpdateLog "Relaunch requested: $Path (PID $($started.Id), fallback=$Fallback)."
     Start-Sleep -Seconds 4
