@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -35,40 +38,26 @@ def open_google_vids_login(
     progress: Callable[[int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> str:
-    """Open a dedicated visible Chrome profile; the user performs Google login themselves."""
+    """Open a normal browser with a dedicated profile for an interactive Google login."""
     progress = progress or (lambda _value, _message: None)
     cancelled = cancelled or (lambda: False)
     profile = Path(profile_dir)
     profile.mkdir(parents=True, exist_ok=True)
-    sync_playwright = _sync_playwright()
-    progress(5, "Đang mở Chrome riêng cho Google Vids…")
-    with sync_playwright() as playwright:
-        context = _launch_context(playwright, profile, headless=False)
-        try:
-            page = context.pages[0] if context.pages else context.new_page()
-            page.goto(GOOGLE_VIDS_URL, wait_until="domcontentloaded", timeout=120_000)
-            progress(
-                50,
-                "Hãy đăng nhập Google/Google AI Ultra trong cửa sổ Chrome, mở được Google Vids rồi đóng cửa sổ Chrome.",
-            )
-            deadline = time.monotonic() + 30 * 60
-            while time.monotonic() < deadline:
-                if cancelled():
-                    raise GoogleVidsCancelled("Đã hủy đăng nhập Google Vids.")
-                try:
-                    pages = context.pages
-                    if not pages:
-                        break
-                    pages[0].wait_for_timeout(500)
-                except Exception:
-                    break
-            else:
-                raise GoogleVidsAutomationError("Đăng nhập Google Vids quá 30 phút nên đã hết thời gian chờ.")
-        finally:
-            try:
-                context.close()
-            except Exception:
-                pass
+    progress(5, "Đang mở Chrome/Edge bình thường cho Google Vids…")
+    browser_process = _launch_login_browser(profile)
+    progress(
+        50,
+        "Hãy đăng nhập Google, mở được Google Vids rồi đóng toàn bộ cửa sổ trình duyệt này.",
+    )
+    deadline = time.monotonic() + 30 * 60
+    while browser_process.poll() is None:
+        if cancelled():
+            _stop_login_browser(browser_process)
+            raise GoogleVidsCancelled("Đã hủy đăng nhập Google Vids.")
+        if time.monotonic() >= deadline:
+            _stop_login_browser(browser_process)
+            raise GoogleVidsAutomationError("Đăng nhập Google Vids quá 30 phút nên đã hết thời gian chờ.")
+        time.sleep(0.5)
     if not google_vids_profile_ready(profile):
         raise GoogleVidsAutomationError(
             "Chrome chưa lưu được phiên đăng nhập. Hãy bấm Đăng nhập Google Vids và đăng nhập lại."
@@ -156,6 +145,81 @@ def _sync_playwright():
     return sync_playwright
 
 
+def _browser_candidates() -> list[tuple[str, Path]]:
+    candidates: list[tuple[str, Path]] = []
+
+    def add(name: str, path: str | Path | None) -> None:
+        if not path:
+            return
+        candidate = Path(path)
+        if not candidate.is_file():
+            return
+        key = str(candidate.resolve()).casefold()
+        if any(str(existing.resolve()).casefold() == key for _label, existing in candidates):
+            return
+        candidates.append((name, candidate))
+
+    program_files = os.environ.get("PROGRAMFILES")
+    program_files_x86 = os.environ.get("PROGRAMFILES(X86)")
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if program_files:
+        add("Google Chrome", Path(program_files) / "Google/Chrome/Application/chrome.exe")
+    if program_files_x86:
+        add("Google Chrome", Path(program_files_x86) / "Google/Chrome/Application/chrome.exe")
+    if local_app_data:
+        add("Google Chrome", Path(local_app_data) / "Google/Chrome/Application/chrome.exe")
+    if program_files_x86:
+        add("Microsoft Edge", Path(program_files_x86) / "Microsoft/Edge/Application/msedge.exe")
+    if program_files:
+        add("Microsoft Edge", Path(program_files) / "Microsoft/Edge/Application/msedge.exe")
+    if local_app_data:
+        add("Microsoft Edge", Path(local_app_data) / "Microsoft/Edge/Application/msedge.exe")
+    for name, command in (
+        ("Google Chrome", "chrome"),
+        ("Google Chrome", "google-chrome"),
+        ("Microsoft Edge", "msedge"),
+    ):
+        add(name, shutil.which(command))
+    return candidates
+
+
+def _launch_login_browser(profile: Path) -> subprocess.Popen:
+    errors: list[str] = []
+    for name, executable in _browser_candidates():
+        command = [
+            str(executable),
+            f"--user-data-dir={profile.resolve()}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--start-maximized",
+            GOOGLE_VIDS_URL,
+        ]
+        try:
+            return subprocess.Popen(command)
+        except OSError as exc:
+            errors.append(f"{name}: {exc}")
+    detail = " | ".join(errors)
+    if detail:
+        detail = " " + detail
+    raise GoogleVidsAutomationError(
+        "Không mở được Google Chrome hoặc Microsoft Edge bình thường. "
+        f"Hãy cài/cập nhật một trong hai trình duyệt.{detail}"
+    )
+
+
+def _stop_login_browser(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=5)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
 def _launch_context(playwright, profile: Path, headless: bool):
     profile.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []
@@ -168,6 +232,7 @@ def _launch_context(playwright, profile: Path, headless: bool):
                 accept_downloads=True,
                 no_viewport=True,
                 locale="vi-VN",
+                chromium_sandbox=True,
                 args=["--start-maximized"],
             )
         except Exception as exc:
