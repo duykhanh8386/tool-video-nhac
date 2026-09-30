@@ -15,8 +15,8 @@ if __name__ == "__main__" and "--version" in sys.argv:
     raise SystemExit(0)
 
 try:
-    from PySide6.QtCore import QTimer
-    from PySide6.QtGui import QAction, QCloseEvent
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtGui import QAction, QCloseEvent, QIcon, QPixmap
     from PySide6.QtWidgets import (
         QApplication, QFileDialog, QHBoxLayout, QLabel, QListWidget, QMainWindow,
         QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
@@ -35,7 +35,10 @@ from ui.settings import SettingsDialog
 from ui.updater import UpdateController
 from ui.visual_creator import VisualCreatorPage
 from utils.config import load_settings, save_settings, write_json
-from utils.paths import ensure_app_dirs
+from utils.paths import RESOURCE_DIR, ensure_app_dirs
+
+
+APP_LOGO = RESOURCE_DIR / "assets" / "app_logo.png"
 
 
 class MainWindow(QMainWindow):
@@ -61,6 +64,17 @@ class MainWindow(QMainWindow):
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(220)
         side = QVBoxLayout(sidebar)
+        logo_pixmap = QPixmap(str(APP_LOGO))
+        if not logo_pixmap.isNull():
+            logo = QLabel()
+            logo.setObjectName("brandLogo")
+            logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            logo.setPixmap(logo_pixmap.scaled(
+                96, 96,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+            side.addWidget(logo)
         brand = QLabel("VISUAL\nLOOP STUDIO")
         brand.setObjectName("brand")
         side.addWidget(brand)
@@ -213,6 +227,7 @@ QWidget { background: #0b1020; color: #e5e7eb; font-family: 'Segoe UI'; font-siz
 QMainWindow, QMenuBar, QMenu { background: #0b1020; }
 QMenuBar::item:selected, QMenu::item:selected { background: #24304a; }
 #sidebar { background: #0f172a; border-right: 1px solid #26334d; }
+#brandLogo { padding: 18px 12px 0; }
 #brand { color: #67e8f9; font-size: 20px; font-weight: 800; padding: 20px 12px; letter-spacing: 2px; }
 QListWidget { background: transparent; border: 0; outline: 0; }
 QListWidget::item { padding: 12px; margin: 2px; border-radius: 6px; }
@@ -246,6 +261,9 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Visual Loop Studio")
     app.setOrganizationName("Visual Loop Studio")
+    app_icon = QIcon(str(APP_LOGO))
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE)
     window = MainWindow()

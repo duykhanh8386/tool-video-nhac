@@ -6,6 +6,12 @@ root = Path.cwd()
 app_dir = root / "visual_loop_studio"
 vendor_dir = app_dir / "vendor" / "bin"
 version_file = root / "build" / "version_info.txt"
+icon_png = app_dir / "assets" / "app_logo.png"
+icon_ico = app_dir / "assets" / "app_icon.ico"
+
+for asset in (icon_png, icon_ico):
+    if not asset.is_file():
+        raise SystemExit(f"Missing app branding asset: {asset}")
 
 binaries = []
 for executable in ("ffmpeg.exe", "ffprobe.exe"):
@@ -21,7 +27,7 @@ a = Analysis(
     [str(app_dir / "main.py")],
     pathex=[str(app_dir)],
     binaries=binaries,
-    datas=playwright_datas,
+    datas=[*playwright_datas, (str(icon_png), "assets")],
     hiddenimports=[
         "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "cv2", "numpy",
         *playwright_hiddenimports,
@@ -53,4 +59,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version=str(version_file) if version_file.is_file() else None,
+    icon=str(icon_ico),
 )
