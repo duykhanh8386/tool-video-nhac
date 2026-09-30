@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import subprocess
+import unicodedata
 from dataclasses import asdict
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QCloseEvent, QFont, QImage, QLinearGradient, QMouseEvent, QPainter,
+    QBrush, QColor, QCloseEvent, QFont, QFontMetricsF, QImage, QLinearGradient, QMouseEvent, QPainter,
     QPainterPath, QPen, QPixmap, QRadialGradient, QWheelEvent,
 )
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -19,6 +20,26 @@ from utils.media import is_still_image
 from visual.layout import to_top_left_rect, update_from_top_left
 from utils.process import hidden_process_kwargs
 from visual.particles import particle_positions
+
+
+def _preview_graphemes(value: str) -> list[str]:
+    result: list[str] = []
+    current = ""
+    for char in value:
+        attached = bool(current) and (
+            bool(unicodedata.combining(char))
+            or char in {"\ufe0e", "\ufe0f", "\u200d"}
+            or current.endswith("\u200d")
+        )
+        if attached:
+            current += char
+        else:
+            if current:
+                result.append(current)
+            current = char
+    if current:
+        result.append(current)
+    return result
 
 
 class CompositionPreview(QWidget):
@@ -320,9 +341,7 @@ class CompositionPreview(QWidget):
         color = QColor(style.color_start or self.text_color)
         if not color.isValid():
             color = QColor("white")
-        painter.setPen(QPen(QColor(0, 0, 0, 150), 3))
         flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap
-        painter.drawText(rect.adjusted(2, 2, -2, -2), flags, text)
         if style.color_mode == "linear_gradient":
             points = {
                 "left_to_right": (rect.left(), rect.center().y(), rect.right(), rect.center().y()),
@@ -337,10 +356,88 @@ class CompositionPreview(QWidget):
             gradient.setColorAt(0, color)
             end_color = QColor(style.color_end)
             gradient.setColorAt(1, end_color if end_color.isValid() else color)
-            painter.setPen(QPen(QBrush(gradient), 1))
+            fill_pen = QPen(QBrush(gradient), 1)
         else:
-            painter.setPen(color)
+            fill_pen = QPen(color)
+        if str(style.animation or "none").lower() != "none":
+            self._paint_animated_text(painter, rect, text, font, fill_pen, style.animation)
+            return
+        painter.setPen(QPen(QColor(0, 0, 0, 150), 3))
+        painter.drawText(rect.adjusted(2, 2, -2, -2), flags, text)
+        painter.setPen(fill_pen)
         painter.drawText(rect, flags, text)
+
+    def _paint_animated_text(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        text: str,
+        font: QFont,
+        fill_pen: QPen,
+        animation: str,
+    ) -> None:
+        metrics = QFontMetricsF(font)
+        padding = 2.0
+        available = max(8.0, rect.width() - padding * 2)
+        rows: list[list[tuple[str, float, int]]] = []
+        sequence = 0
+        for source_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            row: list[tuple[str, float, int]] = []
+            row_width = 0.0
+            for glyph in _preview_graphemes(source_line):
+                advance = max(1.0, metrics.horizontalAdvance(glyph))
+                if row and row_width + advance > available:
+                    rows.append(row)
+                    row = []
+                    row_width = 0.0
+                row.append((glyph, advance, sequence))
+                row_width += advance
+                sequence += 1
+            rows.append(row)
+            sequence += 1
+
+        amplitude = max(2.0, font.pixelSize() * .13)
+        line_height = max(metrics.height(), font.pixelSize() * 1.22)
+        base_opacity = painter.opacity()
+        name = str(animation or "none").lower()
+        for row_index, row in enumerate(rows):
+            cursor = rect.left() + padding
+            baseline = rect.top() + padding + metrics.ascent() + row_index * line_height
+            for glyph, advance, index in row:
+                if glyph.isspace():
+                    cursor += advance
+                    continue
+                phase = index * .62
+                dx = 0.0
+                dy = 0.0
+                alpha = 1.0
+                if name == "wave":
+                    dy = amplitude * math.sin(math.tau * self._time * .90 + phase)
+                elif name == "bounce":
+                    dy = -amplitude * abs(math.sin(math.pi * self._time * 1.70 + phase))
+                elif name == "float":
+                    dx = max(1.0, amplitude / 3) * math.sin(math.tau * self._time * .45 + index * 1.17)
+                    dy = amplitude * math.sin(math.tau * self._time * .55 + phase)
+                elif name == "jitter":
+                    shake = max(1.0, font.pixelSize() * .025)
+                    dx = shake * math.sin(math.tau * self._time * 7.0 + index * 2.10)
+                    dy = shake * math.sin(math.tau * self._time * 9.0 + index * 1.30)
+                elif name == "typewriter":
+                    reveal_time = self._time % 8
+                    if reveal_time < min(4.5, index * .075) or reveal_time >= 7.5:
+                        cursor += advance
+                        continue
+                elif name == "neon":
+                    alpha = .70 + .30 * math.sin(math.tau * self._time * 2.2 + index * 1.70)
+                point = QPointF(cursor + dx, baseline + dy)
+                painter.save()
+                painter.setOpacity(base_opacity * alpha)
+                painter.setPen(QPen(QColor(0, 0, 0, 150), 3))
+                painter.drawText(point + QPointF(2, 2), glyph)
+                painter.setPen(fill_pen)
+                painter.drawText(point, glyph)
+                painter.restore()
+                cursor += advance
 
     def _paint_wave(self, painter: QPainter, rect: QRectF) -> None:
         if self.waveform == "NONE":

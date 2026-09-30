@@ -39,6 +39,17 @@ from utils.paths import unique_output
 from visual.layout import ELEMENT_LABELS, PRESETS, analyze_background, compose_layout, reset_layout
 
 
+TEXT_ANIMATION_OPTIONS = [
+    ("Tĩnh", "none"),
+    ("Sóng từng chữ", "wave"),
+    ("Nhảy luân phiên", "bounce"),
+    ("Trôi mềm", "float"),
+    ("Rung glitch", "jitter"),
+    ("Gõ từng chữ", "typewriter"),
+    ("Neon nhấp nháy", "neon"),
+]
+
+
 class VisualCreatorPage(QWidget):
     settings_changed = Signal()
 
@@ -253,8 +264,35 @@ class VisualCreatorPage(QWidget):
         self.playlist = QPlainTextEdit()
         self.playlist.setPlaceholderText("01. Tên bài hát\n02. Tên bài hát")
         self.playlist.setMaximumHeight(95)
-        for label, widget in (("Tiêu đề", self.title), ("Tiêu đề phụ", self.subtitle), ("Nghệ sĩ", self.artist), ("Nội dung thêm", self.custom_text), ("Danh sách bài hát", self.playlist)):
-            text_form.addRow(label, widget)
+        self.text_animation_combos: dict[str, QComboBox] = {}
+        text_inputs = (
+            ("title", "Tiêu đề", self.title),
+            ("subtitle", "Tiêu đề phụ", self.subtitle),
+            ("artist", "Nghệ sĩ", self.artist),
+            ("custom_text", "Nội dung thêm", self.custom_text),
+            ("playlist", "Danh sách bài hát", self.playlist),
+        )
+        for kind, label, widget in text_inputs:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(widget, 3)
+            animation_combo = QComboBox()
+            animation_combo.setMinimumWidth(145)
+            animation_combo.setToolTip("Hiệu ứng chuyển động riêng cho từng ký tự của ô này")
+            _add_options(animation_combo, TEXT_ANIMATION_OPTIONS)
+            animation_combo.currentIndexChanged.connect(
+                lambda _index, kind=kind, combo=animation_combo: self._set_text_animation(
+                    kind, str(_combo_value(combo))
+                )
+            )
+            self.text_animation_combos[kind] = animation_combo
+            row_layout.addWidget(animation_combo, 2)
+            text_form.addRow(label, row)
+        animation_note = QLabel("Mỗi ô có animation độc lập; preview và video xuất ra dùng cùng hiệu ứng.")
+        animation_note.setWordWrap(True)
+        animation_note.setObjectName("muted")
+        text_form.addRow(animation_note)
         self.font_family = QFontComboBox()
         self.font_family.setToolTip("Danh sách font đã cài trên Windows, hiển thị tương tự Microsoft Word.")
         self.selected_font_size = QSpinBox()
@@ -770,6 +808,18 @@ class VisualCreatorPage(QWidget):
         self.text_gradient_end_pick.setEnabled(gradient_enabled)
         self.text_gradient_direction.setEnabled(gradient_enabled)
 
+    def _set_text_animation(self, kind: str, animation: str) -> None:
+        style = self.text_styles.get(kind)
+        if not style:
+            return
+        style.animation = animation
+        style.normalized()
+        self.preview.text_styles = self.text_styles
+        if style.animation == "typewriter":
+            self.preview.restart()
+        else:
+            self.preview.update()
+
     def _set_preview_option(self, name: str, value: bool) -> None:
         setattr(self.preview, name, value)
         self.preview.update()
@@ -967,6 +1017,7 @@ class VisualCreatorPage(QWidget):
             color_start=self.text_color.text(),
             color_end=self.text_gradient_end.text(),
             gradient_direction=str(_combo_value(self.text_gradient_direction)),
+            animation=self.text_styles[kind].animation,
         ).normalized()
         self.preview.text_styles = self.text_styles
         self._sync_text_color_controls(True)
@@ -1049,6 +1100,10 @@ class VisualCreatorPage(QWidget):
         self.batch_recursive.setChecked(project.batch_recursive)
         self.text_styles = {name: TextStyle(**asdict(style)) for name, style in project.text_styles.items()}
         self.preview.text_styles = self.text_styles
+        for kind, combo in self.text_animation_combos.items():
+            combo.blockSignals(True)
+            _set_combo_value(combo, self.text_styles.get(kind, TextStyle()).animation)
+            combo.blockSignals(False)
         self.text_color.blockSignals(True)
         self.text_color.setText(project.text_color)
         self.text_color.blockSignals(False)

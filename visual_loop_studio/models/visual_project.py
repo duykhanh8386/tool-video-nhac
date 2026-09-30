@@ -4,6 +4,11 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
+TEXT_ANIMATION_IDS = {
+    "none", "wave", "bounce", "float", "jitter", "typewriter", "neon",
+}
+
+
 @dataclass
 class EffectItem:
     name: str
@@ -22,6 +27,8 @@ class TextStyle:
     color_start: str = "#FFFFFF"
     color_end: str = "#67E8F9"
     gradient_direction: str = "left_to_right"
+    animation: str = "none"
+
     def normalized(self) -> "TextStyle":
         self.font_family = str(self.font_family or "Segoe UI")
         self.font_size = min(300, max(8, int(self.font_size)))
@@ -38,6 +45,9 @@ class TextStyle:
             "diagonal_down", "diagonal_up",
         }:
             self.gradient_direction = "left_to_right"
+        self.animation = str(self.animation or "none").strip().lower()
+        if self.animation not in TEXT_ANIMATION_IDS:
+            self.animation = "none"
         return self
 
 

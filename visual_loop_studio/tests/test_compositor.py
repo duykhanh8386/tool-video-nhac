@@ -24,6 +24,23 @@ class CompositorTests(unittest.TestCase):
         self.assertIn("fontsize=96", graph_1080.filter_complex)
         self.assertIn("fontsize=192", graph_4k.filter_complex)
 
+    def test_each_text_field_can_use_a_different_per_character_animation(self):
+        project = VisualProject(background="background.png", title="AB", subtitle="CD")
+        project.text_styles["title"].animation = "wave"
+        project.text_styles["subtitle"].animation = "bounce"
+        graph = build_visual_graph(project, 1920, 1080)
+        self.assertIn("sin(2*PI*t*0.90", graph.filter_complex)
+        self.assertIn("abs(sin(PI*t*1.70", graph.filter_complex)
+        self.assertGreaterEqual(graph.filter_complex.count("drawtext="), 4)
+
+    def test_typewriter_and_neon_animations_emit_timed_character_filters(self):
+        project = VisualProject(background="background.png", title="Hi", artist="DJ")
+        project.text_styles["title"].animation = "typewriter"
+        project.text_styles["artist"].animation = "neon"
+        graph = build_visual_graph(project, 1920, 1080)
+        self.assertIn("enable='between(mod(t,8),0.075,7.5)'", graph.filter_complex)
+        self.assertIn("alpha='0.70+0.30*sin(2*PI*t*2.2", graph.filter_complex)
+
     def test_image_element_supports_lighten_blend(self):
         project = VisualProject(background="background.png", logo="logo.png")
         project.elements["logo"].blend_mode = "lighten"

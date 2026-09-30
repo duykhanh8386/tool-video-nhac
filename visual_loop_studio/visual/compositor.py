@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -117,6 +118,148 @@ def _font_size(project: VisualProject, kind: str, output_height: int, item_heigh
     return max(12, min(round(item_height * .88), scaled_size))
 
 
+def _graphemes(value: str) -> list[str]:
+    """Keep accents and emoji joiners attached to their visible character."""
+    result: list[str] = []
+    current = ""
+    for char in value:
+        attached = bool(current) and (
+            bool(unicodedata.combining(char))
+            or char in {"\ufe0e", "\ufe0f", "\u200d"}
+            or current.endswith("\u200d")
+        )
+        if attached:
+            current += char
+        else:
+            if current:
+                result.append(current)
+            current = char
+    if current:
+        result.append(current)
+    return result
+
+
+def _glyph_advance(glyph: str, font_size: int) -> float:
+    base = next((char for char in glyph if not unicodedata.combining(char)), glyph[:1] or " ")
+    if base == "\t":
+        factor = 1.36
+    elif base.isspace():
+        factor = .34
+    elif unicodedata.east_asian_width(base) in {"W", "F"}:
+        factor = 1.02
+    elif base in "ilI.,'`:;!|":
+        factor = .31
+    elif base in "mwMW@#%&":
+        factor = .88
+    elif base.isupper():
+        factor = .66
+    else:
+        factor = .56
+    return max(1.0, font_size * factor + font_size * .025)
+
+
+def _animated_glyph_layout(
+    text: str,
+    font_size: int,
+    item_width: int,
+    align: str,
+) -> list[tuple[str, float, float, int]]:
+    padding = 4.0
+    available = max(8.0, item_width - padding * 2)
+    rows: list[list[tuple[str, float, int]]] = []
+    sequence = 0
+    for source_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        row: list[tuple[str, float, int]] = []
+        row_width = 0.0
+        for glyph in _graphemes(source_line):
+            advance = _glyph_advance(glyph, font_size)
+            if row and row_width + advance > available:
+                rows.append(row)
+                row = []
+                row_width = 0.0
+            row.append((glyph, advance, sequence))
+            row_width += advance
+            sequence += 1
+        rows.append(row)
+        sequence += 1
+
+    line_height = max(font_size + 2, round(font_size * 1.22))
+    result: list[tuple[str, float, float, int]] = []
+    for row_index, row in enumerate(rows):
+        row_width = sum(item[1] for item in row)
+        cursor = max(padding, (item_width - row_width) / 2) if align == "center" else padding
+        for glyph, advance, glyph_index in row:
+            if not glyph.isspace():
+                result.append((glyph, cursor, padding + row_index * line_height, glyph_index))
+            cursor += advance
+    return result
+
+
+def _glyph_motion(animation: str, x: float, y: float, index: int, font_size: int) -> tuple[str, str, str]:
+    amplitude = max(2, round(font_size * .13))
+    phase = index * .62
+    extra = ""
+    if animation == "wave":
+        y_expression = f"{y + amplitude:.2f}+{amplitude}*sin(2*PI*t*0.90+{phase:.3f})"
+        return f"{x:.2f}", y_expression, extra
+    if animation == "bounce":
+        y_expression = f"{y + amplitude:.2f}-{amplitude}*abs(sin(PI*t*1.70+{phase:.3f}))"
+        return f"{x:.2f}", y_expression, extra
+    if animation == "float":
+        x_expression = f"{x:.2f}+{max(1, amplitude // 3)}*sin(2*PI*t*0.45+{index * 1.17:.3f})"
+        y_expression = f"{y + amplitude:.2f}+{amplitude}*sin(2*PI*t*0.55+{phase:.3f})"
+        return x_expression, y_expression, extra
+    if animation == "jitter":
+        shake = max(1, round(font_size * .025))
+        x_expression = f"{x:.2f}+{shake}*sin(2*PI*t*7.0+{index * 2.10:.3f})"
+        y_expression = f"{y + shake:.2f}+{shake}*sin(2*PI*t*9.0+{index * 1.30:.3f})"
+        return x_expression, y_expression, extra
+    if animation == "typewriter":
+        delay = min(4.5, index * .075)
+        extra = f":enable='between(mod(t,8),{delay:.3f},7.5)'"
+    elif animation == "neon":
+        extra = f":alpha='0.70+0.30*sin(2*PI*t*2.2+{index * 1.70:.3f})'"
+    return f"{x:.2f}", f"{y:.2f}", extra
+
+
+def _drawtext_chain(
+    project: VisualProject,
+    style: TextStyle,
+    text: str,
+    item_width: int,
+    font_size: int,
+    align: str,
+    fontcolor: str,
+    border: int,
+    shadow: str,
+) -> str:
+    animation = str(style.animation or "none").lower()
+    font = _font_option(project.font_file, style.font_family, style.bold, style.italic)
+    if animation == "none":
+        text_x = "(w-text_w)/2" if align == "center" else "4"
+        return (
+            f"drawtext={font}textfile='{_text_file(text)}':reload=0:x={text_x}:y=4:"
+            f"fontsize={font_size}:line_spacing={max(2, font_size // 4)}:fontcolor={fontcolor}:"
+            f"borderw={border}:bordercolor=black@.7{shadow}"
+        )
+
+    glyphs = _animated_glyph_layout(text, font_size, item_width, align)
+    if not glyphs:
+        return (
+            f"drawtext={font}textfile='{_text_file(text)}':reload=0:x=4:y=4:"
+            f"fontsize={font_size}:fontcolor={fontcolor}:borderw={border}:bordercolor=black@.7{shadow}"
+        )
+    filters: list[str] = []
+    for glyph, x, y, index in glyphs:
+        x_expression, y_expression, extra = _glyph_motion(animation, x, y, index, font_size)
+        filters.append(
+            f"drawtext={font}textfile='{_text_file(glyph)}':reload=0:"
+            f"x='{x_expression}':y='{y_expression}':fontsize={font_size}:fontcolor={fontcolor}:"
+            f"borderw={border}:bordercolor=black@.7{shadow}{extra}"
+        )
+    return ",".join(filters)
+
+
 def build_visual_graph(project: VisualProject, width: int, height: int) -> VisualCommand:
     inputs: list[str] = []
     still = is_still_image(project.background)
@@ -192,12 +335,6 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
             border = max(0, project.stroke_width)
             shadow = ":shadowx=2:shadowy=2:shadowcolor=black@.65" if project.text_shadow else ""
             align = "center" if layout.anchor in {"center", "top_center", "bottom_center"} else "left"
-            text_x = "(w-text_w)/2" if align == "center" else "4"
-            text_options = (
-                f"{_font_option(project.font_file, style.font_family, style.bold, style.italic)}"
-                f"textfile='{_text_file(text)}':reload=0:x={text_x}:y=4:"
-                f"fontsize={font_size}:line_spacing={max(2, font_size // 4)}"
-            )
             if style.color_mode == "linear_gradient":
                 x0, y0, x1, y1 = _gradient_points(style.gradient_direction, item_width, item_height)
                 shadow_label = f"textshadow{serial}"
@@ -205,13 +342,21 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
                 mask_label = f"textmask{serial}"
                 gradient_label = f"textgradient{serial}"
                 gradient_fill_label = f"textgradientfill{serial}"
-                filters.append(
-                    f"color=c=black@0.0:s={item_width}x{item_height}:r={project.fps}:d=60,format=rgba,"
-                    f"drawtext={text_options}:fontcolor=black@0.0:borderw={border}:bordercolor=black@.7{shadow}[{shadow_label}]"
+                shadow_chain = _drawtext_chain(
+                    project, style, text, item_width, font_size, align,
+                    "black@0.0", border, shadow,
+                )
+                mask_chain = _drawtext_chain(
+                    project, style, text, item_width, font_size, align,
+                    f"white@{opacity:.4f}", 0, "",
                 )
                 filters.append(
                     f"color=c=black@0.0:s={item_width}x{item_height}:r={project.fps}:d=60,format=rgba,"
-                    f"drawtext={text_options}:fontcolor=white@{opacity:.4f}:borderw=0[{mask_source_label}]"
+                    f"{shadow_chain}[{shadow_label}]"
+                )
+                filters.append(
+                    f"color=c=black@0.0:s={item_width}x{item_height}:r={project.fps}:d=60,format=rgba,"
+                    f"{mask_chain}[{mask_source_label}]"
                 )
                 filters.append(f"[{mask_source_label}]alphaextract[{mask_label}]")
                 filters.append(
@@ -224,10 +369,13 @@ def build_visual_graph(project: VisualProject, width: int, height: int) -> Visua
                 )
                 sources.append((layout.z_order, source_label, element_id, layout))
                 continue
+            text_chain = _drawtext_chain(
+                project, style, text, item_width, font_size, align,
+                f"{color}@{opacity:.4f}", border, shadow,
+            )
             filters.append(
                 f"color=c=black@0.0:s={item_width}x{item_height}:r={project.fps}:d=60,format=rgba,"
-                f"drawtext={text_options}:fontcolor={color}@{opacity:.4f}:borderw={border}:"
-                f"bordercolor=black@.7{shadow}{_rotate_filter(layout)}[{source_label}]"
+                f"{text_chain}{_rotate_filter(layout)}[{source_label}]"
             )
         else:
             continue

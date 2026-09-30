@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from models.visual_project import VisualProject
 from render.ffprobe import probe_media
 from render.nvenc import resolve_encoder
 from utils.media import existing_file
-from utils.paths import unique_output
+from utils.paths import CACHE_DIR, ensure_app_dirs, unique_output
 from visual.compositor import build_visual_graph
 
 
@@ -20,6 +21,16 @@ class RenderJob:
     output: Path
     duration: float
     label: str
+
+
+def _filter_script(value: str) -> str:
+    """Keep large per-character animation graphs off the Windows command line."""
+    ensure_app_dirs()
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    path = CACHE_DIR / f"filter_{digest}.txt"
+    if not path.exists():
+        path.write_text(value, encoding="utf-8")
+    return str(path)
 
 
 def _video_encoding(encoder: str) -> list[str]:
@@ -50,7 +61,10 @@ def build_visual_job(project: VisualProject, settings: AppSettings) -> RenderJob
     encoder = resolve_encoder(project.encoder, settings.ffmpeg_path)
     graph = build_visual_graph(project, width, height)
     output = unique_output(project.output_folder, project.output_name, "visual", ".mp4")
-    command = [settings.ffmpeg_path, "-hide_banner", "-y", *graph.inputs, "-filter_complex", graph.filter_complex, "-map", graph.video_map]
+    command = [
+        settings.ffmpeg_path, "-hide_banner", "-y", *graph.inputs,
+        "-filter_complex_script", _filter_script(graph.filter_complex), "-map", graph.video_map,
+    ]
     if graph.audio_map:
         command += ["-map", graph.audio_map, "-c:a", "aac", "-b:a", "320k"]
     command += [*_video_encoding(encoder), "-r", str(project.fps), "-t", "60.000", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]

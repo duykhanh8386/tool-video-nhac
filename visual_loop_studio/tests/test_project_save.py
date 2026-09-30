@@ -16,6 +16,8 @@ class ProjectModelTests(unittest.TestCase):
         original.elements["logo"].x = .82
         original.elements["logo"].blend_mode = "lighten"
         original.text_styles["title"] = TextStyle("Arial", 112, True, True)
+        original.text_styles["title"].animation = "wave"
+        original.text_styles["subtitle"].animation = "typewriter"
         original.effect_overlay = "C:/effects/light.mov"
         original.effect_overlay_blend = "screen"
         original.effect_overlay_opacity = 72
@@ -37,6 +39,12 @@ class ProjectModelTests(unittest.TestCase):
         original.local_seed = 42
         restored = VisualProject.from_dict(original.to_dict())
         self.assertEqual(restored, original)
+
+    def test_unknown_text_animation_falls_back_to_static(self):
+        restored = VisualProject.from_dict({
+            "text_styles": {"title": {"animation": "teleport"}},
+        })
+        self.assertEqual(restored.text_styles["title"].animation, "none")
 
     def test_legacy_turbo_project_migrates_to_commercial_dmd(self):
         restored = VisualProject.from_dict({"local_wan_variant": "turbo"})
