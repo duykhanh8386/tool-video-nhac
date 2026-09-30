@@ -6,6 +6,8 @@
 
 Mở trang [GitHub Releases](https://github.com/duykhanh8386/tool-video-nhac/releases/latest) và tải `VisualLoopStudio-Windows-x64.exe`. EXE đã chứa Python, Qt, FFmpeg và FFprobe nên máy khác không cần cài Python hay FFmpeg.
 
+Ứng dụng tự tạo hoặc cập nhật shortcut **Visual Loop Studio** trên Desktop khi chạy bản EXE đóng gói. Shortcut luôn trỏ tới file EXE đang chạy và dùng icon của ứng dụng.
+
 Ứng dụng tự kiểm tra bản mới khi khởi động. Bạn cũng có thể bấm **Check for Updates** ở thanh bên hoặc menu **Help**. File cập nhật được kiểm tra SHA-256 trước khi thay thế EXE và khởi động lại.
 
 ## Cài đặt

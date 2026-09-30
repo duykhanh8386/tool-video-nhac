@@ -36,6 +36,7 @@ from ui.updater import UpdateController
 from ui.visual_creator import VisualCreatorPage
 from utils.config import load_settings, save_settings, write_json
 from utils.paths import RESOURCE_DIR, ensure_app_dirs
+from utils.shortcuts import ensure_desktop_shortcut
 
 
 APP_LOGO = RESOURCE_DIR / "assets" / "app_logo.png"
@@ -261,6 +262,11 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Visual Loop Studio")
     app.setOrganizationName("Visual Loop Studio")
+    shortcut_error = ""
+    try:
+        ensure_desktop_shortcut()
+    except Exception as exc:
+        shortcut_error = str(exc)
     app_icon = QIcon(str(APP_LOGO))
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
@@ -268,6 +274,12 @@ def main() -> int:
     app.setStyleSheet(STYLE)
     window = MainWindow()
     window.show()
+    if shortcut_error:
+        QTimer.singleShot(500, lambda: QMessageBox.warning(
+            window,
+            "Không thể tạo shortcut",
+            f"Ứng dụng không thể tạo shortcut trên Desktop.\n\n{shortcut_error}",
+        ))
     updated_to = next((item.split("=", 1)[1] for item in sys.argv if item.startswith("--updated-to=")), "")
     if updated_to:
         fallback = "--update-fallback" in sys.argv
