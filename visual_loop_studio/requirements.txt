@@ -1,5 +1,7 @@
 # Widgets/Core/Gui only. This avoids the large Qt Multimedia/WebEngine addon bundle.
 PySide6-Essentials>=6.7,<7
-numpy>=1.26
-opencv-python-headless>=4.10
+# Keep these versions compatible with the PyInstaller 6.8 bridge build.
+# Newer NumPy 2.x layouts are not fully discovered by that PyInstaller release.
+numpy==1.26.4
+opencv-python-headless==4.11.0.86
 playwright>=1.52,<2
