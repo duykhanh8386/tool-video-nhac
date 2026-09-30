@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -7,6 +8,14 @@ from typing import Any
 TEXT_ANIMATION_IDS = {
     "none", "wave", "bounce", "float", "jitter", "typewriter", "neon",
 }
+
+
+def normalize_text_color(value: object, fallback: str = "#FFFFFF") -> str:
+    fallback_text = str(fallback or "#FFFFFF").strip()
+    fallback_match = re.fullmatch(r"#?([0-9A-Fa-f]{6})", fallback_text)
+    safe_fallback = f"#{fallback_match.group(1).upper()}" if fallback_match else "#FFFFFF"
+    match = re.fullmatch(r"#?([0-9A-Fa-f]{6})", str(value or "").strip())
+    return f"#{match.group(1).upper()}" if match else safe_fallback
 
 
 @dataclass
@@ -37,8 +46,8 @@ class TextStyle:
         self.color_mode = str(self.color_mode or "solid").lower()
         if self.color_mode not in {"solid", "linear_gradient"}:
             self.color_mode = "solid"
-        self.color_start = str(self.color_start or "#FFFFFF").strip()
-        self.color_end = str(self.color_end or self.color_start).strip()
+        self.color_start = normalize_text_color(self.color_start)
+        self.color_end = normalize_text_color(self.color_end, self.color_start)
         self.gradient_direction = str(self.gradient_direction or "left_to_right").lower()
         if self.gradient_direction not in {
             "left_to_right", "right_to_left", "top_to_bottom", "bottom_to_top",
@@ -191,7 +200,8 @@ class VisualProject:
             data["ai_source_recursive"] = bool(data.get("batch_recursive", False))
         data["effects"] = [EffectItem(**item) for item in data.get("effects", [])]
         text_defaults = default_text_styles()
-        legacy_text_color = str(data.get("text_color") or "#FFFFFF")
+        legacy_text_color = normalize_text_color(data.get("text_color"))
+        data["text_color"] = legacy_text_color
         loaded_styles: dict[str, TextStyle] = {}
         for name, item in (data.get("text_styles") or {}).items():
             if isinstance(item, TextStyle):

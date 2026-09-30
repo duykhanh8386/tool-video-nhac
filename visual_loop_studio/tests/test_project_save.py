@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from models.loop_project import LoopProject
-from models.visual_project import EffectItem, TextStyle, VisualProject
+from models.visual_project import EffectItem, TextStyle, VisualProject, normalize_text_color
 from utils.paths import unique_output
 
 
@@ -45,6 +45,20 @@ class ProjectModelTests(unittest.TestCase):
             "text_styles": {"title": {"animation": "teleport"}},
         })
         self.assertEqual(restored.text_styles["title"].animation, "none")
+
+    def test_text_colors_require_exactly_six_hex_digits(self):
+        self.assertEqual(normalize_text_color("678940"), "#678940")
+        self.assertEqual(normalize_text_color("#abcdef"), "#ABCDEF")
+        self.assertEqual(normalize_text_color("#67894"), "#FFFFFF")
+        restored = VisualProject.from_dict({
+            "text_color": "#12345",
+            "text_styles": {
+                "title": {"color_start": "#123456", "color_end": "broken"},
+            },
+        })
+        self.assertEqual(restored.text_color, "#FFFFFF")
+        self.assertEqual(restored.text_styles["title"].color_start, "#123456")
+        self.assertEqual(restored.text_styles["title"].color_end, "#123456")
 
     def test_legacy_turbo_project_migrates_to_commercial_dmd(self):
         restored = VisualProject.from_dict({"local_wan_variant": "turbo"})

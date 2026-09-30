@@ -41,6 +41,13 @@ class CompositorTests(unittest.TestCase):
         self.assertIn("enable='between(mod(t,8),0.075,7.5)'", graph.filter_complex)
         self.assertIn("alpha='0.70+0.30*sin(2*PI*t*2.2", graph.filter_complex)
 
+    def test_invalid_text_color_falls_back_instead_of_breaking_ffmpeg(self):
+        project = VisualProject(background="background.png", subtitle="Safe color")
+        project.text_styles["subtitle"].color_start = "#67894"
+        graph = build_visual_graph(project, 1920, 1080)
+        self.assertIn("fontcolor=0xFFFFFF@1.0000", graph.filter_complex)
+        self.assertNotIn("#67894", graph.filter_complex)
+
     def test_image_element_supports_lighten_blend(self):
         project = VisualProject(background="background.png", logo="logo.png")
         project.elements["logo"].blend_mode = "lighten"

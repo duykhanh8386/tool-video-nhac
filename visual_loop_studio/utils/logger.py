@@ -16,6 +16,7 @@ def explain_ffmpeg_error(text: str) -> str:
     matches = (
         (("no space left", "disk full"), "Ổ đĩa không còn đủ dung lượng."),
         (("permission denied",), "Không có quyền đọc/ghi đường dẫn đã chọn."),
+        (("invalid 0xrrggbb", "unable to parse \"fontcolor\""), "Màu chữ không hợp lệ. Hãy dùng mã HEX gồm đúng 6 ký tự, ví dụ #067894."),
         (("nvenc", "cannot load nvcuda"), "NVENC không khả dụng. Hãy chọn Auto hoặc libx264."),
         (("invalid data", "moov atom not found"), "Media không hợp lệ hoặc đã bị hỏng."),
         (("no such file",), "Không tìm thấy file đầu vào hoặc FFmpeg."),

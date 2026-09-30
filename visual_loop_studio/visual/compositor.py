@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-from models.visual_project import ElementLayout, TextStyle, VisualProject, default_element_layouts, default_text_styles
+from models.visual_project import (
+    ElementLayout, TextStyle, VisualProject, default_element_layouts, default_text_styles,
+    normalize_text_color,
+)
 from utils.media import is_still_image
 from utils.paths import CACHE_DIR, ensure_app_dirs, ffmpeg_filter_path
 from visual.animation import background_filter
@@ -92,10 +94,8 @@ def _text_style(project: VisualProject, kind: str) -> TextStyle:
 
 
 def _ffmpeg_color(value: str, fallback: str = "FFFFFF") -> str:
-    color = str(value or "").strip()
-    if re.fullmatch(r"#?[0-9A-Fa-f]{6}", color):
-        return "0x" + color.lstrip("#").upper()
-    return color or f"0x{fallback}"
+    color = normalize_text_color(value, f"#{str(fallback).lstrip('#')}")
+    return "0x" + color.lstrip("#")
 
 
 def _gradient_points(direction: str, width: int, height: int) -> tuple[int, int, int, int]:

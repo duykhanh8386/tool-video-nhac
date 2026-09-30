@@ -23,7 +23,10 @@ from ai.local_runtime import (
     is_runtime_installed, required_free_bytes, server_ready, validate_local_model_backend,
 )
 from models.settings_model import AppSettings
-from models.visual_project import ElementLayout, TextStyle, VisualProject, default_element_layouts, default_text_styles
+from models.visual_project import (
+    ElementLayout, TextStyle, VisualProject, default_element_layouts, default_text_styles,
+    normalize_text_color,
+)
 from render.ffmpeg import build_visual_job
 from render.render_worker import RenderWorker
 from ui.ai_video import AiVideoWorker
@@ -306,10 +309,14 @@ class VisualCreatorPage(QWidget):
         font_style_row.addStretch()
         self.font_file = FileField("File font riêng ghi đè danh sách font", "Fonts (*.ttf *.otf *.ttc);;Tất cả file (*.*)", optional=True)
         self.text_color = QLineEdit("#FFFFFF")
+        self.text_color.setMaxLength(7)
+        self.text_color.setToolTip("Mã màu HEX gồm 6 ký tự, ví dụ #067894")
         self.text_color_mode = QComboBox()
         _add_options(self.text_color_mode, [("M\u00e0u \u0111\u01a1n", "solid"), ("Gradient tuy\u1ebfn t\u00ednh", "linear_gradient")])
         self.text_color_pick = QPushButton("Ch\u1ecdn")
         self.text_gradient_end = QLineEdit("#67E8F9")
+        self.text_gradient_end.setMaxLength(7)
+        self.text_gradient_end.setToolTip("Mã màu HEX gồm 6 ký tự, ví dụ #67E8F9")
         self.text_gradient_end_pick = QPushButton("Ch\u1ecdn")
         self.text_gradient_direction = QComboBox()
         _add_options(self.text_gradient_direction, [
@@ -774,6 +781,8 @@ class VisualCreatorPage(QWidget):
         self.text_color_mode.currentIndexChanged.connect(self._write_text_style_controls)
         self.text_color.textChanged.connect(self._write_text_style_controls)
         self.text_gradient_end.textChanged.connect(self._write_text_style_controls)
+        self.text_color.editingFinished.connect(lambda: self._finish_text_color_edit(self.text_color, False))
+        self.text_gradient_end.editingFinished.connect(lambda: self._finish_text_color_edit(self.text_gradient_end, True))
         self.text_gradient_direction.currentIndexChanged.connect(self._write_text_style_controls)
         self.text_color_pick.clicked.connect(lambda: self._choose_text_color(self.text_color))
         self.text_gradient_end_pick.clicked.connect(lambda: self._choose_text_color(self.text_gradient_end))
@@ -798,6 +807,15 @@ class VisualCreatorPage(QWidget):
         color = QColorDialog.getColor(current if current.isValid() else QColor("white"), self, "Ch\u1ecdn m\u00e0u ch\u1eef")
         if color.isValid():
             field.setText(color.name())
+
+    def _finish_text_color_edit(self, field: QLineEdit, gradient_end: bool) -> None:
+        element_id = self.element_choice.currentData()
+        kind = str(element_id or "").split("_copy_", 1)[0]
+        style = self.text_styles.get(kind)
+        fallback = (style.color_end if gradient_end else style.color_start) if style else "#FFFFFF"
+        normalized = normalize_text_color(field.text(), fallback)
+        if field.text() != normalized:
+            field.setText(normalized)
 
     def _sync_text_color_controls(self, enabled: bool) -> None:
         self.text_color_mode.setEnabled(enabled)
@@ -1008,14 +1026,15 @@ class VisualCreatorPage(QWidget):
         kind = str(element_id or "").split("_copy_", 1)[0]
         if kind not in self.text_styles:
             return
+        previous = self.text_styles[kind]
         self.text_styles[kind] = TextStyle(
             font_family=self.font_family.currentFont().family(),
             font_size=self.selected_font_size.value(),
             bold=self.font_bold.isChecked(),
             italic=self.font_italic.isChecked(),
             color_mode=str(_combo_value(self.text_color_mode)),
-            color_start=self.text_color.text(),
-            color_end=self.text_gradient_end.text(),
+            color_start=normalize_text_color(self.text_color.text(), previous.color_start),
+            color_end=normalize_text_color(self.text_gradient_end.text(), previous.color_end),
             gradient_direction=str(_combo_value(self.text_gradient_direction)),
             animation=self.text_styles[kind].animation,
         ).normalized()
