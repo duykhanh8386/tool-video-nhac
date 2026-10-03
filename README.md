@@ -19,6 +19,8 @@ FFmpeg, FFprobe, kiểm tra GPU và helper cập nhật đều chạy ẩn trong
 
 ## Chuyển động AI và file sóng
 
+- Có màn hình **AI Video hàng loạt** dùng chung cho Seedance qua BytePlus LAS API chính thức, Veo qua Gemini API và các model ComfyUI local. Màn hình nhận prompt đơn/TXT/CSV, ảnh lẻ/thư mục, lọc và khôi phục job, retry có giới hạn, xuất báo cáo CSV/JSON và kiểm tra MP4 bằng FFprobe.
+- API key Gemini/BytePlus được lưu trong Windows Credential Manager. Hệ thống không nhập cookie/session, không xoay proxy hay đổi tài khoản để né quota. Có thể đặt ngân sách ngày/batch cùng đơn giá cloud ước tính để chặn batch trước khi gửi.
 - Ảnh nền mặc định dùng camera cố định, không còn tự zoom/pan gây rung toàn khung.
 - Có bốn chế độ AI local qua ComfyUI: **Wan Chất lượng 20 bước**, **Wan DMD 4 bước**, **LTX-Video 2B Distilled 8 bước** và **HunyuanVideo 1.5 480p 8 bước**. Tất cả render bằng máy hiện tại, không dùng token/API key/credit.
 - Ngay trong phần **Nguồn ảnh AI**, có thể chọn một ảnh, chọn nhiều ảnh riêng lẻ hoặc chọn cả thư mục (kể cả thư mục con). Một prompt dùng chung sẽ tạo clip AI cho từng ảnh theo hàng đợi, đưa từng clip vào cùng bố cục, rồi xuất đủ số video.

@@ -39,6 +39,7 @@ from ui.google_vids_video import GoogleVidsWorker
 from ui.preview import CompositionPreview
 from utils.media import background_files, is_still_image
 from utils.paths import unique_output
+from utils.secret_store import resolve_secret
 from visual.layout import ELEMENT_LABELS, PRESETS, analyze_background, compose_layout, reset_layout
 
 
@@ -1519,7 +1520,7 @@ class VisualCreatorPage(QWidget):
                     show_browser=self.vids_show_browser.isChecked(),
                 )
                 return
-            api_key = self.settings.gemini_api_key.strip() or os.environ.get("GEMINI_API_KEY", "").strip()
+            api_key = resolve_secret("gemini_api_key", "GEMINI_API_KEY", self.settings.gemini_api_key)
             if not api_key:
                 raise ValueError("Chưa có Gemini API key. Mở menu Cài đặt và nhập key cho Veo.")
             folder = self.output_folder.text() or str(Path(source).resolve().parent)
@@ -1978,7 +1979,9 @@ class VisualCreatorPage(QWidget):
                         "Chưa đăng nhập Google Vids. Hãy bấm ‘Đăng nhập Google Vids (chỉ lần đầu)’ trước."
                     )
             else:
-                self._ai_batch_api_key = self.settings.gemini_api_key.strip() or os.environ.get("GEMINI_API_KEY", "").strip()
+                self._ai_batch_api_key = resolve_secret(
+                    "gemini_api_key", "GEMINI_API_KEY", self.settings.gemini_api_key
+                )
                 if not self._ai_batch_api_key:
                     raise ValueError("Chưa có Gemini API key. Mở menu Cài đặt và nhập key cho Veo.")
                 answer = QMessageBox.warning(

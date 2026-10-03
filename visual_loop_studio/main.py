@@ -27,6 +27,7 @@ except ModuleNotFoundError as exc:
 from models.loop_project import LoopProject
 from models.visual_project import VisualProject
 from ui.audio_mixer import AudioMixerPage
+from ui.ai_batch import AiBatchPage
 from ui.batch_render import BatchRenderPage
 from ui.common import WheelValueGuard
 from ui.home import HomePage
@@ -80,7 +81,10 @@ class MainWindow(QMainWindow):
         brand.setObjectName("brand")
         side.addWidget(brand)
         self.navigation = QListWidget()
-        self.navigation.addItems(["Trang chủ", "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh", "Render hàng loạt"])
+        self.navigation.addItems([
+            "Trang chủ", "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh",
+            "Render hàng loạt", "AI Video hàng loạt",
+        ])
         self.navigation.setCurrentRow(0)
         self.navigation.currentRowChanged.connect(self._navigate)
         side.addWidget(self.navigation, 1)
@@ -97,12 +101,14 @@ class MainWindow(QMainWindow):
         self.loop = LoopMusicPage(self.settings)
         self.audio = AudioMixerPage(self.settings)
         self.batch = BatchRenderPage(self.settings)
-        for page in (self.home, self.visual, self.loop, self.audio, self.batch):
+        self.ai_batch = AiBatchPage(self.settings)
+        for page in (self.home, self.visual, self.loop, self.audio, self.batch, self.ai_batch):
             self.pages.addWidget(page)
         self.home.navigate.connect(self.navigation.setCurrentRow)
         self.visual.settings_changed.connect(self._save_settings)
         self.loop.settings_changed.connect(self._save_settings)
         self.audio.settings_changed.connect(self._save_settings)
+        self.ai_batch.settings_changed.connect(self._save_settings)
         root.addWidget(self.pages, 1)
         self.setCentralWidget(shell)
 
@@ -121,7 +127,10 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         tools = self.menuBar().addMenu("Công cụ")
-        for index, text in enumerate(("Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh", "Render hàng loạt"), start=1):
+        for index, text in enumerate((
+            "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh",
+            "Render hàng loạt", "AI Video hàng loạt",
+        ), start=1):
             action = QAction(text, self)
             action.triggered.connect(lambda _checked=False, index=index: self.navigation.setCurrentRow(index))
             tools.addAction(action)
@@ -189,9 +198,13 @@ class MainWindow(QMainWindow):
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self)
         if dialog.exec():
-            dialog.apply(self.settings)
-            self.visual.preview.ffmpeg_path = self.settings.ffmpeg_path
-            self._save_settings()
+            try:
+                dialog.apply(self.settings)
+                self.visual.preview.ffmpeg_path = self.settings.ffmpeg_path
+                self.ai_batch.reload_settings(self.settings)
+                self._save_settings()
+            except Exception as exc:
+                QMessageBox.critical(self, "Không thể lưu cài đặt", str(exc))
 
     def _save_settings(self) -> None:
         save_settings(self.settings)
@@ -206,6 +219,7 @@ class MainWindow(QMainWindow):
             or self.visual.local_ai_worker.checking
             or self.visual.local_setup_worker.running
             or self.visual.google_vids_worker.busy
+            or self.ai_batch.busy
         ):
             answer = QMessageBox.question(self, "Render đang chạy", "Cancel render và thoát ứng dụng?")
             if answer != QMessageBox.StandardButton.Yes:
@@ -218,7 +232,9 @@ class MainWindow(QMainWindow):
             self.visual.local_ai_worker.cancel()
             self.visual.local_setup_worker.cancel()
             self.visual.google_vids_worker.cancel()
+            self.ai_batch.cancel_all()
         self.visual.local_runtime.stop()
+        self.ai_batch.shutdown()
         self._save_settings()
         event.accept()
 

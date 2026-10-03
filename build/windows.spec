@@ -30,6 +30,7 @@ a = Analysis(
     datas=[*playwright_datas, (str(icon_png), "assets")],
     hiddenimports=[
         "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "cv2", "numpy",
+        "ai.providers.byteplus_seedance", "ai.providers.comfyui_provider", "ai.providers.veo_provider",
         *playwright_hiddenimports,
     ],
     hookspath=[],

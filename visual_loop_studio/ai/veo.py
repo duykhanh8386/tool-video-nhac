@@ -109,18 +109,26 @@ def generate_image_to_video(
     progress: Callable[[int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
     timeout_seconds: int = 12 * 60,
+    operation_name: str = "",
+    submitted: Callable[[str], None] | None = None,
 ) -> Path:
     key = api_key.strip()
     if not key:
         raise ValueError("Chưa có Gemini API key. Hãy nhập key trong Cài đặt.")
     cancelled = cancelled or (lambda: False)
     progress = progress or (lambda _value, _message: None)
-    payload = build_request_payload(image_path, prompt, aspect_ratio, duration, resolution)
-    progress(5, "Đang gửi ảnh và prompt đến Veo…")
-    operation = _json_request(f"{BASE_URL}/models/{model}:predictLongRunning", key, payload, timeout=120)
-    operation_name = str(operation.get("name") or "").lstrip("/")
-    if not operation_name:
-        raise RuntimeError(f"Veo không trả về mã tác vụ: {operation}")
+    operation_name = str(operation_name or "").lstrip("/")
+    if operation_name:
+        progress(8, "Đang tiếp tục theo dõi tác vụ Veo đã gửi trước đó…")
+    else:
+        payload = build_request_payload(image_path, prompt, aspect_ratio, duration, resolution)
+        progress(5, "Đang gửi ảnh và prompt đến Veo…")
+        operation = _json_request(f"{BASE_URL}/models/{model}:predictLongRunning", key, payload, timeout=120)
+        operation_name = str(operation.get("name") or "").lstrip("/")
+        if not operation_name:
+            raise RuntimeError(f"Veo không trả về mã tác vụ: {operation}")
+        if submitted:
+            submitted(operation_name)
 
     started = time.monotonic()
     polls = 0

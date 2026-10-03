@@ -73,6 +73,9 @@ Main music luôn là master clock. Video và background audio dùng FFmpeg strea
 - Mọi tiến trình FFmpeg/FFprobe/GPU/updater chạy ẩn, không làm cửa sổ CMD nhấp nháy; output được thu vào giao diện và log render.
 - Audio Mixer sáu track; thời lượng theo main audio.
 - Batch queue hỗ trợ 1–3 job đồng thời, mặc định 1 để ổn định NVENC/RAM.
+- Màn hình **AI Video hàng loạt** cung cấp một hàng đợi chung cho Seedance qua BytePlus LAS API chính thức, Veo qua Gemini API và ComfyUI local. Có thể nạp prompt TXT/CSV, chọn ảnh/thư mục, đặt số lượng, theo dõi provider job ID, khôi phục polling sau khi mở lại ứng dụng, lọc job và xuất báo cáo.
+- Gemini và BytePlus API key được lưu bằng Windows Credential Manager (hoặc đọc từ `GEMINI_API_KEY` / `BYTEPLUS_LAS_API_KEY`), không còn ghi secret mới vào `settings.json`. Retry chỉ áp dụng cho lỗi kỹ thuật; lỗi quota, xác thực và policy không bị gửi lặp.
+- Có giới hạn ngân sách ngày/batch dựa trên đơn giá cloud/giây do người dùng cấu hình. Đây là ước tính trước khi gửi; hóa đơn thực tế vẫn theo nhà cung cấp.
 - Lưu/mở project `.vls.json`; nhớ settings và output folder.
 - Log render trong `visual_loop_studio/logs/`.
 - Gemini/Veo API và ComfyUI đều là tích hợp tùy chọn; chức năng render lõi không cần AI. Nhập Gemini API key trong Cài đặt hoặc biến môi trường `GEMINI_API_KEY` để gọi Veo.
@@ -95,6 +98,16 @@ Wan 2.2 Chất lượng và LoRA DMD 4 bước đều dùng Apache 2.0. LTX dùn
 4. Có thể hủy hàng đợi; các clip đã tải xong vẫn được giữ để dùng lại. Ảnh lỗi không làm mất các clip đã hoàn tất.
 
 Google Vids hiện không có API công khai dành cho việc tạo clip. Adapter này dùng tự động hóa giao diện web bằng Playwright, vì vậy phụ thuộc giao diện/quota/chính sách tài khoản của Google và có thể cần cập nhật selector khi Google đổi UI. CAPTCHA hoặc xác minh bảo mật phải do người dùng xử lý trong browser. Bản EXE chỉ đóng gói Playwright, còn Chrome/Edge dùng bản đã cài trên máy.
+
+## AI Video hàng loạt — Seedance, Veo và ComfyUI
+
+1. Mở **Cài đặt**, nhập Gemini API key và/hoặc BytePlus LAS API key chính thức. Với cloud, điền đơn giá ước tính cùng giới hạn ngân sách ngày/batch nếu muốn app chặn chi phí trước khi gửi.
+2. Mở **AI Video hàng loạt**, chọn provider/model. Duration, tỉ lệ, resolution, audio và giới hạn ảnh được lấy từ capability của model.
+3. Nhập prompt trực tiếp hoặc nạp TXT/CSV; có thể chọn nhiều ảnh hoặc quét cả thư mục. App hiển thị trước tổng số job và chi phí ước tính.
+4. Xác nhận quyền sử dụng tài sản rồi tạo batch. Job được lưu tại `data/ai_jobs.json`; khi app mở lại, cloud job có provider ID sẽ tiếp tục polling thay vì gửi trùng.
+5. Có thể lọc theo trạng thái/provider/model/batch/thời gian, xem chi tiết, hủy, retry lỗi kỹ thuật, mở video/thư mục và xuất CSV/JSON. Audit đã che secret nằm tại `data/ai_audit.jsonl`.
+
+Seedance dùng endpoint tác vụ bất đồng bộ của BytePlus LAS, tải kết quả qua file `.part` rồi đổi tên khi hoàn tất. Phân hệ này không có kho tài khoản, cookie/session import, proxy rotation hoặc cơ chế né quota.
 
 ## Kiểm thử
 

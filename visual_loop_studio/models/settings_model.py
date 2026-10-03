@@ -17,7 +17,15 @@ class AppSettings:
     comfyui_workflow: str = ""
     local_ai_root: str = ""
     local_ai_auto_start: bool = True
+    # Legacy only. New values are stored in Windows Credential Manager and
+    # this field is removed when settings.json is written.
     gemini_api_key: str = ""
+    byteplus_las_base_url: str = "https://operator.las.ap-southeast-1.bytepluses.com/api/v1"
+    ai_batch_concurrency: int = 2
+    ai_retry_limit: int = 3
+    ai_daily_budget: float = 0.0
+    ai_batch_budget: float = 0.0
+    ai_estimated_cloud_cost_per_second: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
