@@ -2,7 +2,7 @@ name: Build and Release Windows EXE
 
 on:
   push:
-    branches: [main]
+    branches: [Dola-AI]
   workflow_dispatch:
 
 permissions:
@@ -53,7 +53,7 @@ jobs:
           $version = "1.0.${{ github.run_number }}.${{ github.run_attempt }}"
           python tools/stamp_version.py --version $version --commit "${{ github.sha }}"
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "TAG=v$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TAG=dola-ai-v$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build portable EXE
         shell: pwsh
@@ -89,6 +89,6 @@ jobs:
             "dist/VisualLoopStudio-Windows-x64.exe" `
             "dist/VisualLoopStudio-Windows-x64.exe.sha256" `
             --target "${{ github.sha }}" `
-            --title "Visual Loop Studio $env:VERSION" `
+            --title "Visual Loop Studio Dola-AI $env:VERSION" `
             --generate-notes `
             --latest

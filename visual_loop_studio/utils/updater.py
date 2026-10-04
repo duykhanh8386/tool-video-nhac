@@ -13,11 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from version import __repository__, __version__
+from version import __build_commit__, __repository__, __version__
 
 
-API_URL = f"https://api.github.com/repos/{__repository__}/releases/latest"
-RELEASES_URL = f"https://github.com/{__repository__}/releases/latest"
+UPDATE_BRANCH = "Dola-AI"
+RELEASE_TAG_PREFIX = "dola-ai-v"
+API_URL = f"https://api.github.com/repos/{__repository__}/releases?per_page=30"
+RELEASES_URL = f"https://github.com/{__repository__}/releases"
 USER_AGENT = f"VisualLoopStudio/{__version__}"
 HELPER_START_TIMEOUT_SECONDS = 8.0
 
@@ -38,6 +40,7 @@ class ReleaseInfo:
     page_url: str
     executable: ReleaseAsset
     checksum: ReleaseAsset | None = None
+    commit: str = ""
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
@@ -51,6 +54,21 @@ def is_newer_version(latest: str, current: str = __version__) -> bool:
     return left + (0,) * (length - len(left)) > right + (0,) * (length - len(right))
 
 
+def is_newer_release(
+    release: ReleaseInfo,
+    current_version: str = __version__,
+    current_commit: str = __build_commit__,
+) -> bool:
+    """Prefer the stamped Dola-AI commit over a version-number comparison."""
+    release_commit = release.commit.strip().lower()
+    installed_commit = current_commit.strip().lower()
+    if re.fullmatch(r"[0-9a-f]{40}", release_commit) and re.fullmatch(
+        r"[0-9a-f]{40}", installed_commit
+    ):
+        return release_commit != installed_commit
+    return is_newer_version(release.version, current_version)
+
+
 def parse_release(payload: dict) -> ReleaseInfo:
     assets = [ReleaseAsset(item.get("name", ""), item.get("browser_download_url", ""), int(item.get("size", 0))) for item in payload.get("assets", [])]
     executable = next((item for item in assets if item.name.lower() == "visualloopstudio-windows-x64.exe"), None)
@@ -60,17 +78,36 @@ def parse_release(payload: dict) -> ReleaseInfo:
         raise ValueError("Release mới không có file EXE Windows.")
     checksum = next((item for item in assets if item.name.lower() in {executable.name.lower() + ".sha256", "sha256sums.txt"}), None)
     tag = str(payload.get("tag_name", ""))
+    if tag.lower().startswith(RELEASE_TAG_PREFIX):
+        version = tag[len(RELEASE_TAG_PREFIX):]
+    else:
+        version = tag.lstrip("vV")
     return ReleaseInfo(
-        version=tag.lstrip("vV") or str(payload.get("name", "0")), tag=tag,
+        version=version or str(payload.get("name", "0")), tag=tag,
         name=str(payload.get("name") or tag), notes=str(payload.get("body") or ""),
         page_url=str(payload.get("html_url") or RELEASES_URL), executable=executable, checksum=checksum,
+        commit=str(payload.get("target_commitish") or ""),
     )
+
+
+def select_channel_release(payloads: list[dict]) -> ReleaseInfo:
+    """Return only the newest published release produced by the Dola-AI workflow."""
+    for payload in payloads:
+        tag = str(payload.get("tag_name") or "")
+        if payload.get("draft") or payload.get("prerelease"):
+            continue
+        if tag.lower().startswith(RELEASE_TAG_PREFIX):
+            return parse_release(payload)
+    raise ValueError(f"Chưa có bản EXE đã đóng gói cho nhánh {UPDATE_BRANCH}.")
 
 
 def check_latest_release(timeout: int = 20) -> ReleaseInfo:
     request = urllib.request.Request(API_URL, headers={"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return parse_release(json.load(response))
+        payload = json.load(response)
+    if not isinstance(payload, list):
+        raise ValueError("GitHub trả về danh sách bản cập nhật không hợp lệ.")
+    return select_channel_release(payload)
 
 
 def download_release(

@@ -99,6 +99,16 @@ Wan 2.2 Chất lượng và LoRA DMD 4 bước đều dùng Apache 2.0. LTX dùn
 
 Google Vids hiện không có API công khai dành cho việc tạo clip. Adapter này dùng tự động hóa giao diện web bằng Playwright, vì vậy phụ thuộc giao diện/quota/chính sách tài khoản của Google và có thể cần cập nhật selector khi Google đổi UI. CAPTCHA hoặc xác minh bảo mật phải do người dùng xử lý trong browser. Bản EXE chỉ đóng gói Playwright, còn Chrome/Edge dùng bản đã cài trên máy.
 
+## Muse AI batch với ba Chrome profile độc lập
+
+Trang **Muse Batch — 3 tài khoản** có ba tab tương ứng ba `user-data-dir` cố định: `data/muse_profiles/account_1`, `account_2`, `account_3`. Chọn thư mục ảnh, prompt chung và output; ảnh được chuẩn hóa, loại trùng, sắp xếp rồi chia round-robin cho ba worker. Mỗi worker sở hữu riêng Selenium driver, hàng đợi, worker thread, asyncio task, stop event và lock.
+
+Selenium chỉ tương tác trên `muse.ai`, `auth.muse.ai` và `accounts.google.com`, dùng selector theo `data-testid`, role, aria-label hoặc placeholder. Mật khẩu, CAPTCHA, 2FA, xác minh thiết bị và màn hình quyền mới luôn do người dùng xử lý trực tiếp trong Chrome; phiên chuyển sang `LOGIN_REQUIRED`, giữ mở và tự phát hiện khi đăng nhập hoàn tất.
+
+Manager ghi checkpoint không bí mật sau mỗi trạng thái job. Job đã submit không được gửi lại khi tiếp tục/restart; lỗi download chỉ retry download. Nút dừng chỉ tác động đúng worker, còn **Dừng tất cả Muse** không gọi tới Auto Registry hoặc YouTube. Prompt, phân bổ, tiến độ và kết quả vẫn giữ nguyên sau khi dừng; driver được quit khi ứng dụng đóng nhưng thư mục profile không bị xóa.
+
+Provider **Muse AI Web** trong **AI Video hàng loạt** vẫn chạy với đúng tài khoản được chọn và dừng phần Muse khi phát hiện hết quota; không có tự động đổi tài khoản.
+
 ## AI Video hàng loạt — Seedance, Veo và ComfyUI
 
 1. Mở **Cài đặt**, nhập Gemini API key và/hoặc BytePlus LAS API key chính thức. Với cloud, điền đơn giá ước tính cùng giới hạn ngân sách ngày/batch nếu muốn app chặn chi phí trước khi gửi.
@@ -120,7 +130,7 @@ Các test bao phủ FFprobe parser, master duration, loop command, effect defaul
 
 ## Build và phát hành tự động
 
-Workflow `.github/workflows/build-release.yml` chạy trên Windows sau mỗi push vào nhánh `main`:
+Workflow `.github/workflows/build-release.yml` chạy trên Windows sau mỗi push vào nhánh `Dola-AI`:
 
 1. Cài dependency và chạy test.
 2. Đóng gói một EXE portable bằng PyInstaller.
@@ -128,6 +138,8 @@ Workflow `.github/workflows/build-release.yml` chạy trên Windows sau mỗi pu
 4. Tạo file SHA-256.
 5. Tạo version mới dạng `1.0.<run>.<attempt>`.
 6. Đăng EXE lên GitHub Releases và đánh dấu là bản mới nhất.
+
+Updater chỉ chọn release có tag `dola-ai-v*` và chỉ đề nghị cập nhật khi commit đóng dấu của release khác commit đang chạy. Các release thuộc `main` hoặc nhánh khác không được nút cập nhật sử dụng.
 
 Để build thủ công trên Windows, chạy `build_windows.ps1` từ thư mục gốc.
 

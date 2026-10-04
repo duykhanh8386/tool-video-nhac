@@ -60,6 +60,20 @@ Gói ComfyUI Portable được giải nén bằng `7zr.exe` chính thức của 
 - Nút **Render toàn bộ background đã chọn** dùng lại trực tiếp danh sách ảnh ở **Nguồn ảnh AI**; sau khi tạo AI hàng loạt, nút tự dùng các clip AI đã lưu trong state/project nên không phải chọn thư mục lần hai.
 - Batch AI chạy hai pha: tạo và lưu toàn bộ clip trước, sau đó dùng một snapshot cố định của preview để render từng visual 60 giây với đầy đủ text, logo, ảnh, sóng, hiệu ứng và font.
 
+## Google / YouTube OAuth và YouTube Studio
+
+Màn hình **Tài khoản YouTube** dùng luồng OAuth 2.0 dành cho ứng dụng desktop, Authorization Code + PKCE:
+
+1. Trong Google Cloud Console, bật **YouTube Data API v3**, cấu hình OAuth consent screen và tạo OAuth client loại **Desktop app**.
+2. Tải client JSON về máy, mở **Tài khoản YouTube** và chọn file đó. Nếu ứng dụng còn ở chế độ Testing, thêm tài khoản được phép vào danh sách test users.
+3. Nhập email làm `login_hint`/nhãn nhận diện và nên nhập Channel ID cần dùng, rồi bấm **Đăng nhập Google**. Trình duyệt hệ thống sẽ nhận xác nhận; callback chỉ lắng nghe trên `127.0.0.1`.
+4. Ứng dụng chỉ xin scope `youtube.readonly`, gọi `channels.list(mine=true)` để đối chiếu Channel ID, và lưu refresh token theo kênh trong Windows Credential Manager. Access token chỉ được giữ trong bộ nhớ và tự làm mới khi hết hạn.
+5. Dùng **Đăng nhập lại** khi Google thu hồi phiên. **Ngắt kết nối + thu hồi token** gọi endpoint thu hồi của Google rồi xóa credential cục bộ.
+
+Email không được tự điền vào trang đăng nhập và ứng dụng không có trường mật khẩu Google. Token, cookie và Authorization header không được ghi vào log hoặc thông báo lỗi.
+
+Nút **Mở YouTube Studio** dùng một `user-data-dir` Chrome/Edge riêng cho từng tài khoản. Lần đầu người dùng tự hoàn tất đăng nhập, CAPTCHA hoặc 2FA trong cửa sổ trình duyệt bình thường; các lần sau cùng profile được mở lại. Nếu phiên web hết hạn, Google tự hiển thị yêu cầu xác thực lại. Luồng này không dùng Selenium để nhập thông tin đăng nhập hoặc vượt bước bảo vệ.
+
 ## Google Vids Web — Beta
 
 1. Cài Google Chrome hoặc Microsoft Edge trên máy, chọn engine **Google Vids Web — dùng quota Google AI Ultra (Beta)** rồi bấm **Đăng nhập Google Vids (chỉ lần đầu)**.
@@ -69,12 +83,30 @@ Gói ComfyUI Portable được giải nén bằng `7zr.exe` chính thức của 
 
 Google chưa cung cấp API công khai để tạo clip Google Vids, nên chế độ này điều khiển giao diện web và được đánh dấu Beta. Giao diện Google, CAPTCHA, chính sách tài khoản hoặc quota có thể làm tác vụ dừng; khi đó bật **Hiện Chrome khi chạy Vids** để xem bước cần xử lý. Bản EXE đóng gói bộ điều khiển Playwright nhưng dùng Chrome/Edge đã cài trên máy, không nhúng hoặc lưu mật khẩu trình duyệt.
 
-Mỗi lần có commit mới được push lên nhánh `main`, GitHub Actions sẽ:
+## Muse AI — batch ảnh thành video trên ba tài khoản
+
+Trang **Muse Batch — 3 tài khoản** quét JPG/JPEG/PNG/WEBP trong một thư mục, chia ảnh round-robin cho ba Chrome profile cố định tại `data/muse_profiles/account_1`, `account_2`, `account_3`, rồi chạy ba worker tạo video đồng thời với cùng prompt và cài đặt.
+
+- Mỗi phiên có Selenium driver, worker thread, task, lock và Chrome `user-data-dir` riêng; không chia sẻ cookie, window handle hoặc trạng thái đăng nhập.
+- Tool chỉ tương tác trên `muse.ai`, `auth.muse.ai` và `accounts.google.com`, đồng thời chỉ tự chọn đúng email đã cấu hình khi Google đã hiển thị sẵn tài khoản đó.
+- Mật khẩu, CAPTCHA, 2FA, xác minh thiết bị và quyền mới luôn do người dùng hoàn tất trong Chrome. Phiên chuyển sang `LOGIN_REQUIRED`, giữ Chrome mở và tự tiếp tục sau callback hợp lệ.
+- Mỗi ảnh là một job có ID theo đường dẫn/metadata/hash ảnh/hash prompt/cài đặt. Checkpoint giữ trạng thái sau từng bước; job đã submit chỉ được khôi phục kết quả/download, không tự bấm Generate lần hai.
+- Video mới được phân biệt với kết quả cũ, tải thành MP4 theo tên `<ảnh>__<account_id>__<job_id>.mp4` và kiểm tra file hoàn tất trước khi đánh dấu thành công. Rate limit/quota chỉ dừng đúng worker đó và không chuyển ảnh sang tài khoản khác.
+- Checkpoint chỉ chứa email nhãn, đường dẫn, prompt, cài đặt, mapping output và trạng thái; không chứa mật khẩu, cookie hoặc token. Dựng lại UI sẽ nối với manager còn chạy thay vì tạo driver trùng.
+- **Dừng tất cả Muse** chỉ đặt cờ dừng cho ba tác vụ Muse, không gọi hủy Auto Registry hay YouTube.
+
+Quy trình sử dụng: đăng nhập đủ ba tab đến trạng thái `READY`, chọn thư mục ảnh và output, nhập prompt chung, bấm **Phân bổ ảnh** để xem trước, rồi **Bắt đầu cả 3**. Có thể dừng/tiếp tục, chạy lại ảnh lỗi hoặc phân bổ lại riêng các ảnh chưa submit.
+
+Provider **Muse AI Web** trong **AI Video hàng loạt** vẫn dùng tài khoản được chọn và không tự xoay tài khoản để né quota.
+
+Mỗi lần có commit mới được push lên nhánh `Dola-AI`, GitHub Actions sẽ:
 
 1. Chạy toàn bộ kiểm thử.
 2. Đóng gói EXE portable kèm FFmpeg/FFprobe.
 3. Tạo checksum SHA-256.
 4. Tạo GitHub Release mới và đánh dấu là bản mới nhất.
+
+Nút **Kiểm tra cập nhật** chỉ đọc các release có tag `dola-ai-v*` do workflow của nhánh `Dola-AI` tạo và so sánh commit đã đóng dấu trong EXE. Release từ `main` hoặc nhánh khác sẽ bị bỏ qua.
 
 ## Chạy từ mã nguồn
 

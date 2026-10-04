@@ -26,6 +26,8 @@ class AppSettings:
     ai_daily_budget: float = 0.0
     ai_batch_budget: float = 0.0
     ai_estimated_cloud_cost_per_second: float = 0.0
+    google_oauth_client_json: str = ""
+    muse_start_url: str = "https://muse.ai/"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

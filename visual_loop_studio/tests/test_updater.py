@@ -7,7 +7,13 @@ from unittest.mock import patch
 
 import utils.updater as updater
 from utils.updater import build_self_update_script
-from utils.updater import is_newer_version, parse_release, version_tuple
+from utils.updater import (
+    is_newer_release,
+    is_newer_version,
+    parse_release,
+    select_channel_release,
+    version_tuple,
+)
 
 
 class UpdaterTests(unittest.TestCase):
@@ -35,6 +41,50 @@ class UpdaterTests(unittest.TestCase):
     def test_release_without_windows_exe_is_rejected(self):
         with self.assertRaises(ValueError):
             parse_release({"tag_name": "v2.0.0", "assets": []})
+
+    def test_dola_ai_release_uses_stamped_commit_for_updates(self):
+        old_commit = "1" * 40
+        new_commit = "2" * 40
+        payload = {
+            "tag_name": "dola-ai-v1.0.20.1",
+            "target_commitish": new_commit,
+            "assets": [
+                {
+                    "name": "VisualLoopStudio-Windows-x64.exe",
+                    "browser_download_url": "https://example.test/app.exe",
+                }
+            ],
+        }
+        release = parse_release(payload)
+        self.assertEqual(release.version, "1.0.20.1")
+        self.assertEqual(release.commit, new_commit)
+        self.assertTrue(is_newer_release(release, "99.0.0", old_commit))
+        self.assertFalse(is_newer_release(release, "1.0.0", new_commit))
+
+    def test_update_channel_ignores_releases_from_other_branches(self):
+        dola_payload = {
+            "tag_name": "dola-ai-v1.0.22.1",
+            "target_commitish": "2" * 40,
+            "assets": [
+                {
+                    "name": "VisualLoopStudio-Windows-x64.exe",
+                    "browser_download_url": "https://example.test/dola.exe",
+                }
+            ],
+        }
+        main_payload = {
+            "tag_name": "v9.0.0",
+            "target_commitish": "3" * 40,
+            "assets": [
+                {
+                    "name": "VisualLoopStudio-Windows-x64.exe",
+                    "browser_download_url": "https://example.test/main.exe",
+                }
+            ],
+        }
+        release = select_channel_release([main_payload, dola_payload])
+        self.assertEqual(release.tag, "dola-ai-v1.0.22.1")
+        self.assertEqual(release.executable.url, "https://example.test/dola.exe")
 
     def test_self_update_script_retries_verifies_and_relaunches(self):
         script = build_self_update_script()

@@ -70,6 +70,7 @@ class AiBatchPage(QWidget):
         root.addWidget(title)
         notice = QLabel(
             "Seedance dùng BytePlus LAS API chính thức; Veo dùng Gemini API; AI Local dùng ComfyUI. "
+            "Muse Web chạy tuần tự trên một tài khoản được chọn và dừng khi hết quota. "
             "Không sử dụng cookie, kho tài khoản hoặc xoay proxy để né quota."
         )
         notice.setWordWrap(True)
@@ -91,6 +92,10 @@ class AiBatchPage(QWidget):
         self.generate_audio = QCheckBox("Tạo âm thanh đồng bộ nếu model hỗ trợ")
         self.provider_health = QLabel()
         self.provider_health.setObjectName("muted")
+        self.muse_account_label = QLabel("Tài khoản Muse")
+        self.muse_account = QComboBox()
+        self.refresh_muse_accounts = QPushButton("Làm mới")
+        self.refresh_muse_accounts.clicked.connect(self._refresh_muse_accounts)
         self.batch_preview = QLabel("Dự kiến: 0 job")
         self.batch_preview.setObjectName("muted")
         grid.addWidget(QLabel("Provider"), 0, 0)
@@ -107,7 +112,10 @@ class AiBatchPage(QWidget):
         grid.addWidget(self.quantity, 2, 3)
         grid.addWidget(self.generate_audio, 3, 0, 1, 2)
         grid.addWidget(self.provider_health, 3, 2, 1, 2)
-        grid.addWidget(self.batch_preview, 4, 0, 1, 4)
+        grid.addWidget(self.muse_account_label, 4, 0)
+        grid.addWidget(self.muse_account, 4, 1, 1, 2)
+        grid.addWidget(self.refresh_muse_accounts, 4, 3)
+        grid.addWidget(self.batch_preview, 5, 0, 1, 4)
         root.addWidget(config)
 
         inputs = QGroupBox("Prompt và ảnh đầu vào")
@@ -260,10 +268,19 @@ class AiBatchPage(QWidget):
         seedance = self.providers.get("byteplus_seedance")
         if seedance:
             seedance.base_url = settings.byteplus_las_base_url.rstrip("/")
+        muse = self.providers.get("muse_web")
+        if muse:
+            muse.start_url = settings.muse_start_url
         self._provider_changed()
 
     def _provider_changed(self) -> None:
         provider = self._selected_provider()
+        muse_selected = provider.provider_id == "muse_web"
+        self.muse_account_label.setVisible(muse_selected)
+        self.muse_account.setVisible(muse_selected)
+        self.refresh_muse_accounts.setVisible(muse_selected)
+        if muse_selected:
+            self._refresh_muse_accounts()
         current_model = self.model.currentData()
         self.model.blockSignals(True)
         self.model.clear()
@@ -277,6 +294,18 @@ class AiBatchPage(QWidget):
         health = provider.health_check()
         self.provider_health.setText(("✓ " if health.available else "⚠ ") + health.message)
         self._model_changed()
+
+    def _refresh_muse_accounts(self) -> None:
+        current = str(self.muse_account.currentData() or "")
+        self.muse_account.clear()
+        self.muse_account.addItem("Chọn một tài khoản Muse đã đăng nhập", "")
+        provider = self.providers.get("muse_web")
+        if provider is not None:
+            for account in provider.store.all():
+                if account.status == "connected":
+                    self.muse_account.addItem(account.email_label, account.account_id)
+        index = self.muse_account.findData(current)
+        self.muse_account.setCurrentIndex(index if index >= 0 else 0)
 
     def _model_changed(self) -> None:
         capability = self._selected_capability()
@@ -437,6 +466,13 @@ class AiBatchPage(QWidget):
             total = len(expanded) * self.quantity.value()
             if total <= 0:
                 raise ValueError("Chưa có prompt hợp lệ để tạo job.")
+            muse_account_id = ""
+            if provider.provider_id == "muse_web":
+                muse_account_id = str(self.muse_account.currentData() or "")
+                if not muse_account_id:
+                    raise ValueError("Hãy chọn một tài khoản Muse đã đăng nhập.")
+                if total > 20:
+                    raise ValueError("Muse Web giới hạn tối đa 20 job mỗi batch và không tự xoay tài khoản.")
             if not capability.supports_text and any(not item.image_path for item in expanded):
                 raise ValueError(f"{capability.display_name} yêu cầu ảnh đầu vào.")
             health = provider.health_check()
@@ -496,7 +532,13 @@ class AiBatchPage(QWidget):
                         resolution=str(self.resolution.currentData()),
                         generate_audio=self.generate_audio.isChecked(),
                         seed=-1,
-                        options={"estimated_cost_usd": 0.0 if provider.provider_id == "comfyui" else duration * rate},
+                        options={
+                            "estimated_cost_usd": 0.0 if provider.provider_id == "comfyui" else duration * rate,
+                            **(
+                                {"muse_account_id": muse_account_id, "muse_timeout_seconds": 15 * 60}
+                                if provider.provider_id == "muse_web" else {}
+                            ),
+                        },
                     ))
             batch = self.manager.add_batch(requests, name=f"{capability.display_name} {stamp}")
             self.settings.last_output_folder = str(destination)

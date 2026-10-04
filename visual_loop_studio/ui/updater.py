@@ -8,9 +8,9 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog, QWidge
 
 from utils.updater import (
     RELEASES_URL, can_self_update, check_latest_release, download_release,
-    is_newer_version, schedule_self_update, update_log_path,
+    is_newer_release, schedule_self_update, update_log_path,
 )
-from version import __version__
+from version import __build_commit__, __version__
 
 
 class UpdateController(QObject):
@@ -47,14 +47,18 @@ class UpdateController(QObject):
 
     def _handle_check(self, release, silent: bool) -> None:
         self.busy = False
-        if not is_newer_version(release.version, __version__):
+        if not is_newer_release(release, __version__, __build_commit__):
             if not silent:
                 QMessageBox.information(self.parent_window, "Update", f"Bạn đang dùng phiên bản mới nhất: v{__version__}")
             return
         notes = release.notes.strip()
         if len(notes) > 1200:
             notes = notes[:1200] + "…"
-        message = f"Có phiên bản mới v{release.version}.\nPhiên bản hiện tại: v{__version__}."
+        message = (
+            f"Có bản dựng mới từ nhánh Dola-AI: v{release.version}.\n"
+            f"Phiên bản hiện tại: v{__version__}.\n"
+            f"Commit mới: {release.commit[:10]}"
+        )
         if notes:
             message += f"\n\n{notes}"
         message += "\n\nTải bản cập nhật ngay?"

@@ -32,9 +32,11 @@ from ui.batch_render import BatchRenderPage
 from ui.common import WheelValueGuard
 from ui.home import HomePage
 from ui.loop_music import LoopMusicPage
+from ui.muse_accounts import MuseAccountsPage
 from ui.settings import SettingsDialog
 from ui.updater import UpdateController
 from ui.visual_creator import VisualCreatorPage
+from ui.youtube_accounts import YouTubeAccountsPage
 from utils.config import load_settings, save_settings, write_json
 from utils.paths import RESOURCE_DIR, ensure_app_dirs
 from utils.shortcuts import ensure_desktop_shortcut
@@ -83,7 +85,7 @@ class MainWindow(QMainWindow):
         self.navigation = QListWidget()
         self.navigation.addItems([
             "Trang chủ", "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh",
-            "Render hàng loạt", "AI Video hàng loạt",
+            "Render hàng loạt", "AI Video hàng loạt", "Tài khoản YouTube", "Muse Batch — 3 tài khoản",
         ])
         self.navigation.setCurrentRow(0)
         self.navigation.currentRowChanged.connect(self._navigate)
@@ -102,13 +104,20 @@ class MainWindow(QMainWindow):
         self.audio = AudioMixerPage(self.settings)
         self.batch = BatchRenderPage(self.settings)
         self.ai_batch = AiBatchPage(self.settings)
-        for page in (self.home, self.visual, self.loop, self.audio, self.batch, self.ai_batch):
+        self.youtube_accounts = YouTubeAccountsPage(self.settings)
+        self.muse_accounts = MuseAccountsPage(self.settings)
+        for page in (
+            self.home, self.visual, self.loop, self.audio, self.batch, self.ai_batch,
+            self.youtube_accounts, self.muse_accounts,
+        ):
             self.pages.addWidget(page)
         self.home.navigate.connect(self.navigation.setCurrentRow)
         self.visual.settings_changed.connect(self._save_settings)
         self.loop.settings_changed.connect(self._save_settings)
         self.audio.settings_changed.connect(self._save_settings)
         self.ai_batch.settings_changed.connect(self._save_settings)
+        self.youtube_accounts.settings_changed.connect(self._save_settings)
+        self.muse_accounts.settings_changed.connect(self._save_settings)
         root.addWidget(self.pages, 1)
         self.setCentralWidget(shell)
 
@@ -129,7 +138,7 @@ class MainWindow(QMainWindow):
         tools = self.menuBar().addMenu("Công cụ")
         for index, text in enumerate((
             "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh",
-            "Render hàng loạt", "AI Video hàng loạt",
+            "Render hàng loạt", "AI Video hàng loạt", "Tài khoản YouTube", "Muse Batch — 3 tài khoản",
         ), start=1):
             action = QAction(text, self)
             action.triggered.connect(lambda _checked=False, index=index: self.navigation.setCurrentRow(index))
@@ -220,6 +229,8 @@ class MainWindow(QMainWindow):
             or self.visual.local_setup_worker.running
             or self.visual.google_vids_worker.busy
             or self.ai_batch.busy
+            or self.youtube_accounts.busy
+            or self.muse_accounts.busy
         ):
             answer = QMessageBox.question(self, "Render đang chạy", "Cancel render và thoát ứng dụng?")
             if answer != QMessageBox.StandardButton.Yes:
@@ -233,8 +244,12 @@ class MainWindow(QMainWindow):
             self.visual.local_setup_worker.cancel()
             self.visual.google_vids_worker.cancel()
             self.ai_batch.cancel_all()
+            self.youtube_accounts.shutdown()
+            self.muse_accounts.shutdown()
         self.visual.local_runtime.stop()
         self.ai_batch.shutdown()
+        self.youtube_accounts.shutdown()
+        self.muse_accounts.shutdown()
         self._save_settings()
         event.accept()
 
