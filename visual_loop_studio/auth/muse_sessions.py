@@ -11,8 +11,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from auth.muse_login import (
+    GOOGLE_CONTINUE_TEXT,
+    GOOGLE_MUSE_LOGIN_URL,
     MUSE_ALLOWED_HOSTS,
     MUSE_CONTINUE_TEXT,
+    MUSE_GOOGLE_TEXT,
     MUSE_LOGIN_TEXT,
     MUSE_START_URL,
     MuseAccountStore,
@@ -258,7 +261,7 @@ class MuseSessionManager:
     ) -> Future[Any]:
         normalized = str(email or "").strip().casefold()
         if not normalized or "@" not in normalized:
-            raise ValueError("Hãy nhập email Muse/Meta hợp lệ cho phiên Muse.")
+            raise ValueError("Hãy nhập email Google hợp lệ cho phiên Muse.")
         secret = bytearray(str(password or "").encode("utf-8"))
         try:
             return self._schedule(
@@ -275,7 +278,7 @@ class MuseSessionManager:
         force_relogin: bool = False,
     ) -> Future[Any]:
         if set(credentials) != set(range(1, MUSE_SESSION_COUNT + 1)):
-            raise ValueError("Cần nhập đủ email Muse/Meta cho cả 3 tài khoản Muse.")
+            raise ValueError("Cần nhập đủ email Google cho cả 3 tài khoản Muse.")
         prepared: dict[int, tuple[str, bytearray]] = {}
         for session_id in range(1, MUSE_SESSION_COUNT + 1):
             email, password = credentials[session_id]
@@ -283,7 +286,7 @@ class MuseSessionManager:
             if not normalized or "@" not in normalized:
                 for _email, secret in prepared.values():
                     _wipe_secret(secret)
-                raise ValueError(f"Email Muse/Meta của tài khoản {session_id} không hợp lệ.")
+                raise ValueError(f"Email Google của tài khoản {session_id} không hợp lệ.")
             prepared[session_id] = (
                 normalized,
                 bytearray(str(password or "").encode("utf-8")),
@@ -292,7 +295,7 @@ class MuseSessionManager:
         if len(set(emails)) != MUSE_SESSION_COUNT:
             for _email, secret in prepared.values():
                 _wipe_secret(secret)
-            raise ValueError("Ba phiên Muse phải sử dụng ba tài khoản Muse/Meta khác nhau.")
+            raise ValueError("Ba phiên Muse phải sử dụng ba tài khoản Google khác nhau.")
         try:
             return self._schedule(
                 self._launch_open_all(prepared, bool(force_relogin))
@@ -626,8 +629,13 @@ class MuseSessionManager:
                 raise MuseSessionError(
                     "Không thể mở Chrome profile Muse riêng; hãy đóng cửa sổ đang dùng cùng profile rồi thử lại."
                 ) from None
-        self._navigate_with_retry(session, self.start_url)
         helper = MuseLoginService(start_url=self.start_url, store=self.account_store)
+        if not (
+            _hostname(_safe_url(session.driver)) == "muse.ai"
+            and not helper._is_muse_waitlist(session.driver)
+            and helper._is_muse_logged_in(session.driver)
+        ):
+            self._navigate_with_retry(session, GOOGLE_MUSE_LOGIN_URL)
         actions: set[tuple[str, str]] = set()
         manual_mode = False
         idle_polls = 0
@@ -647,6 +655,25 @@ class MuseSessionManager:
             handle, url, host = helper._switch_to_relevant_window(driver, session.owned_handles)
             if not handle:
                 raise MuseSessionError("Không còn tab Muse nào trong Chrome profile của phiên này.")
+            if host == "muse.ai" and helper._is_muse_waitlist(driver):
+                reset_key = ("muse.ai", "waitlist_reset")
+                if reset_key not in actions:
+                    actions.add(reset_key)
+                    helper._clear_muse_site_session(driver)
+                    self._set_state(
+                        session,
+                        MuseSessionState.OPENING,
+                        progress=15,
+                        status_message=(
+                            "Đã xóa trạng thái waitlist cũ của riêng Muse; đang đăng nhập lại Google một lần…"
+                        ),
+                    )
+                    self._navigate_with_retry(session, GOOGLE_MUSE_LOGIN_URL)
+                    return False
+                raise MuseSessionError(
+                    "Tài khoản này đang ở waitlist hoặc Muse chưa hỗ trợ khu vực của tài khoản. "
+                    "Tool không thể vượt giới hạn quyền truy cập; hãy dùng tài khoản đã được Muse cấp quyền."
+                )
             if host == "muse.ai" and helper._is_muse_logged_in(driver):
                 self._set_state(
                     session,
@@ -658,41 +685,15 @@ class MuseSessionManager:
                 self._set_account_status(session, "connected")
                 return True
             if host == "muse.ai":
-                password_key = (url, "muse_password")
-                password_submitted = password_key in actions
-                if helper._requires_manual_muse_step(driver, allow_password=True):
+                if helper._requires_manual_muse_step(driver):
                     manual_mode = True
-                    _wipe_secret(password)
                     self._login_required(
                         session,
                         message=(
-                            "Muse/Meta đang yêu cầu mã email, CAPTCHA, 2FA hoặc bước xác minh riêng. "
+                            "Muse đang yêu cầu mã email, CAPTCHA, 2FA hoặc bước xác minh riêng. "
                             "Hãy hoàn tất thủ công trong Chrome; phiên sẽ tự tiếp tục."
                         ),
                     )
-                elif helper._has_muse_password_field(driver):
-                    manual_mode = False
-                    if not password_submitted and password and helper._fill_muse_password(driver, password):
-                        actions.add(password_key)
-                        _wipe_secret(password)
-                        idle_polls = 0
-                        self._set_state(
-                            session,
-                            MuseSessionState.OPENING,
-                            progress=70,
-                            status_message="Đã gửi mật khẩu Muse/Meta; đang chờ phản hồi…",
-                        )
-                    elif not password_submitted and not password:
-                        manual_mode = True
-                        self._login_required(
-                            session,
-                            message=(
-                                "Muse/Meta đang yêu cầu mật khẩu nhưng ô mật khẩu trong ứng dụng đang trống. "
-                                "Hãy nhập thủ công trong Chrome; phiên sẽ tự tiếp tục."
-                            ),
-                        )
-                    else:
-                        idle_polls += 1
                 else:
                     manual_mode = False
                     login_key = (url, "muse_login")
@@ -706,6 +707,17 @@ class MuseSessionManager:
                             status_message="Đã bấm Log in trên Muse; đang chờ form đăng nhập…",
                         )
                     else:
+                        google_key = (url, "muse_google")
+                        if google_key not in actions and helper._click_by_text(driver, MUSE_GOOGLE_TEXT):
+                            actions.add(google_key)
+                            idle_polls = 0
+                            self._set_state(
+                                session,
+                                MuseSessionState.OPENING,
+                                progress=45,
+                                status_message="Đã chọn Continue with Google trên Muse…",
+                            )
+                            return False
                         identifier_key = (url, "muse_identifier")
                         if identifier_key not in actions and helper._fill_muse_identifier(driver, session.email):
                             actions.add(identifier_key)
@@ -725,44 +737,101 @@ class MuseSessionManager:
                                     session,
                                     MuseSessionState.OPENING,
                                     progress=35,
-                                    status_message="Đã bấm Continue; đang chờ Muse/Meta xác thực…",
+                                    status_message="Đã bấm Continue; đang chờ Muse xác thực…",
                                 )
                         elif continue_key in actions:
                             idle_polls += 1
                         else:
                             idle_polls += 1
             elif host == "auth.muse.ai":
-                key = (url, "auth_login")
-                if key not in actions and helper._click_by_text(driver, MUSE_LOGIN_TEXT):
-                    actions.add(key)
+                google_key = (url, "auth_google")
+                if google_key not in actions and helper._click_by_text(driver, MUSE_GOOGLE_TEXT):
+                    actions.add(google_key)
                     manual_mode = False
                     idle_polls = 0
                     self._set_state(
                         session,
                         MuseSessionState.OPENING,
-                        progress=30,
-                        status_message="Đang tiếp tục đăng nhập Muse/Meta…",
+                        progress=50,
+                        status_message="Đã tiếp tục Muse bằng tài khoản Google trong profile…",
                     )
                 else:
+                    key = (url, "auth_login")
+                    if key not in actions and helper._click_by_text(driver, MUSE_LOGIN_TEXT):
+                        actions.add(key)
+                        manual_mode = False
+                        idle_polls = 0
+                    else:
+                        manual_mode = True
+                        self._login_required(
+                            session,
+                            message="Muse cần thao tác xác minh bổ sung trên auth.muse.ai; hãy hoàn tất trong Chrome.",
+                        )
+            elif host == "accounts.google.com":
+                password_key = (url, "google_password")
+                password_submitted = password_key in actions
+                if helper._requires_manual_google_step(
+                    driver,
+                    allow_email=True,
+                    allow_password=bool(password) or password_submitted,
+                ):
                     manual_mode = True
-                    _wipe_secret(password)
                     self._login_required(
                         session,
                         message=(
-                            "Muse mở bước xác minh trên auth.muse.ai. Vì lý do an toàn, mật khẩu chỉ được tự điền "
-                            "trên đúng muse.ai; hãy hoàn tất bước này trong Chrome."
+                            "Google yêu cầu CAPTCHA, 2FA, passkey hoặc xác minh thiết bị. "
+                            "Hãy hoàn tất thủ công; tool sẽ mở Muse sau khi Google xác thực xong."
                         ),
                     )
-            elif host == "accounts.google.com":
-                manual_mode = True
-                _wipe_secret(password)
-                self._login_required(
-                    session,
-                    message=(
-                        "Muse đã chuyển sang Google. Tool không gửi mật khẩu Muse/Meta sang accounts.google.com; "
-                        "hãy hoàn tất hoặc quay lại Muse thủ công trong Chrome."
-                    ),
-                )
+                else:
+                    manual_mode = False
+                    email_key = (url, "google_email")
+                    if email_key not in actions and helper._fill_google_email(driver, session.email):
+                        actions.add(email_key)
+                        idle_polls = 0
+                        self._set_state(
+                            session,
+                            MuseSessionState.OPENING,
+                            progress=25,
+                            status_message=f"Đã điền email Google {session.email}…",
+                        )
+                    elif password_key not in actions and password and helper._fill_google_password(driver, password):
+                        actions.add(password_key)
+                        _wipe_secret(password)
+                        idle_polls = 0
+                        self._set_state(
+                            session,
+                            MuseSessionState.OPENING,
+                            progress=40,
+                            status_message="Đã gửi đăng nhập Google; đang chờ mở Muse…",
+                        )
+                    else:
+                        account_key = (url, "google_account")
+                        if account_key not in actions and helper._select_google_account(driver, session.email):
+                            actions.add(account_key)
+                            idle_polls = 0
+                            self._set_state(
+                                session,
+                                MuseSessionState.OPENING,
+                                progress=35,
+                                status_message=f"Đã chọn đúng tài khoản Google {session.email}…",
+                            )
+                        else:
+                            continue_key = (url, "google_continue")
+                            if continue_key not in actions and helper._click_by_text(driver, GOOGLE_CONTINUE_TEXT):
+                                actions.add(continue_key)
+                                idle_polls = 0
+                            else:
+                                idle_polls += 1
+                                if idle_polls >= 4:
+                                    manual_mode = True
+                                    self._login_required(
+                                        session,
+                                        message=(
+                                            "Google chưa chuyển về Muse hoặc không thấy đúng tài khoản. "
+                                            "Hãy chọn đúng tài khoản trong Chrome; tool sẽ tự tiếp tục."
+                                        ),
+                                    )
             return False
 
         while True:
@@ -778,7 +847,7 @@ class MuseSessionManager:
                 return
             except MuseSessionTimeout:
                 # Poll in bounded WebDriverWait chunks so Stop stays responsive;
-                # A manual Muse/Meta security step remains open until user action.
+                # A manual Google/Muse security step remains open until user action.
                 if not manual_mode and self._clock() - started >= self.login_timeout:
                     raise MuseSessionTimeout("Đăng nhập Muse đã hết thời gian chờ.") from None
 
@@ -976,7 +1045,7 @@ class MuseSessionManager:
             progress=50,
             status_message=message
             or (
-                "Muse/Meta cần mã xác minh, CAPTCHA, 2FA, xác minh thiết bị hoặc thao tác bổ sung. "
+                "Google/Muse cần mã xác minh, CAPTCHA, 2FA, xác minh thiết bị hoặc thao tác bổ sung. "
                 "Hãy hoàn tất thủ công trong Chrome; phiên sẽ tự tiếp tục."
             ),
             error="",

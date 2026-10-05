@@ -15,6 +15,10 @@ from utils.paths import DATA_DIR, USER_DATA_ROOT
 
 
 MUSE_START_URL = "https://muse.ai/"
+GOOGLE_MUSE_LOGIN_URL = (
+    "https://accounts.google.com/AccountChooser?"
+    "continue=https%3A%2F%2Fmuse.ai%2F&hl=en"
+)
 MUSE_ALLOWED_HOSTS = frozenset({"muse.ai", "auth.muse.ai", "accounts.google.com"})
 MUSE_PROFILES_DIR = USER_DATA_ROOT / "MuseChromeProfiles"
 MUSE_ACCOUNTS_FILE = DATA_DIR / "muse_accounts.json"
@@ -133,7 +137,7 @@ class MuseAccountStore:
     def ensure(self, email: str) -> MuseAccount:
         normalized = _normalize_email(email)
         if not normalized:
-            raise ValueError("Hãy nhập email tài khoản Muse/Meta cần dùng.")
+            raise ValueError("Hãy nhập email tài khoản Google cần dùng với Muse.")
         existing = self.get_by_email(normalized)
         if existing:
             return existing
@@ -478,8 +482,32 @@ class MuseLoginService:
             for element in _find_elements(driver, "css selector", selector)
         )
 
-    def _requires_manual_muse_step(self, driver: Any, *, allow_password: bool = False) -> bool:
-        """Keep Muse/Meta security challenges manual; optionally allow its password field."""
+    def _is_muse_waitlist(self, driver: Any) -> bool:
+        if _hostname(_safe_url(driver)) != "muse.ai":
+            return False
+        body = " ".join(_element_text(item) for item in _find_elements(driver, "tag name", "body")).casefold()
+        return (
+            "you're on the waitlist" in body
+            or "you’re on the waitlist" in body
+            or ("muse isn't available" in body and "country or region" in body)
+            or ("muse isn’t available" in body and "country or region" in body)
+        )
+
+    def _clear_muse_site_session(self, driver: Any) -> None:
+        """Clear only Muse site state so an old accidental waitlist flow can be retried safely."""
+        if _hostname(_safe_url(driver)) != "muse.ai":
+            raise MuseUnsafeNavigationError("Tool từ chối xóa dữ liệu site ngoài muse.ai.")
+        try:
+            driver.delete_all_cookies()
+        except Exception:
+            pass
+        try:
+            driver.execute_script("window.localStorage.clear();window.sessionStorage.clear();")
+        except Exception:
+            pass
+
+    def _requires_manual_muse_step(self, driver: Any) -> bool:
+        """Keep Muse password and all Muse security challenges manual."""
         if _hostname(_safe_url(driver)) != "muse.ai":
             return False
         if any(
@@ -488,7 +516,7 @@ class MuseLoginService:
             for element in _find_elements(driver, "css selector", selector)
         ):
             return True
-        if not allow_password and self._has_muse_password_field(driver):
+        if self._has_muse_password_field(driver):
             return True
         body = " ".join(_element_text(item) for item in _find_elements(driver, "tag name", "body")).casefold()
         return any(
@@ -505,29 +533,6 @@ class MuseLoginService:
                 "use your passkey",
             )
         )
-
-    def _fill_muse_password(self, driver: Any, password: bytearray) -> bool:
-        if _hostname(_safe_url(driver)) != "muse.ai":
-            raise MuseUnsafeNavigationError("Tool từ chối điền mật khẩu Muse/Meta ngoài muse.ai.")
-        if not password:
-            return False
-        value = ""
-        try:
-            value = password.decode("utf-8")
-            for selector in MUSE_PASSWORD_SELECTORS:
-                for element in _find_elements(driver, "css selector", selector):
-                    if not _is_clickable(element):
-                        continue
-                    try:
-                        element.clear()
-                        element.send_keys(value)
-                        element.send_keys(GOOGLE_ENTER_KEY)
-                        return True
-                    except Exception:
-                        continue
-            return False
-        finally:
-            value = ""
 
     def _fill_google_password(self, driver: Any, password: bytearray) -> bool:
         if not password:

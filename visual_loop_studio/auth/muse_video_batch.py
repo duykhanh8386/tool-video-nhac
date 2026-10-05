@@ -28,6 +28,7 @@ from utils.paths import DATA_DIR
 
 
 MUSE_VIDEO_BATCH_CHECKPOINT = DATA_DIR / "muse_video_batch.json"
+MUSE_IMAGES_PER_REQUEST = 3
 SUPPORTED_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 TRANSIENT_NETWORK_MARKERS = (
     "network error",
@@ -224,6 +225,9 @@ class MuseVideoJob:
     submitted: bool = False
     submission_attempted: bool = False
     baseline_videos: list[str] = field(default_factory=list)
+    submission_group_id: str = ""
+    submission_index: int = 0
+    submission_size: int = 1
     result_fingerprint: str = ""
     started_at: str = ""
     submitted_at: str = ""
@@ -271,6 +275,9 @@ class MuseVideoJob:
             submitted=submitted,
             submission_attempted=attempted,
             baseline_videos=[str(item) for item in value.get("baseline_videos", [])],
+            submission_group_id=str(value.get("submission_group_id") or ""),
+            submission_index=max(0, int(value.get("submission_index") or 0)),
+            submission_size=max(1, int(value.get("submission_size") or 1)),
             result_fingerprint=str(value.get("result_fingerprint") or ""),
             started_at=str(value.get("started_at") or ""),
             submitted_at=str(value.get("submitted_at") or ""),
@@ -371,47 +378,211 @@ class MuseVideoAutomation:
             return existing
         if job.submitted or job.submission_attempted:
             return self._recover_submitted(driver, job, context)
-        source = Path(job.source_path)
-        if not source.is_file():
-            raise MuseVideoBatchError("Ảnh nguồn không còn tồn tại.")
-        self._check(driver, context)
-        context.log(f"Đang mở giao diện Muse cho {source.name}…")
-        self._navigate_new_task(driver, context)
+        result = self.process_batch(driver, [job], [context])[job.job_id]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def process_batch(
+        self,
+        driver: Any,
+        jobs: list[MuseVideoJob],
+        contexts: list[MuseVideoRunContext],
+    ) -> dict[str, Path | BaseException]:
+        """Submit up to three images with one prompt, then bind distinct new videos in DOM order."""
+        if not jobs or len(jobs) != len(contexts):
+            raise MuseVideoBatchError("Nhóm Muse không có đủ job/context để xử lý.")
+        if len(jobs) > MUSE_IMAGES_PER_REQUEST:
+            raise MuseVideoBatchError("Mỗi lượt Muse chỉ được gửi tối đa 3 ảnh.")
+        if any(job.submitted or job.submission_attempted for job in jobs):
+            raise MuseVideoBatchError("Job đã gửi phải được khôi phục riêng, không được gửi lại theo nhóm.")
+        prompt = jobs[0].prompt
+        settings = jobs[0].settings
+        if any(job.prompt != prompt or job.settings != settings for job in jobs):
+            raise MuseVideoBatchError("Ba ảnh trong cùng lượt phải dùng chung prompt và cài đặt.")
+        sources = [Path(job.source_path) for job in jobs]
+        if any(not source.is_file() for source in sources):
+            raise MuseVideoBatchError("Một hoặc nhiều ảnh nguồn không còn tồn tại.")
+        primary = contexts[0]
+        self._check(driver, primary)
+        primary.log(f"Đang chuẩn bị một lượt gồm {len(jobs)} ảnh trên Muse…")
+        self._navigate_new_task(driver, primary)
         baseline_previews = self._element_fingerprints(driver, self.selectors.previews)
-        context.transition(MuseVideoJobState.UPLOADING, progress=8, error="")
-        context.log(f"Đang đính kèm ảnh {source.name}…")
-        self._upload(driver, source)
-        self._wait(
-            driver,
-            lambda: self._new_visible_element(driver, self.selectors.previews, baseline_previews),
-            self.upload_timeout,
-            context,
-            "Muse không hiển thị preview ảnh đã upload trước thời hạn.",
-        )
-        context.log("Muse đã nhận ảnh; đang điền prompt…")
-        self._fill_prompt(driver, job.prompt)
-        context.log("Đã điền prompt; đang chuẩn bị bấm Send…")
-        self._apply_settings(driver, job.settings)
+        for index, (job, source, context) in enumerate(zip(jobs, sources, contexts), start=1):
+            context.transition(MuseVideoJobState.UPLOADING, progress=5 + index * 3, error="")
+            context.log(f"Đang đính kèm ảnh {index}/{len(jobs)}: {source.name}")
+            self._upload(driver, source)
+            self._wait(
+                driver,
+                lambda expected=index: len(
+                    self._element_fingerprints(driver, self.selectors.previews) - baseline_previews
+                ) >= expected,
+                self.upload_timeout,
+                context,
+                f"Muse chưa hiển thị đủ preview cho ảnh thứ {index}.",
+            )
+        primary.log(f"Muse đã nhận đủ {len(jobs)} ảnh; đang điền một prompt chung…")
+        self._fill_prompt(driver, prompt)
+        self._apply_settings(driver, settings)
         baseline_videos = sorted(self._video_fingerprints(driver))
-        context.transition(
-            MuseVideoJobState.READY_TO_GENERATE,
-            progress=18,
-            baseline_videos=baseline_videos,
-        )
-        context.transition(
-            MuseVideoJobState.SUBMITTING,
-            progress=20,
-            submission_attempted=True,
-        )
+        group_id = hashlib.sha256("|".join(job.job_id for job in jobs).encode("utf-8")).hexdigest()[:24]
+        for index, context in enumerate(contexts):
+            context.transition(
+                MuseVideoJobState.READY_TO_GENERATE,
+                progress=18,
+                baseline_videos=baseline_videos,
+                submission_group_id=group_id,
+                submission_index=index,
+                submission_size=len(jobs),
+            )
+            context.transition(
+                MuseVideoJobState.SUBMITTING,
+                progress=20,
+                submission_attempted=True,
+            )
         self._click_generate_once(driver)
-        context.log("Đã bấm Send đúng một lần; đang chờ video mới…")
-        context.transition(
-            MuseVideoJobState.SUBMITTED,
-            progress=22,
-            submitted=True,
-            submitted_at=_utc_now(),
+        submitted_at = _utc_now()
+        for context in contexts:
+            context.transition(
+                MuseVideoJobState.SUBMITTED,
+                progress=22,
+                submitted=True,
+                submitted_at=submitted_at,
+            )
+        primary.log(
+            f"Đã gửi một prompt cho {len(jobs)} ảnh; đang chờ đủ {len(jobs)} video mới trước khi tải."
         )
-        return self._wait_and_download(driver, job, context)
+        videos = self._wait_for_distinct_videos(
+            driver,
+            expected=len(jobs),
+            baseline=set(baseline_videos),
+            context=primary,
+        )
+        results: dict[str, Path | BaseException] = {}
+        for index, (job, context, video) in enumerate(zip(jobs, contexts, videos), start=1):
+            fingerprint = _video_fingerprint(video)
+            context.log(f"Đang tải video {index}/{len(jobs)} đúng theo thứ tự ảnh đã gửi…")
+            context.transition(
+                MuseVideoJobState.DOWNLOADING,
+                progress=85 + round(index / len(jobs) * 10),
+                result_fingerprint=fingerprint,
+                download_attempts=job.download_attempts + 1,
+            )
+            try:
+                results[job.job_id] = self._download(
+                    driver,
+                    video,
+                    Path(job.output_path),
+                    context,
+                )
+            except (MuseVideoStopped, MuseVideoLoginRequired, MuseVideoQuotaExhausted, MuseVideoDriverError):
+                raise
+            except BaseException as exc:
+                results[job.job_id] = exc
+        return results
+
+    def recover_batch(
+        self,
+        driver: Any,
+        jobs: list[MuseVideoJob],
+        contexts: list[MuseVideoRunContext],
+    ) -> dict[str, Path | BaseException]:
+        """Recover a submitted group without sending the prompt again."""
+        if not jobs or len(jobs) != len(contexts):
+            raise MuseVideoDownloadError("Nhóm khôi phục Muse không hợp lệ.")
+        primary = contexts[0]
+        self._check(driver, primary)
+        expected = max(job.submission_size for job in jobs)
+        baseline = set(jobs[0].baseline_videos)
+        primary.log(f"Khôi phục lượt đã gửi gồm {expected} video; không bấm Send lần hai.")
+        videos = self._wait_for_distinct_videos(
+            driver,
+            expected=expected,
+            baseline=baseline,
+            context=primary,
+        )
+        by_fingerprint = {_video_fingerprint(video): video for video in videos}
+        results: dict[str, Path | BaseException] = {}
+        claimed: set[str] = set()
+        for job, context in zip(jobs, contexts):
+            target = Path(job.output_path)
+            if target.is_file() and _valid_mp4(target):
+                results[job.job_id] = target
+                continue
+            video = by_fingerprint.get(job.result_fingerprint) if job.result_fingerprint else None
+            if video is None and 0 <= job.submission_index < len(videos):
+                video = videos[job.submission_index]
+            if video is None:
+                results[job.job_id] = MuseVideoDownloadError(
+                    "Không ghép được video đã tạo với đúng ảnh trong nhóm cũ."
+                )
+                continue
+            fingerprint = _video_fingerprint(video)
+            if fingerprint in claimed:
+                results[job.job_id] = MuseVideoDownloadError(
+                    "Muse trả về video trùng cho hai ảnh; tool từ chối lưu sai file."
+                )
+                continue
+            claimed.add(fingerprint)
+            context.transition(
+                MuseVideoJobState.DOWNLOADING,
+                progress=90,
+                result_fingerprint=fingerprint,
+                download_attempts=job.download_attempts + 1,
+            )
+            try:
+                results[job.job_id] = self._download(driver, video, target, context)
+            except (MuseVideoStopped, MuseVideoLoginRequired, MuseVideoQuotaExhausted, MuseVideoDriverError):
+                raise
+            except BaseException as exc:
+                results[job.job_id] = exc
+        return results
+
+    def _wait_for_distinct_videos(
+        self,
+        driver: Any,
+        *,
+        expected: int,
+        baseline: set[str],
+        context: MuseVideoRunContext,
+    ) -> list[Any]:
+        transient_retries = 0
+
+        def find_results():
+            nonlocal transient_retries
+            self._check(driver, context)
+            body = " ".join(_text(item) for item in _find(driver, "tag name", "body")).casefold()
+            if any(marker in body for marker in QUOTA_MARKERS):
+                raise MuseVideoQuotaExhausted(
+                    "Tài khoản Muse đã chạm quota/rate limit; ảnh chưa gửi được giữ nguyên."
+                )
+            if any(marker in body for marker in TRANSIENT_NETWORK_MARKERS):
+                if transient_retries >= context.retry_limit:
+                    raise MuseVideoBatchError("Muse liên tục báo lỗi mạng sau số lần retry giới hạn.")
+                delay = context.backoff_base * (2 ** transient_retries)
+                transient_retries += 1
+                if self._wait_stop(context, delay):
+                    raise MuseVideoStopped("Đã dừng worker Muse.")
+                return False
+            values: list[Any] = []
+            seen: set[str] = set()
+            for video in self._videos(driver):
+                fingerprint = _video_fingerprint(video)
+                if fingerprint in baseline or fingerprint in seen or not self._video_ready(driver, video):
+                    continue
+                seen.add(fingerprint)
+                values.append(video)
+            return values[:expected] if len(values) >= expected else False
+
+        return list(
+            self._wait(
+                driver,
+                find_results,
+                self.timeout,
+                context,
+                f"Muse chưa trả về đủ {expected} video mới; lượt đã gửi sẽ không tự gửi lại.",
+            )
+        )
 
     def retry_download(self, driver: Any, job: MuseVideoJob, context: MuseVideoRunContext) -> Path:
         if not (job.submitted or job.submission_attempted):
@@ -488,7 +659,6 @@ class MuseVideoAutomation:
         return downloaded
 
     def _navigate_new_task(self, driver: Any, context: MuseVideoRunContext) -> None:
-        self._retry_network(lambda: driver.get(self.start_url), context)
         self._check(driver, context)
 
         def composer_ready():
@@ -497,8 +667,14 @@ class MuseVideoAutomation:
             has_upload = bool(self._elements(driver, self.selectors.upload_inputs))
             return has_prompt and has_upload
 
+        if composer_ready():
+            return
+        self._click_selector(driver, self.selectors.new_task)
         if not composer_ready():
-            self._click_selector(driver, self.selectors.new_task)
+            self._retry_network(lambda: driver.get(self.start_url), context)
+            self._check(driver, context)
+            if not composer_ready():
+                self._click_selector(driver, self.selectors.new_task)
         self._wait(
             driver,
             composer_ready,
@@ -590,17 +766,22 @@ class MuseVideoAutomation:
         try:
             clicked = bool(
                 driver.execute_script(
-                    "const v=arguments[0];let n=v;"
-                    "while(n&&n!==document.body){const b=n.querySelector&&n.querySelector("
-                    "\"button[aria-label*='download' i],[data-testid*='download' i]\");"
-                    "if(b){b.click();return true;}n=n.parentElement;}return false;",
+                    "const v=arguments[0],sel=\"button[aria-label*='download' i],"
+                    "[data-testid*='download' i],[role='button'][aria-label*='download' i],a[download]\";"
+                    "const vr=v.getBoundingClientRect();let n=v.parentElement,depth=0;"
+                    "while(n&&n!==document.body&&depth++<8){"
+                    "const bs=[...n.querySelectorAll(sel)].filter(b=>b.offsetParent!==null);"
+                    "if(bs.length){bs.sort((a,b)=>{const ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();"
+                    "const ad=Math.abs((ar.top+ar.bottom)/2-(vr.top+vr.bottom)/2)+"
+                    "Math.abs((ar.left+ar.right)/2-(vr.left+vr.right)/2);"
+                    "const bd=Math.abs((br.top+br.bottom)/2-(vr.top+vr.bottom)/2)+"
+                    "Math.abs((br.left+br.right)/2-(vr.left+vr.right)/2);return ad-bd;});"
+                    "bs[0].click();return true;}n=n.parentElement;}return false;",
                     video,
                 )
             )
         except Exception:
             clicked = False
-        if not clicked:
-            clicked = self._click_selector(driver, self.selectors.download_buttons, reverse=True)
         if not clicked:
             try:
                 driver.execute_script(
@@ -1113,74 +1294,119 @@ class MuseVideoBatchManager:
                 worker.error = ""
                 self._log_locked(worker, "Worker bắt đầu/tiếp tục hàng đợi.")
                 self._persist_locked()
-            for job_id in list(worker.queue):
+            while True:
                 if worker.stop_event.is_set():
                     break
                 with self._state_lock:
-                    job = self.jobs.get(job_id)
-                    if job is None or job.state in {
-                        MuseVideoJobState.COMPLETED,
-                        MuseVideoJobState.QUOTA_EXHAUSTED,
-                    }:
-                        continue
-                    # FAILED requires the explicit retry_failed action. Resume never
-                    # converts failures (and especially quota failures) implicitly.
-                    if job.state == MuseVideoJobState.FAILED:
-                        continue
-                    if job.state == MuseVideoJobState.LOGIN_REQUIRED:
-                        job.state = MuseVideoJobState.PAUSED
+                    candidates = [
+                        self.jobs[job_id]
+                        for job_id in worker.queue
+                        if job_id in self.jobs
+                        and self.jobs[job_id].state
+                        not in {
+                            MuseVideoJobState.COMPLETED,
+                            MuseVideoJobState.QUOTA_EXHAUSTED,
+                            MuseVideoJobState.FAILED,
+                        }
+                    ]
+                    if not candidates:
+                        break
+                    first = candidates[0]
+                    if first.state == MuseVideoJobState.LOGIN_REQUIRED:
+                        first.state = MuseVideoJobState.PAUSED
                     if (
-                        (job.submitted or job.submission_attempted)
-                        and job.account_id
-                        and job.account_id != session.account_id
+                        (first.submitted or first.submission_attempted)
+                        and first.account_id
+                        and first.account_id != session.account_id
                     ):
-                        job.state = MuseVideoJobState.FAILED
-                        job.error = (
+                        first.state = MuseVideoJobState.FAILED
+                        first.error = (
                             "Job đã gửi thuộc tài khoản khác; tool từ chối gửi lại hoặc khôi phục bằng profile hiện tại."
                         )
                         worker.state = MuseVideoWorkerState.FAILED
-                        worker.error = job.error
-                        self._log_locked(worker, job.error)
+                        worker.error = first.error
+                        self._log_locked(worker, first.error)
                         self._persist_locked()
                         continue
-                    worker.current_job_id = job_id
+                    if first.submitted or first.submission_attempted:
+                        if first.submission_group_id:
+                            jobs = [
+                                candidate
+                                for candidate in candidates
+                                if candidate.submission_group_id == first.submission_group_id
+                            ]
+                        else:
+                            jobs = [first]
+                    else:
+                        jobs = []
+                        for candidate in candidates:
+                            if candidate.submitted or candidate.submission_attempted:
+                                break
+                            if candidate.state == MuseVideoJobState.LOGIN_REQUIRED:
+                                candidate.state = MuseVideoJobState.PAUSED
+                            jobs.append(candidate)
+                            if len(jobs) >= MUSE_IMAGES_PER_REQUEST:
+                                break
+                    worker.current_job_id = jobs[0].job_id
                     worker.progress = 0
-                    job.attempts += 1
-                    if not job.started_at:
-                        job.started_at = _utc_now()
-                    self._log_locked(worker, f"Đang xử lý {Path(job.source_path).name}")
+                    for job in jobs:
+                        job.attempts += 1
+                        if not job.started_at:
+                            job.started_at = _utc_now()
+                    names = ", ".join(Path(job.source_path).name for job in jobs)
+                    self._log_locked(worker, f"Đang xử lý lượt {len(jobs)} ảnh: {names}")
                     self._persist_locked()
-                context = MuseVideoRunContext(
-                    worker_id=worker.worker_id,
-                    download_dir=worker.download_dir,
-                    stopped=worker.stop_event.is_set,
-                    transition=lambda state, _job_id=job_id, **changes: self._transition(
-                        worker.worker_id, _job_id, state, **changes
-                    ),
-                    log=lambda message, _worker=worker: self._log(_worker, message),
-                    retry_limit=self.retry_limit,
-                    backoff_base=self.backoff_base,
-                )
+                contexts = [
+                    MuseVideoRunContext(
+                        worker_id=worker.worker_id,
+                        download_dir=worker.download_dir,
+                        stopped=worker.stop_event.is_set,
+                        transition=lambda state, _job_id=job.job_id, **changes: self._transition(
+                            worker.worker_id, _job_id, state, **changes
+                        ),
+                        log=lambda message, _worker=worker: self._log(_worker, message),
+                        retry_limit=self.retry_limit,
+                        backoff_base=self.backoff_base,
+                    )
+                    for job in jobs
+                ]
+
+                def run_group() -> dict[str, Path | BaseException]:
+                    if jobs[0].submitted or jobs[0].submission_attempted:
+                        recover_batch = getattr(self.automation, "recover_batch", None)
+                        if jobs[0].submission_group_id and callable(recover_batch):
+                            return recover_batch(session.driver, jobs, contexts)
+                        values: dict[str, Path | BaseException] = {}
+                        for job, context in zip(jobs, contexts):
+                            values[job.job_id] = self.automation.process(session.driver, job, context)
+                        return values
+                    process_batch = getattr(self.automation, "process_batch", None)
+                    if callable(process_batch):
+                        return process_batch(session.driver, jobs, contexts)
+                    values: dict[str, Path | BaseException] = {}
+                    for job, context in zip(jobs, contexts):
+                        values[job.job_id] = self.automation.process(session.driver, job, context)
+                    return values
+
                 try:
-                    output = await self.session_manager._loop.run_in_executor(
+                    results = await self.session_manager._loop.run_in_executor(
                         session.executor,
-                        self.automation.process,
-                        session.driver,
-                        job,
-                        context,
+                        run_group,
                     )
                 except MuseVideoStopped:
                     with self._state_lock:
-                        if job.state != MuseVideoJobState.COMPLETED:
-                            job.state = MuseVideoJobState.PAUSED
+                        for job in jobs:
+                            if job.state != MuseVideoJobState.COMPLETED:
+                                job.state = MuseVideoJobState.PAUSED
                         worker.state = MuseVideoWorkerState.PAUSED
                         self._log_locked(worker, "Worker đã dừng; dữ liệu và hàng đợi được giữ nguyên.")
                         self._persist_locked()
                     break
                 except MuseVideoLoginRequired as exc:
                     with self._state_lock:
-                        job.state = MuseVideoJobState.LOGIN_REQUIRED
-                        job.error = str(exc)
+                        for job in jobs:
+                            job.state = MuseVideoJobState.LOGIN_REQUIRED
+                            job.error = str(exc)
                         worker.state = MuseVideoWorkerState.LOGIN_REQUIRED
                         worker.error = str(exc)
                         self.session_manager._set_state(
@@ -1193,8 +1419,9 @@ class MuseVideoBatchManager:
                     break
                 except MuseVideoQuotaExhausted as exc:
                     with self._state_lock:
-                        job.state = MuseVideoJobState.QUOTA_EXHAUSTED
-                        job.error = str(exc)
+                        for job in jobs:
+                            job.state = MuseVideoJobState.QUOTA_EXHAUSTED
+                            job.error = str(exc)
                         worker.state = MuseVideoWorkerState.QUOTA_EXHAUSTED
                         worker.error = str(exc)
                         self._log_locked(worker, "Quota/rate limit: không chuyển job sang tài khoản khác.")
@@ -1202,8 +1429,9 @@ class MuseVideoBatchManager:
                     break
                 except MuseVideoDriverError as exc:
                     with self._state_lock:
-                        job.state = MuseVideoJobState.FAILED
-                        job.error = str(exc)
+                        for job in jobs:
+                            job.state = MuseVideoJobState.FAILED
+                            job.error = str(exc)
                         worker.state = MuseVideoWorkerState.FAILED
                         worker.error = str(exc)
                         self.session_manager._set_state(
@@ -1220,20 +1448,32 @@ class MuseVideoBatchManager:
                         "Muse/Chrome không phản hồi; không có cookie hoặc token nào được ghi log."
                     )
                     with self._state_lock:
-                        job.state = MuseVideoJobState.FAILED
-                        job.error = message
+                        for job in jobs:
+                            job.state = MuseVideoJobState.FAILED
+                            job.error = message
                         worker.error = message
-                        self._log_locked(worker, f"Lỗi {Path(job.source_path).name}: {message}")
+                        self._log_locked(worker, f"Lỗi lượt {len(jobs)} ảnh: {message}")
                         self._persist_locked()
                     continue
                 else:
                     with self._state_lock:
-                        job.output_path = str(output)
-                        job.state = MuseVideoJobState.COMPLETED
-                        job.completed_at = _utc_now()
-                        job.error = ""
+                        for job in jobs:
+                            result = results.get(job.job_id)
+                            if isinstance(result, BaseException) or result is None:
+                                message = str(result) if isinstance(result, MuseVideoBatchError) else (
+                                    "Muse/Chrome không phản hồi khi tải video; có thể chạy lại bước download."
+                                )
+                                job.state = MuseVideoJobState.FAILED
+                                job.error = message
+                                worker.error = message
+                                self._log_locked(worker, f"Lỗi {Path(job.source_path).name}: {message}")
+                                continue
+                            job.output_path = str(result)
+                            job.state = MuseVideoJobState.COMPLETED
+                            job.completed_at = _utc_now()
+                            job.error = ""
+                            self._log_locked(worker, f"Hoàn tất {Path(job.source_path).name}")
                         worker.progress = 100
-                        self._log_locked(worker, f"Hoàn tất {Path(job.source_path).name}")
                         self._persist_locked()
             with self._state_lock:
                 worker.current_job_id = ""

@@ -12,6 +12,7 @@ from unittest.mock import patch
 from auth.muse_login import CLICKABLE_SELECTOR, MUSE_APP_SELECTORS, MuseAccountStore
 from auth.muse_sessions import MuseSessionManager, MuseSessionState
 from auth.muse_video_batch import (
+    MUSE_IMAGES_PER_REQUEST,
     MuseVideoBatchError,
     MuseVideoBatchManager,
     MuseVideoAutomation,
@@ -150,6 +151,43 @@ class FakeVideoAutomation:
         return target
 
 
+class GroupedFakeVideoAutomation(FakeVideoAutomation):
+    def __init__(self) -> None:
+        super().__init__()
+        self.group_sizes: dict[int, list[int]] = {index: [] for index in range(1, 4)}
+
+    def process_batch(self, driver, jobs, contexts):
+        worker_id = contexts[0].worker_id
+        self.group_sizes[worker_id].append(len(jobs))
+        self.drivers[worker_id] = driver
+        self.started[worker_id].set()
+        results = {}
+        for job, context in zip(jobs, contexts):
+            self.calls[job.job_id] += 1
+            self.prompts.append(job.prompt)
+            self.settings.append(job.settings)
+            context.transition(MuseVideoJobState.SUBMITTING, progress=20, submission_attempted=True)
+        self.generate_calls[jobs[0].job_id] += 1
+        for index, (job, context) in enumerate(zip(jobs, contexts), start=1):
+            context.transition(
+                MuseVideoJobState.SUBMITTED,
+                progress=25,
+                submitted=True,
+                submitted_at="submitted",
+            )
+            context.transition(
+                MuseVideoJobState.DOWNLOADING,
+                progress=90,
+                result_fingerprint=f"video-{worker_id}-{index}",
+                download_attempts=job.download_attempts + 1,
+            )
+            target = Path(job.output_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"\x00\x00\x00\x18ftypmp42grouped-video")
+            results[job.job_id] = target
+        return results
+
+
 class AutomationElement:
     def __init__(self, element_id: str, *, text: str = "", tag_name: str = "div", attrs=None, click=None, send=None):
         self.id = element_id
@@ -187,12 +225,15 @@ class AutomationDriver:
         self.current_url = "https://muse.ai/create"
         self.download_dir = download_dir
         self.selectors = MuseVideoSelectors()
-        self.preview = None
+        self.previews = []
         self.old_video = AutomationElement("old-video", tag_name="video", attrs={"src": "https://example/old.mp4"})
-        self.new_video = None
+        self.new_videos = []
         self.uploaded = ""
+        self.uploaded_paths = []
         self.generate_clicks = 0
         self.downloaded_video_id = ""
+        self.downloaded_video_ids = []
+        self.get_calls = 0
         self.body = AutomationElement("body")
         self.upload = AutomationElement(
             "upload",
@@ -204,19 +245,26 @@ class AutomationDriver:
         self.generate = AutomationElement("generate", text="Generate", tag_name="button", click=self._generated)
 
     def get(self, _url):
-        pass
+        self.get_calls += 1
 
     def _uploaded(self, value):
         self.uploaded = str(value)
-        self.preview = AutomationElement("preview", tag_name="img", attrs={"src": "blob:new-preview"})
+        self.uploaded_paths.append(str(value))
+        index = len(self.previews) + 1
+        self.previews.append(
+            AutomationElement(f"preview-{index}", tag_name="img", attrs={"src": f"blob:new-preview-{index}"})
+        )
 
     def _generated(self):
         self.generate_clicks += 1
-        self.new_video = AutomationElement(
-            "new-video",
-            tag_name="video",
-            attrs={"src": "https://example/new.mp4"},
-        )
+        self.new_videos = [
+            AutomationElement(
+                f"new-video-{index}",
+                tag_name="video",
+                attrs={"src": f"https://example/new-{index}.mp4"},
+            )
+            for index in range(1, len(self.previews) + 1)
+        ]
 
     def find_elements(self, by, selector):
         if by == "tag name" and selector == "body":
@@ -226,13 +274,13 @@ class AutomationDriver:
         if selector in self.selectors.upload_inputs:
             return [self.upload]
         if selector in self.selectors.previews:
-            return [self.preview] if self.preview else []
+            return list(self.previews)
         if selector in self.selectors.prompt_inputs:
             return [self.prompt]
         if selector in self.selectors.generate_buttons:
             return [self.generate]
         if selector in self.selectors.video_results:
-            return [self.old_video] + ([self.new_video] if self.new_video else [])
+            return [self.old_video, *self.new_videos]
         if selector in self.selectors.processing:
             return []
         return []
@@ -240,8 +288,11 @@ class AutomationDriver:
     def execute_script(self, script, video):
         if "querySelector" in script and "download" in script:
             self.downloaded_video_id = video.id
+            self.downloaded_video_ids.append(video.id)
             self.download_dir.mkdir(parents=True, exist_ok=True)
-            (self.download_dir / "download.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42video")
+            (self.download_dir / f"download-{video.id}.mp4").write_bytes(
+                b"\x00\x00\x00\x18ftypmp42" + video.id.encode()
+            )
             return True
         return True
 
@@ -295,11 +346,86 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertEqual(driver.uploaded, str(source.resolve()))
             self.assertEqual(driver.prompt.value, "make a cinematic video")
             self.assertEqual(driver.generate_clicks, 1)
-            self.assertEqual(driver.downloaded_video_id, "new-video")
+            self.assertEqual(driver.downloaded_video_id, "new-video-1")
             self.assertEqual(result, target)
             self.assertTrue(target.is_file())
             self.assertIn(MuseVideoJobState.SUBMITTED, transitions)
             self.assertIn(MuseVideoJobState.DOWNLOADING, transitions)
+
+    def test_submits_three_images_once_and_downloads_three_distinct_videos_in_order(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            download_dir = root / "downloads"
+            driver = AutomationDriver(download_dir)
+            jobs = []
+            contexts = []
+            for index in range(1, MUSE_IMAGES_PER_REQUEST + 1):
+                source = root / f"source-{index}.png"
+                source.write_bytes(f"image-{index}".encode())
+                job = MuseVideoJob(
+                    job_id=f"job-{index}",
+                    source_path=str(source),
+                    worker_id=1,
+                    account_id="account-1",
+                    email="owner@example.com",
+                    prompt="one shared prompt",
+                    settings=MuseVideoSettings(),
+                    output_path=str(root / "output" / f"result-{index}.mp4"),
+                )
+                jobs.append(job)
+
+                def transition(state, _job=job, **changes):
+                    _job.state = state
+                    for key, value in changes.items():
+                        if hasattr(_job, key):
+                            setattr(_job, key, value)
+
+                contexts.append(
+                    MuseVideoRunContext(
+                        worker_id=1,
+                        download_dir=download_dir,
+                        stopped=lambda: False,
+                        transition=transition,
+                        log=lambda _message: None,
+                        retry_limit=1,
+                        backoff_base=0,
+                    )
+                )
+            automation = MuseVideoAutomation(
+                poll_interval=0.01,
+                timeout=1,
+                upload_timeout=1,
+                download_timeout=1,
+            )
+
+            results = automation.process_batch(driver, jobs, contexts)
+
+            self.assertEqual(driver.get_calls, 0)
+            self.assertEqual(driver.generate_clicks, 1)
+            self.assertEqual(driver.uploaded_paths, [str(Path(job.source_path).resolve()) for job in jobs])
+            self.assertEqual(
+                driver.downloaded_video_ids,
+                ["new-video-1", "new-video-2", "new-video-3"],
+            )
+            self.assertEqual(set(results), {job.job_id for job in jobs})
+            self.assertTrue(all(Path(result).is_file() for result in results.values()))
+            self.assertEqual(len({Path(result).read_bytes() for result in results.values()}), 3)
+            self.assertEqual(len({job.result_fingerprint for job in jobs}), 3)
+            self.assertEqual(len({job.submission_group_id for job in jobs}), 1)
+            self.assertEqual([job.submission_index for job in jobs], [0, 1, 2])
+
+            for result in results.values():
+                Path(result).unlink()
+            driver.downloaded_video_ids.clear()
+            recovered = automation.recover_batch(driver, jobs, contexts)
+
+            self.assertEqual(driver.generate_clicks, 1)
+            self.assertEqual(
+                driver.downloaded_video_ids,
+                ["new-video-1", "new-video-2", "new-video-3"],
+            )
+            self.assertTrue(all(Path(result).is_file() for result in recovered.values()))
+            self.assertEqual(len({Path(result).read_bytes() for result in recovered.values()}), 3)
 
     def test_send_selector_does_not_click_other_submit_buttons(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -451,6 +577,17 @@ class MuseVideoBatchManagerTests(unittest.TestCase):
         self.assertTrue(all(value == 1 for value in self.automation.generate_calls.values()))
         self.assertEqual(len(list(self.output.glob("*.mp4"))), 10)
         self.assertEqual(sum(job.state == MuseVideoJobState.COMPLETED for job in self.batch.snapshot().jobs), 10)
+
+    def test_manager_groups_three_images_per_prompt_without_reloading_between_jobs(self):
+        self.batch.shutdown(timeout=2)
+        grouped = GroupedFakeVideoAutomation()
+        self.batch = self._batch(grouped)
+
+        self._start(self._images(12)).result(timeout=3)
+
+        self.assertEqual(grouped.group_sizes, {1: [3, 1], 2: [3, 1], 3: [3, 1]})
+        self.assertEqual(sum(grouped.generate_calls.values()), 6)
+        self.assertEqual(len(list(self.output.glob("*.mp4"))), 12)
 
     def test_one_worker_failure_does_not_stop_other_workers(self):
         self.automation.scenarios[2] = "fail"

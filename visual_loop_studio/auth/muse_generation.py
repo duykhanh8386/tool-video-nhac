@@ -336,7 +336,15 @@ def _click_by_text(driver: Any, texts: tuple[str, ...], *, reverse: bool = False
 
 
 def _video_fingerprint(element: Any) -> str:
-    raw = "|".join((_attr(element, "src"), _attr(element, "currentSrc"), str(getattr(element, "id", ""))))
+    media_values = (
+        _attr(element, "src"),
+        _attr(element, "currentSrc"),
+        _attr(element, "poster"),
+    )
+    stable_media = "|".join(value for value in media_values if value)
+    # WebElement ids change whenever the DOM reloads, so use one only when Muse
+    # has not exposed any media URL yet. Persisted baselines must survive reload.
+    raw = stable_media or str(getattr(element, "id", ""))
     return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
 
 
