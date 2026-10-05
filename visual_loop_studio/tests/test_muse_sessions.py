@@ -5,12 +5,13 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 from auth.muse_login import (
+    ACCOUNT_SELECTOR,
     CLICKABLE_SELECTOR,
     GOOGLE_ENTER_KEY,
-    GOOGLE_MUSE_LOGIN_URL,
     GOOGLE_PASSWORD_SELECTORS,
     MUSE_APP_SELECTORS,
     MUSE_CONTINUE_TEXT,
@@ -18,6 +19,7 @@ from auth.muse_login import (
     MUSE_PASSWORD_SELECTORS,
     MUSE_SECURITY_SELECTORS,
     MuseAccountStore,
+    google_muse_login_url,
 )
 from auth.muse_sessions import (
     GENERATION_SELECTORS,
@@ -96,6 +98,7 @@ class FakeDriver:
         muse_identifier_login: bool = False,
         muse_security_code: bool = False,
         waitlist: bool = False,
+        unverified_manage_account: bool = False,
     ) -> None:
         self.profile = Path(profile)
         self.response = response
@@ -106,7 +109,9 @@ class FakeDriver:
         self.muse_identifier_login = muse_identifier_login
         self.muse_security_code = muse_security_code
         self.waitlist = waitlist
-        self.google_authenticated = False
+        self.unverified_manage_account = unverified_manage_account
+        self.google_authenticated = not login_required
+        self.google_email = ""
         self.muse_stage = ""
         self.closed = False
         self.quit_called = False
@@ -178,11 +183,16 @@ class FakeDriver:
         url = str(_url)
         self.requested_urls.append(url)
         if url.startswith("https://accounts.google.com/"):
-            self._current_url = (
-                "https://accounts.google.com/ManageAccount"
-                if self.google_authenticated
-                else "https://accounts.google.com/signin/v2/challenge/pwd"
-            )
+            if "Email=" in url:
+                self.google_email = parse_qs(urlparse(url).query).get("Email", [""])[0]
+            if self.unverified_manage_account:
+                self._current_url = "https://accounts.google.com/ManageAccount"
+            else:
+                self._current_url = (
+                    "https://accounts.google.com/ManageAccount"
+                    if self.google_authenticated
+                    else "https://accounts.google.com/signin/v2/challenge/pwd"
+                )
         elif url.startswith("https://muse.ai/"):
             if self.waitlist:
                 self._current_url = "https://muse.ai/access"
@@ -215,6 +225,12 @@ class FakeDriver:
                     return [self.login_button]
                 if self.muse_stage == "identifier":
                     return [self.continue_button]
+            return []
+        if by == "css selector" and selector == ACCOUNT_SELECTOR:
+            if self._current_url.startswith("https://accounts.google.com/") and self.google_email:
+                if self.unverified_manage_account:
+                    return [FakeElement("other@example.com", attrs={"data-email": "other@example.com"})]
+                return [FakeElement(self.google_email, attrs={"data-email": self.google_email})]
             return []
         if by == "css selector" and selector in MUSE_APP_SELECTORS:
             return [FakeElement("Muse", element_id="app")] if self.logged_in else []
@@ -250,7 +266,9 @@ class FakeDriver:
         if by == "css selector" and selector in GENERATION_SELECTORS:
             return []
         if by == "tag name" and selector == "body":
-            if self.waitlist:
+            if self._current_url.startswith("https://accounts.google.com/"):
+                self.body.text = "other@example.com" if self.unverified_manage_account else self.google_email
+            elif self.waitlist:
                 self.body.text = "You're on the waitlist. Muse isn't available in your country or region yet."
             else:
                 self.body.text = "rate limit reached" if self.quota else ""
@@ -288,9 +306,13 @@ class FakeDriver:
             )
 
     def complete_login(self):
-        self.logged_in = True
-        self.muse_stage = ""
-        self._current_url = "https://muse.ai/chat"
+        if self._current_url.startswith("https://accounts.google.com/"):
+            self.google_authenticated = True
+            self._current_url = "https://accounts.google.com/ManageAccount"
+        else:
+            self.logged_in = True
+            self.muse_stage = ""
+            self._current_url = "https://muse.ai/chat"
 
     def quit(self):
         self._record_thread()
@@ -416,8 +438,11 @@ class MuseSessionManagerTests(unittest.TestCase):
         ).result(timeout=2)
 
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
-        self.assertEqual(self.drivers[1].requested_urls[0], GOOGLE_MUSE_LOGIN_URL)
-        self.assertIn("accounts.google.com%2FManageAccount", GOOGLE_MUSE_LOGIN_URL)
+        expected_login_url = google_muse_login_url("owner@example.com")
+        self.assertEqual(self.drivers[1].requested_urls[0], expected_login_url)
+        self.assertIn("/AddSession?", expected_login_url)
+        self.assertIn("Email=owner%40example.com", expected_login_url)
+        self.assertIn("accounts.google.com%2FManageAccount", expected_login_url)
         self.assertEqual(self.drivers[1].password.value, secret + GOOGLE_ENTER_KEY)
         checkpoint = (self.root / "data" / "muse_sessions.json").read_text(encoding="utf-8")
         self.assertNotIn(secret, checkpoint)
@@ -438,6 +463,19 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertEqual(self.drivers[1].continue_button.text, MUSE_CONTINUE_TEXT[0].title())
         self.assertEqual(self.drivers[1].password.value, secret + GOOGLE_ENTER_KEY)
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
+
+    def test_unverified_google_manage_account_never_opens_muse(self):
+        self.driver_options[1] = {"unverified_manage_account": True}
+
+        future = self.manager.open_session(1, "owner@example.com")
+        self._wait_state(1, MuseSessionState.LOGIN_REQUIRED)
+
+        driver = self.drivers[1]
+        self.assertTrue(self.manager.snapshot(1).driver_open)
+        self.assertFalse(any(url.startswith("https://muse.ai/") for url in driver.requested_urls))
+        self.assertIn("owner@example.com", self.manager.snapshot(1).status_message)
+        self.manager.stop_session(1)
+        future.result(timeout=2)
 
     def test_open_all_sessions_logs_in_three_profiles_concurrently(self):
         self.login_barrier = threading.Barrier(3)

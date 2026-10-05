@@ -12,7 +12,6 @@ from typing import Any, Callable
 
 from auth.muse_login import (
     GOOGLE_CONTINUE_TEXT,
-    GOOGLE_MUSE_LOGIN_URL,
     MUSE_ALLOWED_HOSTS,
     MUSE_CONTINUE_TEXT,
     MUSE_GOOGLE_TEXT,
@@ -30,6 +29,7 @@ from auth.muse_login import (
     _safe_url,
     _utc_now,
     create_muse_chrome_driver,
+    google_muse_login_url,
     validate_muse_start_url,
 )
 from utils.config import read_json, write_json
@@ -173,6 +173,7 @@ class MuseSession:
     profile_acquired: bool = False
     owned_handles: set[str] = field(default_factory=set)
     known_handles: set[str] = field(default_factory=set)
+    google_verified_email: str = ""
     executor: ThreadPoolExecutor = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -630,12 +631,15 @@ class MuseSessionManager:
                     "Không thể mở Chrome profile Muse riêng; hãy đóng cửa sổ đang dùng cùng profile rồi thử lại."
                 ) from None
         helper = MuseLoginService(start_url=self.start_url, store=self.account_store)
-        if not (
+        target_google_url = google_muse_login_url(session.email)
+        if session.google_verified_email.casefold() != session.email.casefold():
+            self._navigate_with_retry(session, target_google_url)
+        elif not (
             _hostname(_safe_url(session.driver)) == "muse.ai"
             and not helper._is_muse_waitlist(session.driver)
             and helper._is_muse_logged_in(session.driver)
         ):
-            self._navigate_with_retry(session, GOOGLE_MUSE_LOGIN_URL)
+            self._navigate_with_retry(session, self.start_url)
         actions: set[tuple[str, str]] = set()
         manual_mode = False
         idle_polls = 0
@@ -668,13 +672,25 @@ class MuseSessionManager:
                             "Đã xóa trạng thái waitlist cũ của riêng Muse; đang đăng nhập lại Google một lần…"
                         ),
                     )
-                    self._navigate_with_retry(session, GOOGLE_MUSE_LOGIN_URL)
+                    if session.google_verified_email.casefold() == session.email.casefold():
+                        self._navigate_with_retry(session, self.start_url)
+                    else:
+                        self._navigate_with_retry(session, target_google_url)
                     return False
                 raise MuseSessionError(
                     "Tài khoản này đang ở waitlist hoặc Muse chưa hỗ trợ khu vực của tài khoản. "
                     "Tool không thể vượt giới hạn quyền truy cập; hãy dùng tài khoản đã được Muse cấp quyền."
                 )
             if host == "muse.ai" and helper._is_muse_logged_in(driver):
+                if session.google_verified_email.casefold() != session.email.casefold():
+                    self._set_state(
+                        session,
+                        MuseSessionState.OPENING,
+                        progress=15,
+                        status_message=f"Chưa xác minh Google {session.email}; đang mở bước đăng nhập Google…",
+                    )
+                    self._navigate_with_retry(session, target_google_url)
+                    return False
                 self._set_state(
                     session,
                     MuseSessionState.READY,
@@ -769,15 +785,28 @@ class MuseSessionManager:
                         )
             elif host == "accounts.google.com":
                 if "/manageaccount" in url.casefold():
-                    manual_mode = False
-                    idle_polls = 0
-                    self._set_state(
-                        session,
-                        MuseSessionState.OPENING,
-                        progress=45,
-                        status_message="Google đã đăng nhập; đang mở Muse…",
-                    )
-                    self._navigate_with_retry(session, self.start_url)
+                    if helper._google_page_has_email(driver, session.email):
+                        session.google_verified_email = session.email
+                        manual_mode = False
+                        idle_polls = 0
+                        self._set_state(
+                            session,
+                            MuseSessionState.OPENING,
+                            progress=45,
+                            status_message=f"Đã xác minh đúng Google {session.email}; đang mở Muse…",
+                        )
+                        self._navigate_with_retry(session, self.start_url)
+                    else:
+                        idle_polls += 1
+                        if idle_polls >= 4:
+                            manual_mode = True
+                            self._login_required(
+                                session,
+                                message=(
+                                    f"Google đang mở nhưng chưa xác nhận đúng tài khoản {session.email}. "
+                                    "Hãy đăng nhập/chọn đúng email này trong Chrome; tool chưa mở Muse."
+                                ),
+                            )
                     return False
                 password_key = (url, "google_password")
                 password_submitted = password_key in actions
@@ -1100,6 +1129,7 @@ class MuseSessionManager:
                 pass
         session.driver = None
         session.driver_open = False
+        session.google_verified_email = ""
         session.owned_handles.clear()
         session.known_handles.clear()
         if session.profile_acquired:
@@ -1133,6 +1163,8 @@ class MuseSessionManager:
     def _bind_account(self, session: MuseSession, email: str) -> None:
         account = self.account_store.ensure(email)
         with self._state_lock:
+            if session.email.casefold() != email.casefold():
+                session.google_verified_email = ""
             session.email = email
             session.account_id = account.account_id or hashlib.sha256(email.encode("utf-8")).hexdigest()[:24]
             target_profile = str(session.profile_dir.resolve()).casefold()

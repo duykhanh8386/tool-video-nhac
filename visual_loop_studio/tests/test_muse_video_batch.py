@@ -7,9 +7,10 @@ import time
 import unittest
 from collections import Counter
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
-from auth.muse_login import CLICKABLE_SELECTOR, MUSE_APP_SELECTORS, MuseAccountStore
+from auth.muse_login import ACCOUNT_SELECTOR, CLICKABLE_SELECTOR, MUSE_APP_SELECTORS, MuseAccountStore
 from auth.muse_sessions import MuseSessionManager, MuseSessionState
 from auth.muse_video_batch import (
     MUSE_IMAGES_PER_REQUEST,
@@ -33,8 +34,10 @@ from auth.muse_video_batch import (
 
 
 class ReadyElement:
-    text = "Muse"
-    id = "app"
+    def __init__(self, text="Muse", *, element_id="app", attrs=None):
+        self.text = text
+        self.id = element_id
+        self.attrs = attrs or {}
 
     def is_displayed(self):
         return True
@@ -42,8 +45,8 @@ class ReadyElement:
     def is_enabled(self):
         return True
 
-    def get_attribute(self, _name):
-        return ""
+    def get_attribute(self, name):
+        return self.attrs.get(name, "")
 
 
 class ReadySwitch:
@@ -61,19 +64,32 @@ class ReadyDriver:
         self.switch_to = ReadySwitch()
         self.quit_called = False
         self.thread_ids: set[int] = set()
+        self.google_email = ""
 
     def set_page_load_timeout(self, _seconds):
         self.thread_ids.add(threading.get_ident())
 
     def get(self, _url):
         self.thread_ids.add(threading.get_ident())
+        url = str(_url)
+        if url.startswith("https://accounts.google.com/"):
+            self.google_email = parse_qs(urlparse(url).query).get("Email", [self.google_email])[0]
+            self.current_url = "https://accounts.google.com/ManageAccount"
+        elif url.startswith("https://muse.ai/"):
+            self.current_url = "https://muse.ai/chat"
 
     def find_elements(self, by, selector):
         self.thread_ids.add(threading.get_ident())
         if by == "css selector" and selector == CLICKABLE_SELECTOR:
             return []
+        if by == "css selector" and selector == ACCOUNT_SELECTOR:
+            if self.current_url.startswith("https://accounts.google.com/") and self.google_email:
+                return [ReadyElement(self.google_email, attrs={"data-email": self.google_email})]
+            return []
         if by == "css selector" and selector in MUSE_APP_SELECTORS:
-            return [ReadyElement()]
+            return [ReadyElement()] if self.current_url.startswith("https://muse.ai/") else []
+        if by == "tag name" and selector == "body":
+            return [ReadyElement(self.google_email, element_id="body")]
         return []
 
     def quit(self):

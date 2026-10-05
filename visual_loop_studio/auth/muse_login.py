@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from utils.config import read_json, write_json
 from utils.paths import DATA_DIR, USER_DATA_ROOT
@@ -16,7 +16,7 @@ from utils.paths import DATA_DIR, USER_DATA_ROOT
 
 MUSE_START_URL = "https://muse.ai/"
 GOOGLE_MUSE_LOGIN_URL = (
-    "https://accounts.google.com/AccountChooser?"
+    "https://accounts.google.com/AddSession?"
     "continue=https%3A%2F%2Faccounts.google.com%2FManageAccount&hl=en"
 )
 MUSE_ALLOWED_HOSTS = frozenset({"muse.ai", "auth.muse.ai", "accounts.google.com"})
@@ -71,6 +71,18 @@ MUSE_GOOGLE_TEXT = ("sign in with google", "continue with google", "log in with 
 MUSE_CONTINUE_TEXT = ("continue",)
 GOOGLE_CONTINUE_TEXT = ("continue", "allow")
 EMAIL_PATTERN = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+
+
+def google_muse_login_url(email: str) -> str:
+    """Open Google's add-session flow for one exact Muse profile account."""
+    query = urlencode(
+        {
+            "continue": "https://accounts.google.com/ManageAccount",
+            "hl": "en",
+            "Email": _normalize_email(email),
+        }
+    )
+    return f"https://accounts.google.com/AddSession?{query}"
 
 
 class MuseLoginError(RuntimeError):
@@ -386,6 +398,26 @@ class MuseLoginService:
                 element.click()
                 return True
         return False
+
+    def _google_page_has_email(self, driver: Any, email: str) -> bool:
+        """Check the visible Google page for the configured account without logging it."""
+        if _hostname(_safe_url(driver)) != "accounts.google.com":
+            return False
+        target = _normalize_email(email)
+        if not target:
+            return False
+        values: list[str] = []
+        for element in _find_elements(driver, "css selector", ACCOUNT_SELECTOR):
+            values.extend(
+                (
+                    _element_text(element),
+                    _attribute(element, "data-identifier"),
+                    _attribute(element, "data-email"),
+                    _attribute(element, "aria-label"),
+                )
+            )
+        values.extend(_element_text(element) for element in _find_elements(driver, "tag name", "body"))
+        return any(target in {match.casefold() for match in EMAIL_PATTERN.findall(value or "")} for value in values)
 
     def _requires_manual_google_step(
         self,
