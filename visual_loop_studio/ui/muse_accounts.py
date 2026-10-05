@@ -75,7 +75,6 @@ class _WorkerWidgets:
     stats: QLabel
     error: QLabel
     logs: QPlainTextEdit
-    login: QPushButton
     stop: QPushButton
     retry: QPushButton
 
@@ -102,6 +101,7 @@ class MuseAccountsPage(QWidget):
         )
         self._workers: dict[int, _WorkerWidgets] = {}
         self._futures: list[Future] = []
+        self._pending_batch_start: tuple[Future, str, MuseVideoSettings, str] | None = None
         self._refreshing = False
         self._build_ui()
         self._reload_account_choices()
@@ -129,7 +129,8 @@ class MuseAccountsPage(QWidget):
         root.addWidget(title)
         notice = QLabel(
             "Mỗi tài khoản dùng một Chrome profile/driver riêng. Gmail/mật khẩu chỉ được giữ tạm trong bộ nhớ "
-            "để điền trên accounts.google.com; tool không lưu bí mật và không vượt CAPTCHA, 2FA, quota hoặc rate limit."
+            "để điền trên accounts.google.com khi bấm Bắt đầu cả 3; tool không lưu bí mật và không vượt CAPTCHA, "
+            "2FA, quota hoặc rate limit."
         )
         notice.setWordWrap(True)
         notice.setObjectName("notice")
@@ -246,11 +247,8 @@ class MuseAccountsPage(QWidget):
         password.setEchoMode(QLineEdit.EchoMode.Password)
         password.setClearButtonEnabled(True)
         password.setPlaceholderText("Mật khẩu Google — không lưu, có thể để trống nếu profile còn phiên")
-        login = QPushButton("Mở Chrome đăng nhập Google")
-        login.setMinimumHeight(36)
         stop = QPushButton("Dừng")
         retry = QPushButton("Chạy lại ảnh lỗi")
-        login.clicked.connect(lambda _checked=False, value=worker_id: self._login(value))
         stop.clicked.connect(lambda _checked=False, value=worker_id: self._stop_worker(value))
         retry.clicked.connect(lambda _checked=False, value=worker_id: self._retry_failed(value))
         login_state = QLabel("Chưa đăng nhập")
@@ -259,16 +257,15 @@ class MuseAccountsPage(QWidget):
         profile.setObjectName("muted")
         profile.setWordWrap(True)
         login_help = QLabel(
-            "Mật khẩu chỉ tồn tại tạm trong bộ nhớ và ô này sẽ bị xóa ngay khi bấm đăng nhập. "
-            "CAPTCHA, 2FA, passkey hoặc xác minh thiết bị vẫn phải hoàn tất trực tiếp trong Chrome."
+            "Khi bấm Bắt đầu cả 3, tool sẽ tự mở Chrome, vào Muse, chọn đăng nhập Google rồi điền hai ô trên. "
+            "Mật khẩu bị xóa ngay; CAPTCHA, 2FA hoặc xác minh thiết bị vẫn làm trong Chrome."
         )
         login_help.setObjectName("muted")
         login_help.setWordWrap(True)
         grid.addWidget(QLabel("Email"), 0, 0)
-        grid.addWidget(account, 0, 1)
-        grid.addWidget(login, 0, 2, 2, 1)
+        grid.addWidget(account, 0, 1, 1, 2)
         grid.addWidget(QLabel("Mật khẩu"), 1, 0)
-        grid.addWidget(password, 1, 1)
+        grid.addWidget(password, 1, 1, 1, 2)
         grid.addWidget(QLabel("Đăng nhập"), 2, 0)
         grid.addWidget(login_state, 2, 1, 1, 2)
         grid.addWidget(QLabel("Profile"), 3, 0)
@@ -321,7 +318,6 @@ class MuseAccountsPage(QWidget):
             stats=stats,
             error=error,
             logs=logs,
-            login=login,
             stop=stop,
             retry=retry,
         )
@@ -410,21 +406,51 @@ class MuseAccountsPage(QWidget):
         self.refresh()
 
     def _start_all(self) -> None:
+        credentials: dict[int, tuple[str, str]] = {}
         try:
-            future = self.batch_manager.start_all(
-                self.prompt.toPlainText(),
-                self._video_settings(),
-                self.output_folder.text().strip(),
+            if self._pending_batch_start is not None:
+                raise RuntimeError("Ba phiên Muse đang được mở; hãy chờ hoặc bấm Dừng tất cả.")
+            batch = self.batch_manager.snapshot()
+            if not batch.source_paths:
+                raise ValueError("Hãy chọn và phân bổ ảnh trước khi bắt đầu.")
+            prompt = self.prompt.toPlainText().strip()
+            if not prompt:
+                raise ValueError("Prompt tạo video chung không được để trống.")
+            output_dir = self.output_folder.text().strip()
+            if not output_dir:
+                raise ValueError("Hãy chọn thư mục lưu video đầu ra.")
+            for worker_id, widgets in self._workers.items():
+                credentials[worker_id] = (
+                    widgets.account.currentText().strip(),
+                    widgets.password.text(),
+                )
+            login_future = self.session_manager.open_all_sessions(
+                credentials,
+                force_relogin=False,
             )
-            self._track(future)
-            self.global_status.setText("Ba worker Muse đã bắt đầu đồng thời.")
+            self._pending_batch_start = (
+                login_future,
+                prompt,
+                self._video_settings(),
+                output_dir,
+            )
+            self.global_status.setText(
+                "Đang mở đồng thời 3 Chrome profile, đăng nhập Google/Muse; batch sẽ tự chạy khi cả 3 READY."
+            )
         except Exception as exc:
             QMessageBox.warning(self, "Không thể bắt đầu batch Muse", str(exc))
+        finally:
+            for widgets in self._workers.values():
+                widgets.password.clear()
+            credentials.clear()
 
     def _stop_all(self) -> None:
-        count = self.batch_manager.stop_all()
+        self._pending_batch_start = None
+        batch_count = self.batch_manager.stop_all()
+        session_count = self.session_manager.stop_all()
         self.global_status.setText(
-            f"Đang dừng {count} worker Muse; prompt, tiến độ và kết quả được giữ nguyên. YouTube không bị tác động."
+            f"Đang dừng {session_count} phiên đăng nhập và {batch_count} worker Muse; "
+            "prompt, tiến độ và kết quả được giữ nguyên. YouTube không bị tác động."
         )
 
     def _resume(self) -> None:
@@ -456,25 +482,6 @@ class MuseAccountsPage(QWidget):
         self.image_count.setText("Chưa quét ảnh")
         self.global_status.setText("Đã xóa dữ liệu UI; lịch sử job vẫn được giữ để chống tạo trùng.")
         self.refresh()
-
-    def _login(self, worker_id: int) -> None:
-        widgets = self._workers[worker_id]
-        email = widgets.account.currentText().strip()
-        password = widgets.password.text()
-        try:
-            self._track(
-                self.session_manager.open_session(
-                    worker_id,
-                    email,
-                    password=password,
-                    force_relogin=True,
-                )
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, f"Tài khoản {worker_id}", str(exc))
-        finally:
-            widgets.password.clear()
-            password = ""
 
     def _stop_worker(self, worker_id: int) -> None:
         if self.batch_manager.stop_worker(worker_id):
@@ -515,23 +522,24 @@ class MuseAccountsPage(QWidget):
             batch = self.batch_manager.snapshot()
             for worker in batch.workers:
                 self._render_worker(worker, session_values[worker.worker_id])
-            ready = all(
-                item.state == MuseSessionState.READY and item.driver_open
-                for item in session_values.values()
-            )
+            emails = [widgets.account.currentText().strip().casefold() for widgets in self._workers.values()]
+            accounts_valid = all("@" in email for email in emails) and len(set(emails)) == MUSE_SESSION_COUNT
+            opening = self._pending_batch_start is not None
+            workflow_busy = batch.running or self.session_manager.busy or opening
             self.start_all.setEnabled(
-                ready
+                accounts_valid
                 and bool(batch.source_paths)
                 and bool(self.prompt.toPlainText().strip())
                 and bool(self.output_folder.text().strip())
-                and not batch.running
+                and not workflow_busy
             )
             self._render_start_requirements(session_values, batch)
-            self.stop_all.setEnabled(batch.running)
-            self.resume.setEnabled(bool(batch.jobs) and not batch.running)
-            self.allocate.setEnabled(not batch.running)
-            self.redistribute.setEnabled(bool(batch.jobs) and not batch.running)
-            self.clear.setEnabled(not batch.running)
+            self.stop_all.setEnabled(workflow_busy)
+            self.resume.setEnabled(bool(batch.jobs) and not workflow_busy)
+            self.allocate.setEnabled(not workflow_busy)
+            self.redistribute.setEnabled(bool(batch.jobs) and not workflow_busy)
+            self.clear.setEnabled(not workflow_busy)
+            self._collect_pending_batch_start()
             self._collect_futures()
         finally:
             self._refreshing = False
@@ -543,8 +551,12 @@ class MuseAccountsPage(QWidget):
             if item.state != MuseSessionState.READY or not item.driver_open
         ]
         blockers: list[str] = []
-        if not_ready:
-            blockers.append("đăng nhập Google/Muse cho tài khoản " + ", ".join(not_ready))
+        emails = [widgets.account.currentText().strip().casefold() for widgets in self._workers.values()]
+        invalid_accounts = [str(index) for index, email in enumerate(emails, 1) if "@" not in email]
+        if invalid_accounts:
+            blockers.append("nhập Gmail hợp lệ cho tài khoản " + ", ".join(invalid_accounts))
+        elif len(set(emails)) != MUSE_SESSION_COUNT:
+            blockers.append("ba Gmail phải khác nhau")
         if not batch.source_paths:
             blockers.append("bấm Phân bổ ảnh")
         if not self.prompt.toPlainText().strip():
@@ -553,8 +565,16 @@ class MuseAccountsPage(QWidget):
             blockers.append("chọn thư mục output")
         if blockers:
             message = "Chưa thể bắt đầu: " + "; ".join(blockers) + "."
+        elif self._pending_batch_start is not None or self.session_manager.busy:
+            message = "Đang mở Chrome và đăng nhập Google/Muse cho cả 3 tài khoản."
         elif batch.running:
             message = "Ba worker Muse đang chạy độc lập."
+        elif not_ready:
+            message = (
+                "Sẵn sàng bắt đầu: tool sẽ tự mở và đăng nhập tài khoản "
+                + ", ".join(not_ready)
+                + ", sau đó tự chạy batch."
+            )
         else:
             message = f"Sẵn sàng chạy cả 3 tài khoản với {len(batch.source_paths)} ảnh."
         self.start_requirements.setText(message)
@@ -594,10 +614,6 @@ class MuseAccountsPage(QWidget):
             widgets.logs.setPlainText(logs)
             scrollbar = widgets.logs.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
-        widgets.login.setEnabled(not session.task_running and not worker.task_running)
-        widgets.login.setText(
-            "Đăng nhập lại" if session.state == MuseSessionState.READY else "Mở Chrome đăng nhập Google"
-        )
         widgets.stop.setEnabled(session.task_running or worker.task_running)
         widgets.retry.setEnabled(worker.failed > 0 and not worker.task_running)
         widgets.account.setEnabled(not session.driver_open and not session.task_running and not worker.task_running)
@@ -606,6 +622,20 @@ class MuseAccountsPage(QWidget):
             worker.worker_id - 1,
             f"Tài khoản {worker.worker_id} • {SESSION_LABELS[session.state]}",
         )
+
+    def _collect_pending_batch_start(self) -> None:
+        pending = self._pending_batch_start
+        if pending is None or not pending[0].done():
+            return
+        self._pending_batch_start = None
+        login_future, prompt, settings, output_dir = pending
+        try:
+            login_future.result()
+            self._track(self.batch_manager.start_all(prompt, settings, output_dir))
+            self.global_status.setText("Cả 3 tài khoản đã READY; ba worker video đang chạy đồng thời.")
+        except Exception as exc:
+            self.global_status.setText(f"Không thể bắt đầu batch Muse: {exc}")
+            QMessageBox.warning(self, "Không thể bắt đầu batch Muse", str(exc))
 
     def _collect_futures(self) -> None:
         pending: list[Future] = []

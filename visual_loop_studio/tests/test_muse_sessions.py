@@ -87,12 +87,14 @@ class FakeDriver:
         login_required: bool = False,
         never_respond: bool = False,
         quota: bool = False,
+        login_barrier: threading.Barrier | None = None,
     ) -> None:
         self.profile = Path(profile)
         self.response = response
         self.response_barrier = response_barrier
         self.never_respond = never_respond
         self.quota = quota
+        self.login_barrier = login_barrier
         self.closed = False
         self.quit_called = False
         self.logged_in = not login_required
@@ -167,6 +169,8 @@ class FakeDriver:
 
     def _password_send(self, *values):
         if GOOGLE_ENTER_KEY in {str(value) for value in values}:
+            if self.login_barrier is not None:
+                self.login_barrier.wait(timeout=2)
             self.complete_login()
 
     def _send(self):
@@ -194,6 +198,7 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.drivers: dict[int, FakeDriver] = {}
         self.barrier: threading.Barrier | None = None
+        self.login_barrier: threading.Barrier | None = None
         self.driver_options: dict[int, dict] = {}
         self.manager = self._manager()
 
@@ -210,6 +215,7 @@ class MuseSessionManagerTests(unittest.TestCase):
                 profile,
                 response=f"result-{session_id}",
                 response_barrier=self.barrier,
+                login_barrier=self.login_barrier,
                 **self.driver_options.get(session_id, {}),
             )
             self.drivers[session_id] = driver
@@ -308,6 +314,26 @@ class MuseSessionManagerTests(unittest.TestCase):
         checkpoint = (self.root / "data" / "muse_sessions.json").read_text(encoding="utf-8")
         self.assertNotIn(secret, checkpoint)
         self.assertNotIn(secret, repr(self.manager.snapshot(1)))
+
+    def test_open_all_sessions_logs_in_three_profiles_concurrently(self):
+        self.login_barrier = threading.Barrier(3)
+        credentials = {}
+        secrets = []
+        for session_id in range(1, 4):
+            self.driver_options[session_id] = {"login_required": True}
+            secret = f"temporary-{session_id}"
+            secrets.append(secret)
+            credentials[session_id] = (f"owner{session_id}@example.com", secret)
+
+        results = self.manager.open_all_sessions(credentials).result(timeout=3)
+
+        self.assertEqual(set(results), {1, 2, 3})
+        self.assertTrue(
+            all(self.manager.snapshot(session_id).state == MuseSessionState.READY for session_id in range(1, 4))
+        )
+        self.assertEqual(len({next(iter(driver.thread_ids)) for driver in self.drivers.values()}), 3)
+        checkpoint = (self.root / "data" / "muse_sessions.json").read_text(encoding="utf-8")
+        self.assertTrue(all(secret not in checkpoint for secret in secrets))
 
     def test_generation_timeout_is_local_to_one_session(self):
         self.driver_options[1] = {"never_respond": True}

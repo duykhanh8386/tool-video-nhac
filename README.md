@@ -95,9 +95,9 @@ Trang **Muse Batch — 3 tài khoản** quét JPG/JPEG/PNG/WEBP trong một thư
 - Checkpoint chỉ chứa email nhãn, đường dẫn, prompt, cài đặt, mapping output và trạng thái; không chứa mật khẩu, cookie hoặc token. Dựng lại UI sẽ nối với manager còn chạy thay vì tạo driver trùng.
 - **Dừng tất cả Muse** chỉ đặt cờ dừng cho ba tác vụ Muse, không gọi hủy Auto Registry hay YouTube.
 
-Quy trình sử dụng: đăng nhập đủ ba tab đến trạng thái `READY`, chọn thư mục ảnh và output, nhập prompt chung, bấm **Phân bổ ảnh** để xem trước, rồi **Bắt đầu cả 3**. Có thể dừng/tiếp tục, chạy lại ảnh lỗi hoặc phân bổ lại riêng các ảnh chưa submit.
+Quy trình sử dụng: nhập Gmail/mật khẩu trong ba tab, chọn thư mục ảnh và output, nhập prompt chung, bấm **Phân bổ ảnh** để xem trước, rồi **Bắt đầu cả 3**. Nút này tự mở ba Chrome profile, vào Muse, chọn đăng nhập Google, chờ cả ba tài khoản `READY` rồi tự chạy ba hàng đợi video. Có thể dừng/tiếp tục, chạy lại ảnh lỗi hoặc phân bổ lại riêng các ảnh chưa submit.
 
-Trong mỗi tab, nhập Gmail và mật khẩu rồi bấm **Mở Chrome đăng nhập Google**. Tool tự điền hai giá trị trên trang Google, sau đó xóa ngay ô mật khẩu; CAPTCHA/2FA vẫn xử lý trong Chrome. Có thể để trống mật khẩu nếu Chrome profile còn phiên đăng nhập. Nút **Bắt đầu cả 3** chỉ mở khi cả ba tab hiển thị `READY`, ảnh đã được phân bổ, prompt và thư mục output đã có.
+Trong mỗi tab, nhập Gmail và mật khẩu; không có nút đăng nhập riêng. Tool tự điền hai giá trị trên trang Google sau khi bấm **Bắt đầu cả 3**, rồi xóa ngay ô mật khẩu; CAPTCHA/2FA vẫn xử lý trong Chrome. Có thể để trống mật khẩu nếu Chrome profile còn phiên đăng nhập. Nút bắt đầu chỉ mở khi đủ ba Gmail khác nhau, ảnh đã được phân bổ, prompt và thư mục output đã có.
 
 Provider **Muse AI Web** trong **AI Video hàng loạt** vẫn dùng tài khoản được chọn và không tự xoay tài khoản để né quota.
 

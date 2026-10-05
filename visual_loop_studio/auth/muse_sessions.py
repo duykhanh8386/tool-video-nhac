@@ -269,6 +269,40 @@ class MuseSessionManager:
             _wipe_secret(secret)
             raise
 
+    def open_all_sessions(
+        self,
+        credentials: dict[int, tuple[str, str]],
+        *,
+        force_relogin: bool = False,
+    ) -> Future[Any]:
+        if set(credentials) != set(range(1, MUSE_SESSION_COUNT + 1)):
+            raise ValueError("Cần nhập đủ Gmail cho cả 3 tài khoản Muse.")
+        prepared: dict[int, tuple[str, bytearray]] = {}
+        for session_id in range(1, MUSE_SESSION_COUNT + 1):
+            email, password = credentials[session_id]
+            normalized = str(email or "").strip().casefold()
+            if not normalized or "@" not in normalized:
+                for _email, secret in prepared.values():
+                    _wipe_secret(secret)
+                raise ValueError(f"Gmail của tài khoản {session_id} không hợp lệ.")
+            prepared[session_id] = (
+                normalized,
+                bytearray(str(password or "").encode("utf-8")),
+            )
+        emails = [email for email, _password in prepared.values()]
+        if len(set(emails)) != MUSE_SESSION_COUNT:
+            for _email, secret in prepared.values():
+                _wipe_secret(secret)
+            raise ValueError("Ba phiên Muse phải sử dụng ba tài khoản Google khác nhau.")
+        try:
+            return self._schedule(
+                self._launch_open_all(prepared, bool(force_relogin))
+            )
+        except Exception:
+            for _email, secret in prepared.values():
+                _wipe_secret(secret)
+            raise
+
     def send_prompt(self, session_id: int, prompt: str) -> Future[Any]:
         text = str(prompt or "").strip()
         if not text:
@@ -371,6 +405,39 @@ class MuseSessionManager:
             if task is not None:
                 self._release_task(session, task)
             _wipe_secret(password)
+
+    async def _launch_open_all(
+        self,
+        credentials: dict[int, tuple[str, bytearray]],
+        force_relogin: bool,
+    ) -> dict[int, Any]:
+        ordered = [
+            (
+                session_id,
+                self._launch_open(
+                    session_id,
+                    credentials[session_id][0],
+                    force_relogin,
+                    credentials[session_id][1],
+                ),
+            )
+            for session_id in range(1, MUSE_SESSION_COUNT + 1)
+        ]
+        results = await asyncio.gather(
+            *(coroutine for _session_id, coroutine in ordered),
+            return_exceptions=True,
+        )
+        failures = [
+            f"Tài khoản {session_id}: {result}"
+            for (session_id, _coroutine), result in zip(ordered, results)
+            if isinstance(result, BaseException)
+        ]
+        if failures:
+            raise MuseSessionError("; ".join(failures))
+        return {
+            session_id: result
+            for (session_id, _coroutine), result in zip(ordered, results)
+        }
 
     async def _launch_send(self, session_id: int, prompt: str) -> str | None:
         session = self._require_session(session_id)

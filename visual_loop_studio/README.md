@@ -107,7 +107,7 @@ Selenium chỉ tương tác trên `muse.ai`, `auth.muse.ai` và `accounts.google
 
 Manager ghi checkpoint không bí mật sau mỗi trạng thái job. Job đã submit không được gửi lại khi tiếp tục/restart; lỗi download chỉ retry download. Nút dừng chỉ tác động đúng worker, còn **Dừng tất cả Muse** không gọi tới Auto Registry hoặc YouTube. Prompt, phân bổ, tiến độ và kết quả vẫn giữ nguyên sau khi dừng; driver được quit khi ứng dụng đóng nhưng thư mục profile không bị xóa.
 
-Mỗi tab có ô Gmail, mật khẩu và nút **Mở Chrome đăng nhập Google**. Ô mật khẩu dùng chế độ che ký tự và bị xóa ngay khi bắt đầu đăng nhập; nếu profile còn phiên thì có thể để trống. CAPTCHA/2FA vẫn xử lý trực tiếp trong Chrome. Dòng điều kiện ngay trên ba tab cho biết chính xác tài khoản nào chưa `READY` hoặc dữ liệu batch nào còn thiếu.
+Mỗi tab có ô Gmail và mật khẩu nhưng không có nút đăng nhập riêng. Khi bấm **Bắt đầu cả 3**, manager mở đồng thời ba Chrome profile, đi qua Muse tới Google, tự điền thông tin, chờ đủ ba phiên `READY` rồi mới chạy batch. Ô mật khẩu dùng chế độ che ký tự và bị xóa ngay khi bắt đầu; nếu profile còn phiên thì có thể để trống. CAPTCHA/2FA vẫn xử lý trực tiếp trong Chrome. Dòng điều kiện ngay trên ba tab cho biết dữ liệu batch nào còn thiếu hoặc giai đoạn đăng nhập đang chạy.
 
 Provider **Muse AI Web** trong **AI Video hàng loạt** vẫn chạy với đúng tài khoản được chọn và dừng phần Muse khi phát hiện hết quota; không có tự động đổi tài khoản.
 
