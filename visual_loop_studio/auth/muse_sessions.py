@@ -1056,12 +1056,40 @@ class MuseSessionManager:
             try:
                 session.driver.get(url)
                 return
-            except Exception:
+            except Exception as exc:
+                # Chrome can raise Selenium's page-load TimeoutException after a
+                # SPA has already reached Muse/Google. Continue with DOM polling
+                # in that case instead of reloading the usable page repeatedly.
+                if self._page_load_timeout_reached_expected_host(exc, session.driver, url):
+                    return
                 if attempt >= self.retry_limit:
-                    raise MuseSessionTransientError("Không thể tải Muse sau số lần thử mạng giới hạn.") from None
+                    target = "Google" if _hostname(url) == "accounts.google.com" else "Muse"
+                    raise MuseSessionTransientError(
+                        f"Không thể tải trang {target} sau số lần thử mạng giới hạn."
+                    ) from None
                 delay = self.backoff_base * (2 ** attempt)
                 if session.stop_event.wait(delay):
                     raise MuseSessionStopped("Đã dừng tác vụ Muse.")
+
+    @staticmethod
+    def _page_load_timeout_reached_expected_host(
+        exc: Exception,
+        driver: Any,
+        requested_url: str,
+    ) -> bool:
+        try:
+            from selenium.common.exceptions import TimeoutException
+        except ModuleNotFoundError:
+            return False
+        if not isinstance(exc, TimeoutException):
+            return False
+        requested_host = _hostname(requested_url)
+        current_host = _hostname(_safe_url(driver))
+        if requested_host == "accounts.google.com":
+            return current_host == "accounts.google.com"
+        if requested_host == "muse.ai":
+            return current_host in MUSE_ALLOWED_HOSTS
+        return bool(requested_host and current_host == requested_host)
 
     def _wait_until(self, driver: Any, condition: Callable[[], Any], timeout: float) -> Any:
         try:

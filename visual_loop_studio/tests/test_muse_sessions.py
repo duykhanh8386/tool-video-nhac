@@ -8,6 +8,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
+from selenium.common.exceptions import TimeoutException
+
 from auth.muse_login import (
     ACCOUNT_SELECTOR,
     CLICKABLE_SELECTOR,
@@ -99,6 +101,7 @@ class FakeDriver:
         muse_security_code: bool = False,
         waitlist: bool = False,
         unverified_manage_account: bool = False,
+        muse_page_load_timeout: bool = False,
     ) -> None:
         self.profile = Path(profile)
         self.response = response
@@ -110,6 +113,7 @@ class FakeDriver:
         self.muse_security_code = muse_security_code
         self.waitlist = waitlist
         self.unverified_manage_account = unverified_manage_account
+        self.muse_page_load_timeout = muse_page_load_timeout
         self.google_authenticated = not login_required
         self.google_email = ""
         self.muse_stage = ""
@@ -204,6 +208,8 @@ class FakeDriver:
             else:
                 self._current_url = "https://muse.ai/chat"
                 self.logged_in = True
+            if self.muse_page_load_timeout:
+                raise TimeoutException("page load timed out after Muse became reachable")
 
     def delete_all_cookies(self):
         self._record_thread()
@@ -476,6 +482,15 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertIn("owner@example.com", self.manager.snapshot(1).status_message)
         self.manager.stop_session(1)
         future.result(timeout=2)
+
+    def test_muse_page_load_timeout_is_accepted_after_expected_host_is_reached(self):
+        self.driver_options[1] = {"muse_page_load_timeout": True}
+
+        self.manager.open_session(1, "owner@example.com").result(timeout=2)
+
+        snapshot = self.manager.snapshot(1)
+        self.assertEqual(snapshot.state, MuseSessionState.READY)
+        self.assertTrue(snapshot.driver_open)
 
     def test_open_all_sessions_logs_in_three_profiles_concurrently(self):
         self.login_barrier = threading.Barrier(3)
