@@ -35,6 +35,16 @@ GOOGLE_PASSWORD_SELECTORS = (
     "input[type='password']",
     "input[autocomplete='current-password']",
 )
+GOOGLE_EMAIL_NEXT_SELECTORS = (
+    "#identifierNext",
+    "button#identifierNext",
+    "#identifierNext [role='button']",
+)
+GOOGLE_PASSWORD_NEXT_SELECTORS = (
+    "#passwordNext",
+    "button#passwordNext",
+    "#passwordNext [role='button']",
+)
 MUSE_IDENTIFIER_SELECTORS = (
     "input[aria-label='Mobile number or email']",
     "input[placeholder='Mobile number or email']",
@@ -466,6 +476,10 @@ class MuseLoginService:
             "scan the qr code",
             "confirm it’s you",
             "confirm it's you",
+            "couldn't sign you in",
+            "couldn’t sign you in",
+            "browser or app may not be secure",
+            "try using a different browser",
         ]
         if not allow_password:
             manual_markers.append("enter your password")
@@ -483,8 +497,30 @@ class MuseLoginService:
             return True
         return any(marker in body for marker in manual_markers)
 
+    def _google_automation_blocked(self, driver: Any) -> bool:
+        if _hostname(_safe_url(driver)) != "accounts.google.com":
+            return False
+        body = " ".join(
+            _element_text(item)
+            for item in _find_elements(driver, "tag name", "body")
+        ).casefold()
+        return any(
+            marker in body
+            for marker in (
+                "couldn't sign you in",
+                "couldn’t sign you in",
+                "browser or app may not be secure",
+                "try using a different browser",
+            )
+        )
+
     def _fill_google_email(self, driver: Any, email: str) -> bool:
-        return self._fill_google_field(driver, GOOGLE_EMAIL_SELECTORS, _normalize_email(email))
+        return self._fill_google_field(
+            driver,
+            GOOGLE_EMAIL_SELECTORS,
+            _normalize_email(email),
+            GOOGLE_EMAIL_NEXT_SELECTORS,
+        )
 
     def _fill_muse_identifier(self, driver: Any, email: str) -> bool:
         """Fill only Muse's public identifier step; never place a password there."""
@@ -572,12 +608,22 @@ class MuseLoginService:
         value = ""
         try:
             value = password.decode("utf-8")
-            return self._fill_google_field(driver, GOOGLE_PASSWORD_SELECTORS, value)
+            return self._fill_google_field(
+                driver,
+                GOOGLE_PASSWORD_SELECTORS,
+                value,
+                GOOGLE_PASSWORD_NEXT_SELECTORS,
+            )
         finally:
             value = ""
 
     @staticmethod
-    def _fill_google_field(driver: Any, selectors: tuple[str, ...], value: str) -> bool:
+    def _fill_google_field(
+        driver: Any,
+        selectors: tuple[str, ...],
+        value: str,
+        next_selectors: tuple[str, ...] = (),
+    ) -> bool:
         if _hostname(_safe_url(driver)) != "accounts.google.com":
             raise MuseUnsafeNavigationError("Tool từ chối điền thông tin ngoài accounts.google.com.")
         if not value:
@@ -589,6 +635,18 @@ class MuseLoginService:
                 try:
                     element.clear()
                     element.send_keys(value)
+                    for next_selector in next_selectors:
+                        next_button = next(
+                            (
+                                candidate
+                                for candidate in _find_elements(driver, "css selector", next_selector)
+                                if _is_clickable(candidate)
+                            ),
+                            None,
+                        )
+                        if next_button is not None:
+                            next_button.click()
+                            return True
                     element.send_keys(GOOGLE_ENTER_KEY)
                     return True
                 except Exception:

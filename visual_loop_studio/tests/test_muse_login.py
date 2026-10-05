@@ -6,6 +6,8 @@ from pathlib import Path
 
 from auth.muse_login import (
     CLICKABLE_SELECTOR,
+    GOOGLE_EMAIL_NEXT_SELECTORS,
+    GOOGLE_EMAIL_SELECTORS,
     GOOGLE_ENTER_KEY,
     MUSE_APP_SELECTORS,
     MUSE_IDENTIFIER_SELECTORS,
@@ -302,6 +304,34 @@ class MuseLoginServiceTests(unittest.TestCase):
                 allow_password=True,
             )
         )
+
+    def test_google_email_clicks_identifier_next_instead_of_relying_on_enter(self):
+        email = FakeElement(attrs={"type": "email"})
+        next_button = FakeElement("Next")
+        driver = FakeDriver(
+            FakePage(
+                "https://accounts.google.com/v3/signin/identifier",
+                security={
+                    GOOGLE_EMAIL_SELECTORS[0]: [email],
+                    GOOGLE_EMAIL_NEXT_SELECTORS[0]: [next_button],
+                },
+            )
+        )
+
+        self.assertTrue(self.service(driver)._fill_google_email(driver, "Owner@Example.com"))
+        self.assertEqual(email.value, "owner@example.com")
+        self.assertNotIn(GOOGLE_ENTER_KEY, email.value)
+        self.assertEqual(next_button.clicks, 1)
+
+    def test_google_insecure_browser_block_is_detected(self):
+        driver = FakeDriver(
+            FakePage(
+                "https://accounts.google.com/signin/rejected",
+                body_text="Couldn't sign you in. This browser or app may not be secure.",
+            )
+        )
+
+        self.assertTrue(self.service(driver)._google_automation_blocked(driver))
 
     def test_google_continue_callback_is_verified_on_muse_main_ui(self):
         driver = FakeDriver(FakePage("https://accounts.google.com/o/oauth2/approval"))

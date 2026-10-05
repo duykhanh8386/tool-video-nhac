@@ -810,7 +810,17 @@ class MuseSessionManager:
                     return False
                 password_key = (url, "google_password")
                 password_submitted = password_key in actions
-                if helper._requires_manual_google_step(
+                if helper._google_automation_blocked(driver):
+                    manual_mode = True
+                    self._login_required(
+                        session,
+                        message=(
+                            "Google từ chối đăng nhập trong Chrome đang được Selenium điều khiển "
+                            "(browser or app may not be secure). Tool không được giả mạo trình duyệt để vượt chặn này; "
+                            "hãy hoàn tất đăng nhập Google bằng Chrome thường trong đúng profile rồi chạy lại."
+                        ),
+                    )
+                elif helper._requires_manual_google_step(
                     driver,
                     allow_email=True,
                     allow_password=bool(password) or password_submitted,
