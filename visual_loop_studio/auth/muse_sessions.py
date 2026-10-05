@@ -13,6 +13,7 @@ from typing import Any, Callable
 from auth.muse_login import (
     GOOGLE_CONTINUE_TEXT,
     MUSE_ALLOWED_HOSTS,
+    MUSE_CONTINUE_TEXT,
     MUSE_GOOGLE_TEXT,
     MUSE_LOGIN_TEXT,
     MUSE_START_URL,
@@ -659,11 +660,62 @@ class MuseSessionManager:
                 self._set_account_status(session, "connected")
                 return True
             if host == "muse.ai":
-                manual_mode = False
-                key = (url, "muse_login")
-                if key not in actions and helper._click_by_text(driver, MUSE_LOGIN_TEXT):
-                    actions.add(key)
-                    self._set_state(session, MuseSessionState.OPENING, progress=25, status_message="Đang mở đăng nhập Muse…")
+                if helper._requires_manual_muse_step(driver):
+                    manual_mode = True
+                    self._login_required(
+                        session,
+                        message=(
+                            "Muse/Meta đang yêu cầu mật khẩu hoặc bước xác minh riêng. "
+                            "Tool không đưa mật khẩu Google vào muse.ai; hãy hoàn tất thủ công trong Chrome."
+                        ),
+                    )
+                else:
+                    manual_mode = False
+                    key = (url, "muse_google")
+                    if key not in actions and helper._click_by_text(driver, MUSE_GOOGLE_TEXT):
+                        actions.add(key)
+                        idle_polls = 0
+                        self._set_state(
+                            session,
+                            MuseSessionState.OPENING,
+                            progress=40,
+                            status_message="Đã chọn đăng nhập bằng Google trên Muse…",
+                        )
+                    else:
+                        identifier_key = (url, "muse_identifier")
+                        if identifier_key not in actions and helper._fill_muse_identifier(driver, session.email):
+                            actions.add(identifier_key)
+                            idle_polls = 0
+                            self._set_state(
+                                session,
+                                MuseSessionState.OPENING,
+                                progress=30,
+                                status_message=f"Đã điền email {session.email} trên Muse; đang bấm Continue…",
+                            )
+                        continue_key = (url, "muse_continue")
+                        if identifier_key in actions and continue_key not in actions:
+                            if helper._click_by_text(driver, MUSE_CONTINUE_TEXT):
+                                actions.add(continue_key)
+                                idle_polls = 0
+                                self._set_state(
+                                    session,
+                                    MuseSessionState.OPENING,
+                                    progress=35,
+                                    status_message="Đã bấm Continue trên Muse; đang chờ trang đăng nhập Google…",
+                                )
+                        elif continue_key in actions:
+                            idle_polls += 1
+                        else:
+                            key = (url, "muse_login")
+                            if key not in actions and helper._click_by_text(driver, MUSE_LOGIN_TEXT):
+                                actions.add(key)
+                                idle_polls = 0
+                                self._set_state(
+                                    session,
+                                    MuseSessionState.OPENING,
+                                    progress=25,
+                                    status_message="Đang mở đăng nhập Muse…",
+                                )
             elif host == "auth.muse.ai":
                 manual_mode = False
                 key = (url, "google_login")
@@ -933,12 +985,13 @@ class MuseSessionManager:
         except TimeoutException:
             raise MuseSessionTimeout("Muse không hoàn tất trước thời hạn chờ.") from None
 
-    def _login_required(self, session: MuseSession) -> None:
+    def _login_required(self, session: MuseSession, *, message: str | None = None) -> None:
         self._set_state(
             session,
             MuseSessionState.LOGIN_REQUIRED,
             progress=50,
-            status_message=(
+            status_message=message
+            or (
                 "Google cần CAPTCHA, 2FA, xác minh thiết bị hoặc thao tác bổ sung. "
                 "Hãy hoàn tất thủ công trong Chrome; phiên sẽ tự tiếp tục."
             ),

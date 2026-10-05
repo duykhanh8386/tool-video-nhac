@@ -31,6 +31,15 @@ GOOGLE_PASSWORD_SELECTORS = (
     "input[type='password']",
     "input[autocomplete='current-password']",
 )
+MUSE_IDENTIFIER_SELECTORS = (
+    "input[aria-label='Mobile number or email']",
+    "input[placeholder='Mobile number or email']",
+    "input[autocomplete='username']",
+)
+MUSE_PASSWORD_SELECTORS = (
+    "input[type='password']",
+    "input[autocomplete='current-password']",
+)
 GOOGLE_ENTER_KEY = "\ue007"
 MUSE_APP_SELECTORS = (
     "[data-testid*='account' i]",
@@ -45,6 +54,7 @@ MUSE_APP_SELECTORS = (
 )
 MUSE_LOGIN_TEXT = ("log in", "sign in")
 MUSE_GOOGLE_TEXT = ("sign in with google", "continue with google", "log in with google")
+MUSE_CONTINUE_TEXT = ("continue",)
 GOOGLE_CONTINUE_TEXT = ("continue", "allow")
 EMAIL_PATTERN = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 
@@ -429,6 +439,42 @@ class MuseLoginService:
 
     def _fill_google_email(self, driver: Any, email: str) -> bool:
         return self._fill_google_field(driver, GOOGLE_EMAIL_SELECTORS, _normalize_email(email))
+
+    def _fill_muse_identifier(self, driver: Any, email: str) -> bool:
+        """Fill only Muse's public identifier step; never place a password there."""
+        if _hostname(_safe_url(driver)) != "muse.ai":
+            raise MuseUnsafeNavigationError("Tool từ chối điền email Muse ngoài muse.ai.")
+        value = _normalize_email(email)
+        if not value:
+            return False
+        for selector in MUSE_IDENTIFIER_SELECTORS:
+            for element in _find_elements(driver, "css selector", selector):
+                if not _is_clickable(element):
+                    continue
+                try:
+                    element.clear()
+                    element.send_keys(value)
+                    return True
+                except Exception:
+                    continue
+        return False
+
+    def _requires_manual_muse_step(self, driver: Any) -> bool:
+        """Muse/Meta passwords and security challenges must stay manual."""
+        if _hostname(_safe_url(driver)) != "muse.ai":
+            return False
+        security_selectors = (
+            *MUSE_PASSWORD_SELECTORS,
+            "input[type='tel']",
+            "input[autocomplete='one-time-code']",
+            "input[name*='captcha' i]",
+            "iframe[src*='recaptcha' i]",
+        )
+        return any(
+            _is_visible(element)
+            for selector in security_selectors
+            for element in _find_elements(driver, "css selector", selector)
+        )
 
     def _fill_google_password(self, driver: Any, password: bytearray) -> bool:
         if not password:

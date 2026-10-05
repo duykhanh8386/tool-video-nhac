@@ -129,7 +129,8 @@ class MuseAccountsPage(QWidget):
         root.addWidget(title)
         notice = QLabel(
             "Mỗi tài khoản dùng một Chrome profile/driver riêng. Gmail/mật khẩu chỉ được giữ tạm trong bộ nhớ "
-            "để điền trên accounts.google.com khi bấm Bắt đầu cả 3; tool không lưu bí mật và không vượt CAPTCHA, "
+            "để điền email ở bước đầu Muse và chỉ điền mật khẩu trên accounts.google.com khi bấm Bắt đầu cả 3; "
+            "tool không lưu bí mật và không vượt CAPTCHA, "
             "2FA, quota hoặc rate limit."
         )
         notice.setWordWrap(True)

@@ -8,6 +8,7 @@ from auth.muse_login import (
     CLICKABLE_SELECTOR,
     GOOGLE_ENTER_KEY,
     MUSE_APP_SELECTORS,
+    MUSE_IDENTIFIER_SELECTORS,
     MuseAccountStore,
     MuseLoginCancelled,
     MuseLoginService,
@@ -191,6 +192,34 @@ class MuseLoginServiceTests(unittest.TestCase):
         self.assertEqual(google.clicks, 1)
         self.assertEqual(account.clicks, 1)
         self.assertIn("google-popup", driver.closed)
+
+    def test_fills_new_muse_identifier_form_without_submitting_a_password(self):
+        identifier = FakeElement(attrs={"aria-label": "Mobile number or email"})
+        driver = FakeDriver(
+            FakePage(
+                "https://muse.ai/?aymh_complete=1",
+                security={MUSE_IDENTIFIER_SELECTORS[0]: [identifier]},
+            )
+        )
+
+        self.assertTrue(self.service(driver)._fill_muse_identifier(driver, "Owner@Example.com"))
+
+        self.assertEqual(identifier.value, "owner@example.com")
+        self.assertNotIn(GOOGLE_ENTER_KEY, identifier.value)
+
+    def test_never_fills_muse_identifier_on_lookalike_host(self):
+        identifier = FakeElement(attrs={"aria-label": "Mobile number or email"})
+        driver = FakeDriver(
+            FakePage(
+                "https://muse.ai.evil.invalid/",
+                security={MUSE_IDENTIFIER_SELECTORS[0]: [identifier]},
+            )
+        )
+
+        with self.assertRaises(MuseUnsafeNavigationError):
+            self.service(driver)._fill_muse_identifier(driver, "owner@example.com")
+
+        self.assertEqual(identifier.value, "")
 
     def test_selects_exact_google_account_from_existing_profile(self):
         driver = FakeDriver(FakePage("https://accounts.google.com/o/oauth2/auth"))
