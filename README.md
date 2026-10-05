@@ -97,6 +97,8 @@ Trang **Muse Batch — 3 tài khoản** quét JPG/JPEG/PNG/WEBP trong một thư
 
 Quy trình sử dụng: đăng nhập đủ ba tab đến trạng thái `READY`, chọn thư mục ảnh và output, nhập prompt chung, bấm **Phân bổ ảnh** để xem trước, rồi **Bắt đầu cả 3**. Có thể dừng/tiếp tục, chạy lại ảnh lỗi hoặc phân bổ lại riêng các ảnh chưa submit.
 
+Trong mỗi tab, nhập email rồi bấm **Mở Chrome đăng nhập Google**. Mật khẩu, CAPTCHA và 2FA chỉ nhập trực tiếp trong cửa sổ Google; ứng dụng không có ô mật khẩu, không tự gõ và không lưu thông tin đăng nhập. Nút **Bắt đầu cả 3** chỉ mở khi cả ba tab hiển thị `READY`, ảnh đã được phân bổ, prompt và thư mục output đã có.
+
 Provider **Muse AI Web** trong **AI Video hàng loạt** vẫn dùng tài khoản được chọn và không tự xoay tài khoản để né quota.
 
 Mỗi lần có commit mới được push lên nhánh `Dola-AI`, GitHub Actions sẽ:

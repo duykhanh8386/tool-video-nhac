@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -213,6 +214,10 @@ class MuseAccountsPage(QWidget):
         self.global_status.setWordWrap(True)
         self.global_status.setObjectName("muted")
         root.addWidget(self.global_status)
+        self.start_requirements = QLabel()
+        self.start_requirements.setWordWrap(True)
+        self.start_requirements.setObjectName("notice")
+        root.addWidget(self.start_requirements)
 
         self.tabs = QTabWidget()
         for worker_id in range(1, MUSE_SESSION_COUNT + 1):
@@ -222,14 +227,21 @@ class MuseAccountsPage(QWidget):
         root.addWidget(self.tabs, 1)
 
     def _build_worker_tab(self, worker_id: int) -> tuple[QWidget, _WorkerWidgets]:
-        page = QWidget()
-        root = QVBoxLayout(page)
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        content = QWidget()
+        content.setMinimumHeight(520)
+        page.setWidget(content)
+        root = QVBoxLayout(content)
         account_group = QGroupBox(f"Tài khoản Muse {worker_id}")
+        account_group.setMinimumHeight(145)
         grid = QGridLayout(account_group)
         account = QComboBox()
         account.setEditable(True)
+        account.setMinimumHeight(36)
         account.lineEdit().setPlaceholderText("Email Google được phép sử dụng")
-        login = QPushButton("Đăng nhập")
+        login = QPushButton("Mở Chrome đăng nhập Google")
+        login.setMinimumHeight(36)
         stop = QPushButton("Dừng")
         retry = QPushButton("Chạy lại ảnh lỗi")
         login.clicked.connect(lambda _checked=False, value=worker_id: self._login(value))
@@ -240,6 +252,12 @@ class MuseAccountsPage(QWidget):
         profile = QLabel()
         profile.setObjectName("muted")
         profile.setWordWrap(True)
+        login_help = QLabel(
+            "Chỉ nhập email để chọn đúng tài khoản. Mật khẩu, CAPTCHA và 2FA được nhập trực tiếp "
+            "trong cửa sổ Google; ứng dụng không đọc hoặc lưu các dữ liệu này."
+        )
+        login_help.setObjectName("muted")
+        login_help.setWordWrap(True)
         grid.addWidget(QLabel("Email"), 0, 0)
         grid.addWidget(account, 0, 1)
         grid.addWidget(login, 0, 2)
@@ -247,11 +265,13 @@ class MuseAccountsPage(QWidget):
         grid.addWidget(login_state, 1, 1, 1, 2)
         grid.addWidget(QLabel("Profile"), 2, 0)
         grid.addWidget(profile, 2, 1, 1, 2)
+        grid.addWidget(login_help, 3, 0, 1, 3)
         root.addWidget(account_group)
 
         assigned_count = QLabel("Được phân bổ: 0 ảnh")
         allocation = QPlainTextEdit()
         allocation.setReadOnly(True)
+        allocation.setMinimumHeight(70)
         allocation.setMaximumHeight(110)
         allocation.setPlaceholderText("Danh sách ảnh được phân bổ sẽ hiển thị trước khi chạy.")
         root.addWidget(assigned_count)
@@ -277,6 +297,7 @@ class MuseAccountsPage(QWidget):
         root.addLayout(button_row)
         logs = QPlainTextEdit()
         logs.setReadOnly(True)
+        logs.setMinimumHeight(100)
         logs.setPlaceholderText("Log riêng của worker")
         root.addWidget(QLabel("Log riêng"))
         root.addWidget(logs, 1)
@@ -477,7 +498,14 @@ class MuseAccountsPage(QWidget):
                 item.state == MuseSessionState.READY and item.driver_open
                 for item in session_values.values()
             )
-            self.start_all.setEnabled(ready and bool(batch.source_paths) and not batch.running)
+            self.start_all.setEnabled(
+                ready
+                and bool(batch.source_paths)
+                and bool(self.prompt.toPlainText().strip())
+                and bool(self.output_folder.text().strip())
+                and not batch.running
+            )
+            self._render_start_requirements(session_values, batch)
             self.stop_all.setEnabled(batch.running)
             self.resume.setEnabled(bool(batch.jobs) and not batch.running)
             self.allocate.setEnabled(not batch.running)
@@ -486,6 +514,30 @@ class MuseAccountsPage(QWidget):
             self._collect_futures()
         finally:
             self._refreshing = False
+
+    def _render_start_requirements(self, session_values, batch) -> None:
+        not_ready = [
+            str(session_id)
+            for session_id, item in sorted(session_values.items())
+            if item.state != MuseSessionState.READY or not item.driver_open
+        ]
+        blockers: list[str] = []
+        if not_ready:
+            blockers.append("đăng nhập Google/Muse cho tài khoản " + ", ".join(not_ready))
+        if not batch.source_paths:
+            blockers.append("bấm Phân bổ ảnh")
+        if not self.prompt.toPlainText().strip():
+            blockers.append("nhập prompt chung")
+        if not self.output_folder.text().strip():
+            blockers.append("chọn thư mục output")
+        if blockers:
+            message = "Chưa thể bắt đầu: " + "; ".join(blockers) + "."
+        elif batch.running:
+            message = "Ba worker Muse đang chạy độc lập."
+        else:
+            message = f"Sẵn sàng chạy cả 3 tài khoản với {len(batch.source_paths)} ảnh."
+        self.start_requirements.setText(message)
+        self.start_all.setToolTip(message)
 
     def _render_worker(self, worker: MuseVideoWorkerSnapshot, session) -> None:
         widgets = self._workers[worker.worker_id]
@@ -522,9 +574,16 @@ class MuseAccountsPage(QWidget):
             scrollbar = widgets.logs.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
         widgets.login.setEnabled(not session.task_running and not worker.task_running)
+        widgets.login.setText(
+            "Đăng nhập lại" if session.state == MuseSessionState.READY else "Mở Chrome đăng nhập Google"
+        )
         widgets.stop.setEnabled(session.task_running or worker.task_running)
         widgets.retry.setEnabled(worker.failed > 0 and not worker.task_running)
         widgets.account.setEnabled(not session.driver_open and not session.task_running and not worker.task_running)
+        self.tabs.setTabText(
+            worker.worker_id - 1,
+            f"Tài khoản {worker.worker_id} • {SESSION_LABELS[session.state]}",
+        )
 
     def _collect_futures(self) -> None:
         pending: list[Future] = []
