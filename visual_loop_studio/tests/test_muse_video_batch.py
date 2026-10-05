@@ -25,6 +25,7 @@ from auth.muse_video_batch import (
     MuseVideoTimeout,
     MuseVideoRunContext,
     MuseVideoSelectors,
+    MuseVideoWorkerState,
     create_muse_video_job_id,
     get_muse_video_batch_manager,
 )
@@ -300,6 +301,38 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertIn(MuseVideoJobState.SUBMITTED, transitions)
             self.assertIn(MuseVideoJobState.DOWNLOADING, transitions)
 
+    def test_send_selector_does_not_click_other_submit_buttons(self):
+        with tempfile.TemporaryDirectory() as folder:
+            driver = AutomationDriver(Path(folder))
+            decoy_clicks = []
+            close_panel = AutomationElement(
+                "close-panel",
+                tag_name="button",
+                attrs={"type": "submit", "aria-label": "Close panel"},
+                click=lambda: decoy_clicks.append("close"),
+            )
+            attach_file = AutomationElement(
+                "attach-file",
+                tag_name="button",
+                attrs={"type": "submit", "aria-label": "Attach file"},
+                click=lambda: decoy_clicks.append("attach"),
+            )
+            original_find = driver.find_elements
+
+            def find_elements(by, selector):
+                if by == "css selector" and selector == "button[aria-label='Send']":
+                    return [driver.generate]
+                if by == "css selector" and selector == "button[type='submit']":
+                    return [close_panel, attach_file, driver.generate]
+                return original_find(by, selector)
+
+            driver.find_elements = find_elements
+
+            MuseVideoAutomation()._click_generate_once(driver)
+
+            self.assertEqual(driver.generate_clicks, 1)
+            self.assertEqual(decoy_clicks, [])
+
 
 class MuseVideoBatchManagerTests(unittest.TestCase):
     def setUp(self):
@@ -543,12 +576,33 @@ class MuseVideoBatchManagerTests(unittest.TestCase):
 
         self.assertEqual(len({first, second, third, fourth}), 4)
 
-    def test_batch_refuses_start_until_all_three_sessions_are_ready(self):
+    def test_ready_sessions_start_without_waiting_for_login_required_session(self):
         self.sessions._set_state(self.sessions.sessions[3], MuseSessionState.LOGIN_REQUIRED)
+        self.batch.allocate_images(self._images(3))
+
+        self.batch.start_all("prompt", MuseVideoSettings(), self.output).result(timeout=3)
+        partial = self.batch.snapshot()
+
+        self.assertEqual(partial.jobs[0].state, MuseVideoJobState.COMPLETED)
+        self.assertEqual(partial.jobs[1].state, MuseVideoJobState.COMPLETED)
+        self.assertEqual(partial.jobs[2].state, MuseVideoJobState.PENDING)
+        self.assertEqual(partial.workers[2].state, MuseVideoWorkerState.LOGIN_REQUIRED)
+
+        self.sessions._set_state(self.sessions.sessions[3], MuseSessionState.READY)
+        self.batch.resume().result(timeout=3)
+
+        self.assertTrue(all(job.state == MuseVideoJobState.COMPLETED for job in self.batch.snapshot().jobs))
+
+    def test_prepare_start_checkpoints_prompt_before_login_finishes(self):
         self.batch.allocate_images(self._images(1))
 
-        with self.assertRaises(MuseVideoBatchError):
-            self.batch.start_all("prompt", MuseVideoSettings(), self.output)
+        self.batch.prepare_start("saved prompt", MuseVideoSettings(duration="8s"), self.output)
+
+        raw = json.loads(self.batch.checkpoint_path.read_text(encoding="utf-8"))
+        self.assertEqual(raw["prompt"], "saved prompt")
+        self.assertEqual(raw["output_dir"], str(self.output.resolve()))
+        self.assertEqual(raw["settings"]["duration"], "8s")
+        self.assertEqual(raw["jobs"], [])
 
     def test_checkpoint_has_mapping_but_no_browser_secret_fields(self):
         image = self._images(1)[0]

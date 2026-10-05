@@ -109,6 +109,7 @@ class MuseVideoSelectors:
         "input[type='file']",
     )
     upload_buttons: tuple[str, ...] = (
+        "button[aria-label='Attach file']",
         "button[data-testid*='upload' i]",
         "button[aria-label*='upload' i]",
         "[role='button'][aria-label*='attach' i]",
@@ -120,6 +121,8 @@ class MuseVideoSelectors:
         "img[src^='blob:']",
     )
     prompt_inputs: tuple[str, ...] = (
+        "textarea[aria-label='Message']",
+        "textarea[placeholder='Message']",
         "[data-testid='prompt-input']",
         "[data-testid*='composer' i] textarea",
         "textarea[aria-label*='prompt' i]",
@@ -129,11 +132,13 @@ class MuseVideoSelectors:
         "[contenteditable='true'][role='textbox']",
     )
     generate_buttons: tuple[str, ...] = (
+        "button[aria-label='Send']",
+        "button[aria-label*='send message' i]",
+        "button[type='submit'][aria-label*='send' i]",
         "button[data-testid*='generate' i]",
         "button[data-testid*='create' i]",
         "button[aria-label*='generate' i]",
         "button[aria-label*='create video' i]",
-        "button[type='submit']",
     )
     processing: tuple[str, ...] = (
         "[data-testid*='processing' i]",
@@ -147,9 +152,11 @@ class MuseVideoSelectors:
         "video",
     )
     download_buttons: tuple[str, ...] = (
+        "button[aria-label='Download']",
         "button[data-testid*='download' i]",
         "button[aria-label*='download' i]",
         "[role='button'][aria-label*='download' i]",
+        "a[download]",
     )
     model_controls: tuple[str, ...] = (
         "select[data-testid*='model' i]",
@@ -368,9 +375,11 @@ class MuseVideoAutomation:
         if not source.is_file():
             raise MuseVideoBatchError("Ảnh nguồn không còn tồn tại.")
         self._check(driver, context)
+        context.log(f"Đang mở giao diện Muse cho {source.name}…")
         self._navigate_new_task(driver, context)
         baseline_previews = self._element_fingerprints(driver, self.selectors.previews)
         context.transition(MuseVideoJobState.UPLOADING, progress=8, error="")
+        context.log(f"Đang đính kèm ảnh {source.name}…")
         self._upload(driver, source)
         self._wait(
             driver,
@@ -379,7 +388,9 @@ class MuseVideoAutomation:
             context,
             "Muse không hiển thị preview ảnh đã upload trước thời hạn.",
         )
+        context.log("Muse đã nhận ảnh; đang điền prompt…")
         self._fill_prompt(driver, job.prompt)
+        context.log("Đã điền prompt; đang chuẩn bị bấm Send…")
         self._apply_settings(driver, job.settings)
         baseline_videos = sorted(self._video_fingerprints(driver))
         context.transition(
@@ -393,6 +404,7 @@ class MuseVideoAutomation:
             submission_attempted=True,
         )
         self._click_generate_once(driver)
+        context.log("Đã bấm Send đúng một lần; đang chờ video mới…")
         context.transition(
             MuseVideoJobState.SUBMITTED,
             progress=22,
@@ -465,6 +477,7 @@ class MuseVideoAutomation:
             "Muse chưa trả về video mới trước thời hạn; job đã gửi sẽ không được gửi lại tự động.",
         )
         fingerprint = _video_fingerprint(video)
+        context.log("Đã phát hiện video mới hoàn tất; đang tải xuống…")
         context.transition(
             MuseVideoJobState.DOWNLOADING,
             progress=90,
@@ -477,14 +490,22 @@ class MuseVideoAutomation:
     def _navigate_new_task(self, driver: Any, context: MuseVideoRunContext) -> None:
         self._retry_network(lambda: driver.get(self.start_url), context)
         self._check(driver, context)
-        for selector in self.selectors.new_task:
-            for element in _find(driver, "css selector", selector):
-                if _clickable(element):
-                    try:
-                        element.click()
-                        return
-                    except Exception:
-                        continue
+
+        def composer_ready():
+            self._check(driver, context)
+            has_prompt = any(_clickable(item) for item in self._elements(driver, self.selectors.prompt_inputs))
+            has_upload = bool(self._elements(driver, self.selectors.upload_inputs))
+            return has_prompt and has_upload
+
+        if not composer_ready():
+            self._click_selector(driver, self.selectors.new_task)
+        self._wait(
+            driver,
+            composer_ready,
+            min(45.0, self.upload_timeout),
+            context,
+            "Muse đã đăng nhập nhưng chưa hiển thị ô Message và input đính kèm tệp.",
+        )
 
     def _upload(self, driver: Any, source: Path) -> None:
         fields = self._elements(driver, self.selectors.upload_inputs)
@@ -857,6 +878,20 @@ class MuseVideoBatchManager:
         settings: MuseVideoSettings,
         output_dir: str | Path,
     ) -> Future[Any]:
+        self.prepare_start(prompt, settings, output_dir)
+        ready_ids = self._ready_session_ids()
+        with self._state_lock:
+            self._build_jobs_locked()
+            self._persist_locked()
+        return self._schedule(self._launch_workers(resume=False, worker_ids=ready_ids))
+
+    def prepare_start(
+        self,
+        prompt: str,
+        settings: MuseVideoSettings,
+        output_dir: str | Path,
+    ) -> None:
+        """Checkpoint the user's batch inputs before interactive login begins."""
         text = str(prompt or "").strip()
         if not text:
             raise ValueError("Prompt tạo video chung không được để trống.")
@@ -865,7 +900,6 @@ class MuseVideoBatchManager:
             raise ValueError("Hãy chọn thư mục lưu video đầu ra.")
         output = Path(output_dir).expanduser().resolve()
         output.mkdir(parents=True, exist_ok=True)
-        self._require_all_ready()
         with self._state_lock:
             if not self.source_paths:
                 raise ValueError("Hãy chọn và phân bổ ảnh trước khi bắt đầu.")
@@ -874,18 +908,26 @@ class MuseVideoBatchManager:
             self.prompt = text
             self.settings = normalized_settings
             self.output_dir = str(output)
-            self._build_jobs_locked()
             self._persist_locked()
-        return self._schedule(self._launch_workers(resume=False))
 
     def resume(self) -> Future[Any]:
-        self._require_all_ready()
+        ready_ids = self._ready_session_ids()
         with self._state_lock:
             if self.busy:
                 raise MuseVideoBatchError("Batch Muse đang chạy.")
             if not self.current_job_ids:
                 raise MuseVideoBatchError("Không có batch Muse để tiếp tục.")
-        return self._schedule(self._launch_workers(resume=True))
+        return self._schedule(self._launch_workers(resume=True, worker_ids=ready_ids))
+
+    def start_ready_workers(self, worker_ids: Iterable[int] | None = None) -> Future[Any]:
+        """Start newly READY workers without interrupting workers already running."""
+        ready_ids = set(self._ready_session_ids())
+        if worker_ids is not None:
+            ready_ids.intersection_update(int(value) for value in worker_ids)
+        with self._state_lock:
+            if not self.current_job_ids:
+                raise MuseVideoBatchError("Không có batch Muse đang chờ để chạy.")
+        return self._schedule(self._launch_workers(resume=True, worker_ids=ready_ids))
 
     def stop_worker(self, worker_id: int) -> bool:
         with self._state_lock:
@@ -1015,13 +1057,26 @@ class MuseVideoBatchManager:
             for task in tasks:
                 task.cancel()
 
-    async def _launch_workers(self, *, resume: bool) -> dict[int, Any]:
+    async def _launch_workers(
+        self,
+        *,
+        resume: bool,
+        worker_ids: Iterable[int] | None = None,
+    ) -> dict[int, Any]:
         if self._manager_lock is None:
             self._manager_lock = asyncio.Lock()
+        eligible_ids = set(self.workers) if worker_ids is None else {int(value) for value in worker_ids}
         claimed: list[tuple[MuseVideoWorker, asyncio.Task[Any]]] = []
         async with self._manager_lock:
             for worker in self.workers.values():
-                if worker.active:
+                session = self.session_manager.sessions[worker.session_id]
+                if (
+                    worker.worker_id not in eligible_ids
+                    or worker.active
+                    or session.state != MuseSessionState.READY
+                    or not session.driver_open
+                    or self._worker_pending(worker) == 0
+                ):
                     continue
                 worker.stop_event.clear()
                 task = asyncio.create_task(
@@ -1217,9 +1272,14 @@ class MuseVideoBatchManager:
         self.current_job_ids = []
         for worker in self.workers.values():
             worker.queue = []
-            worker.state = MuseVideoWorkerState.READY
-            worker.error = ""
             session = self.session_manager.sessions[worker.session_id]
+            if session.state == MuseSessionState.READY and session.driver_open:
+                worker.state = MuseVideoWorkerState.READY
+            elif session.state == MuseSessionState.LOGIN_REQUIRED:
+                worker.state = MuseVideoWorkerState.LOGIN_REQUIRED
+            else:
+                worker.state = MuseVideoWorkerState.IDLE
+            worker.error = ""
             worker.account_id = session.account_id
             worker.email = session.email
         for index, source_value in enumerate(self.source_paths):
@@ -1251,15 +1311,19 @@ class MuseVideoBatchManager:
             assigned_worker.queue.append(job_id)
         self._sync_assigned_from_queues_locked()
 
-    def _require_all_ready(self) -> None:
+    def _ready_session_ids(self) -> tuple[int, ...]:
         snapshots = self.session_manager.snapshots()
-        not_ready = [item.session_id for item in snapshots if item.state != MuseSessionState.READY or not item.driver_open]
-        if not_ready:
-            joined = ", ".join(f"Muse {value}" for value in not_ready)
-            raise MuseVideoBatchError(f"Cả 3 tài khoản phải READY trước khi chạy; chưa sẵn sàng: {joined}.")
-        emails = [item.email.casefold() for item in snapshots]
-        if len(set(emails)) != MUSE_SESSION_COUNT:
-            raise MuseVideoBatchError("Ba worker phải dùng ba tài khoản Google khác nhau.")
+        ready = tuple(
+            item.session_id
+            for item in snapshots
+            if item.state == MuseSessionState.READY and item.driver_open
+        )
+        if not ready:
+            raise MuseVideoBatchError("Chưa có tài khoản Muse nào READY để chạy batch.")
+        emails = [item.email.casefold() for item in snapshots if item.session_id in ready]
+        if len(set(emails)) != len(emails):
+            raise MuseVideoBatchError("Các worker READY phải dùng các tài khoản khác nhau.")
+        return ready
 
     def _worker_snapshot(self, worker: MuseVideoWorker) -> MuseVideoWorkerSnapshot:
         jobs = [self.jobs[job_id] for job_id in worker.queue if job_id in self.jobs]

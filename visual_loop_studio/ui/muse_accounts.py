@@ -102,6 +102,7 @@ class MuseAccountsPage(QWidget):
         self._workers: dict[int, _WorkerWidgets] = {}
         self._futures: list[Future] = []
         self._pending_batch_start: tuple[Future, str, MuseVideoSettings, str] | None = None
+        self._pending_started_workers: set[int] = set()
         self._refreshing = False
         self._build_ui()
         self._reload_account_choices()
@@ -425,18 +426,21 @@ class MuseAccountsPage(QWidget):
                     widgets.account.currentText().strip(),
                     widgets.password.text(),
                 )
+            settings = self._video_settings()
+            self.batch_manager.prepare_start(prompt, settings, output_dir)
             login_future = self.session_manager.open_all_sessions(
                 credentials,
                 force_relogin=False,
             )
+            self._pending_started_workers.clear()
             self._pending_batch_start = (
                 login_future,
                 prompt,
-                self._video_settings(),
+                settings,
                 output_dir,
             )
             self.global_status.setText(
-                "Đang mở đồng thời 3 Chrome profile, đăng nhập Google/Muse; batch sẽ tự chạy khi cả 3 READY."
+                "Đang mở đồng thời 3 Chrome profile; tài khoản nào READY sẽ tự chạy ngay, không chờ tài khoản lỗi."
             )
         except Exception as exc:
             QMessageBox.warning(self, "Không thể bắt đầu batch Muse", str(exc))
@@ -447,6 +451,7 @@ class MuseAccountsPage(QWidget):
 
     def _stop_all(self) -> None:
         self._pending_batch_start = None
+        self._pending_started_workers.clear()
         batch_count = self.batch_manager.stop_all()
         session_count = self.session_manager.stop_all()
         self.global_status.setText(
@@ -567,7 +572,7 @@ class MuseAccountsPage(QWidget):
         if blockers:
             message = "Chưa thể bắt đầu: " + "; ".join(blockers) + "."
         elif self._pending_batch_start is not None or self.session_manager.busy:
-            message = "Đang mở Chrome và đăng nhập Google/Muse cho cả 3 tài khoản."
+            message = "Đang đăng nhập; tài khoản READY sẽ tự bắt đầu batch độc lập."
         elif batch.running:
             message = "Ba worker Muse đang chạy độc lập."
         elif not_ready:
@@ -626,17 +631,49 @@ class MuseAccountsPage(QWidget):
 
     def _collect_pending_batch_start(self) -> None:
         pending = self._pending_batch_start
-        if pending is None or not pending[0].done():
+        if pending is None:
+            return
+        login_future, prompt, settings, output_dir = pending
+        ready_ids = {
+            item.session_id
+            for item in self.session_manager.snapshots()
+            if item.state == MuseSessionState.READY and item.driver_open
+        }
+        new_ready = ready_ids - self._pending_started_workers
+        try:
+            if new_ready:
+                if not self._pending_started_workers:
+                    self._track(self.batch_manager.start_all(prompt, settings, output_dir))
+                else:
+                    self._track(self.batch_manager.start_ready_workers(new_ready))
+                self._pending_started_workers.update(new_ready)
+                labels = ", ".join(str(value) for value in sorted(new_ready))
+                self.global_status.setText(
+                    f"Tài khoản {labels} đã READY và bắt đầu gửi ảnh + prompt; các tài khoản khác tiếp tục đăng nhập."
+                )
+        except Exception as exc:
+            self.global_status.setText(f"Không thể khởi động worker Muse READY: {exc}")
+            self._pending_batch_start = None
+            self._pending_started_workers.clear()
+            QMessageBox.warning(self, "Không thể bắt đầu batch Muse", str(exc))
+            return
+        if not login_future.done():
             return
         self._pending_batch_start = None
-        login_future, prompt, settings, output_dir = pending
+        started = sorted(self._pending_started_workers)
+        self._pending_started_workers.clear()
         try:
             login_future.result()
-            self._track(self.batch_manager.start_all(prompt, settings, output_dir))
-            self.global_status.setText("Cả 3 tài khoản đã READY; ba worker video đang chạy đồng thời.")
+            self.global_status.setText("Cả 3 tài khoản đã đăng nhập; các worker READY đang chạy độc lập.")
         except Exception as exc:
-            self.global_status.setText(f"Không thể bắt đầu batch Muse: {exc}")
-            QMessageBox.warning(self, "Không thể bắt đầu batch Muse", str(exc))
+            if started:
+                labels = ", ".join(str(value) for value in started)
+                self.global_status.setText(
+                    f"Tài khoản {labels} vẫn đang chạy; tài khoản đăng nhập lỗi không làm dừng worker khác. {exc}"
+                )
+            else:
+                self.global_status.setText(f"Không có tài khoản nào READY để chạy batch: {exc}")
+                QMessageBox.warning(self, "Không thể bắt đầu batch Muse", str(exc))
 
     def _collect_futures(self) -> None:
         pending: list[Future] = []
