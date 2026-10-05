@@ -446,7 +446,7 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
         expected_login_url = google_muse_login_url("owner@example.com")
         self.assertEqual(self.drivers[1].requested_urls[0], expected_login_url)
-        self.assertIn("/AddSession?", expected_login_url)
+        self.assertIn("/AccountChooser?", expected_login_url)
         self.assertIn("Email=owner%40example.com", expected_login_url)
         self.assertIn("accounts.google.com%2FManageAccount", expected_login_url)
         self.assertEqual(self.drivers[1].password.value, secret + GOOGLE_ENTER_KEY)

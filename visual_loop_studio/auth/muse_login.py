@@ -16,7 +16,7 @@ from utils.paths import DATA_DIR, USER_DATA_ROOT
 
 MUSE_START_URL = "https://muse.ai/"
 GOOGLE_MUSE_LOGIN_URL = (
-    "https://accounts.google.com/AddSession?"
+    "https://accounts.google.com/AccountChooser?"
     "continue=https%3A%2F%2Faccounts.google.com%2FManageAccount&hl=en"
 )
 MUSE_ALLOWED_HOSTS = frozenset({"muse.ai", "auth.muse.ai", "accounts.google.com"})
@@ -84,7 +84,7 @@ EMAIL_PATTERN = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 
 
 def google_muse_login_url(email: str) -> str:
-    """Open Google's add-session flow for one exact Muse profile account."""
+    """Choose one exact saved Google account without forcing a new sign-in."""
     query = urlencode(
         {
             "continue": "https://accounts.google.com/ManageAccount",
@@ -92,7 +92,7 @@ def google_muse_login_url(email: str) -> str:
             "Email": _normalize_email(email),
         }
     )
-    return f"https://accounts.google.com/AddSession?{query}"
+    return f"https://accounts.google.com/AccountChooser?{query}"
 
 
 class MuseLoginError(RuntimeError):
