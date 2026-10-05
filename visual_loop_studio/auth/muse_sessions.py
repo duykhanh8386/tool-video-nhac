@@ -768,6 +768,17 @@ class MuseSessionManager:
                             message="Muse cần thao tác xác minh bổ sung trên auth.muse.ai; hãy hoàn tất trong Chrome.",
                         )
             elif host == "accounts.google.com":
+                if "/manageaccount" in url.casefold():
+                    manual_mode = False
+                    idle_polls = 0
+                    self._set_state(
+                        session,
+                        MuseSessionState.OPENING,
+                        progress=45,
+                        status_message="Google đã đăng nhập; đang mở Muse…",
+                    )
+                    self._navigate_with_retry(session, self.start_url)
+                    return False
                 password_key = (url, "google_password")
                 password_submitted = password_key in actions
                 if helper._requires_manual_google_step(

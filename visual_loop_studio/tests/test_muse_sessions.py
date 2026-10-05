@@ -106,6 +106,7 @@ class FakeDriver:
         self.muse_identifier_login = muse_identifier_login
         self.muse_security_code = muse_security_code
         self.waitlist = waitlist
+        self.google_authenticated = False
         self.muse_stage = ""
         self.closed = False
         self.quit_called = False
@@ -174,7 +175,25 @@ class FakeDriver:
 
     def get(self, _url):
         self._record_thread()
-        self.requested_urls.append(str(_url))
+        url = str(_url)
+        self.requested_urls.append(url)
+        if url.startswith("https://accounts.google.com/"):
+            self._current_url = (
+                "https://accounts.google.com/ManageAccount"
+                if self.google_authenticated
+                else "https://accounts.google.com/signin/v2/challenge/pwd"
+            )
+        elif url.startswith("https://muse.ai/"):
+            if self.waitlist:
+                self._current_url = "https://muse.ai/access"
+                self.logged_in = False
+            elif self.muse_identifier_login:
+                self._current_url = "https://muse.ai/"
+                self.muse_stage = "landing"
+                self.logged_in = False
+            else:
+                self._current_url = "https://muse.ai/chat"
+                self.logged_in = True
 
     def delete_all_cookies(self):
         self._record_thread()
@@ -253,9 +272,9 @@ class FakeDriver:
         if GOOGLE_ENTER_KEY in {str(value) for value in values}:
             if self.login_barrier is not None:
                 self.login_barrier.wait(timeout=2)
-            if self.muse_identifier_login and self._current_url.startswith("https://accounts.google.com/"):
-                self._current_url = "https://muse.ai/"
-                self.muse_stage = "landing"
+            if self._current_url.startswith("https://accounts.google.com/"):
+                self.google_authenticated = True
+                self._current_url = "https://accounts.google.com/ManageAccount"
             else:
                 self.complete_login()
 
@@ -398,6 +417,7 @@ class MuseSessionManagerTests(unittest.TestCase):
 
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
         self.assertEqual(self.drivers[1].requested_urls[0], GOOGLE_MUSE_LOGIN_URL)
+        self.assertIn("accounts.google.com%2FManageAccount", GOOGLE_MUSE_LOGIN_URL)
         self.assertEqual(self.drivers[1].password.value, secret + GOOGLE_ENTER_KEY)
         checkpoint = (self.root / "data" / "muse_sessions.json").read_text(encoding="utf-8")
         self.assertNotIn(secret, checkpoint)

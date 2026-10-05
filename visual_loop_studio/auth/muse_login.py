@@ -17,7 +17,7 @@ from utils.paths import DATA_DIR, USER_DATA_ROOT
 MUSE_START_URL = "https://muse.ai/"
 GOOGLE_MUSE_LOGIN_URL = (
     "https://accounts.google.com/AccountChooser?"
-    "continue=https%3A%2F%2Fmuse.ai%2F&hl=en"
+    "continue=https%3A%2F%2Faccounts.google.com%2FManageAccount&hl=en"
 )
 MUSE_ALLOWED_HOSTS = frozenset({"muse.ai", "auth.muse.ai", "accounts.google.com"})
 MUSE_PROFILES_DIR = USER_DATA_ROOT / "MuseChromeProfiles"
