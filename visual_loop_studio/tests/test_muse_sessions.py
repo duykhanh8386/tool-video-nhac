@@ -102,6 +102,7 @@ class FakeDriver:
         waitlist: bool = False,
         unverified_manage_account: bool = False,
         muse_page_load_timeout: bool = False,
+        google_two_factor: bool = False,
     ) -> None:
         self.profile = Path(profile)
         self.response = response
@@ -114,6 +115,7 @@ class FakeDriver:
         self.waitlist = waitlist
         self.unverified_manage_account = unverified_manage_account
         self.muse_page_load_timeout = muse_page_load_timeout
+        self.google_two_factor = google_two_factor
         self.google_authenticated = not login_required
         self.google_email = ""
         self.muse_stage = ""
@@ -273,7 +275,10 @@ class FakeDriver:
             return []
         if by == "tag name" and selector == "body":
             if self._current_url.startswith("https://accounts.google.com/"):
-                self.body.text = "other@example.com" if self.unverified_manage_account else self.google_email
+                if self.google_two_factor and "/challenge/totp" in self._current_url:
+                    self.body.text = "2-Step Verification"
+                else:
+                    self.body.text = "other@example.com" if self.unverified_manage_account else self.google_email
             elif self.waitlist:
                 self.body.text = "You're on the waitlist. Muse isn't available in your country or region yet."
             else:
@@ -297,8 +302,11 @@ class FakeDriver:
             if self.login_barrier is not None:
                 self.login_barrier.wait(timeout=2)
             if self._current_url.startswith("https://accounts.google.com/"):
-                self.google_authenticated = True
-                self._current_url = "https://accounts.google.com/ManageAccount"
+                if self.google_two_factor:
+                    self._current_url = "https://accounts.google.com/signin/challenge/totp"
+                else:
+                    self.google_authenticated = True
+                    self._current_url = "https://accounts.google.com/ManageAccount"
             else:
                 self.complete_login()
 
@@ -314,6 +322,7 @@ class FakeDriver:
     def complete_login(self):
         if self._current_url.startswith("https://accounts.google.com/"):
             self.google_authenticated = True
+            self.google_two_factor = False
             self._current_url = "https://accounts.google.com/ManageAccount"
         else:
             self.logged_in = True
@@ -458,7 +467,7 @@ class MuseSessionManagerTests(unittest.TestCase):
         future = self.manager.open_session(
             1,
             "owner@example.com",
-            password="must-not-be-used",
+            password="",
             manual_browser=True,
         )
         self._wait_state(1, MuseSessionState.LOGIN_REQUIRED)
@@ -475,6 +484,54 @@ class MuseSessionManagerTests(unittest.TestCase):
         snapshot = self.manager.snapshot(1)
         self.assertEqual(snapshot.state, MuseSessionState.READY)
         self.assertTrue(snapshot.driver_open)
+
+    def test_native_browser_assisted_login_types_password_and_opens_muse(self):
+        self.driver_options[1] = {"login_required": True}
+
+        future = self.manager.open_session(
+            1,
+            "owner@example.com",
+            password="temporary-secret",
+            manual_browser=True,
+        )
+        future.result(timeout=2)
+
+        driver = self.drivers[1]
+        snapshot = self.manager.snapshot(1)
+        self.assertEqual(snapshot.state, MuseSessionState.READY)
+        self.assertTrue(snapshot.driver_open)
+        self.assertEqual(driver.google_email, "owner@example.com")
+        self.assertTrue(driver.google_authenticated)
+        self.assertEqual(driver.current_url, "https://muse.ai/chat")
+        self.assertIn("temporary-secret", driver.password.value)
+
+    def test_native_browser_assisted_login_waits_for_manual_two_factor_then_continues(self):
+        self.driver_options[1] = {"login_required": True, "google_two_factor": True}
+
+        future = self.manager.open_session(
+            1,
+            "owner@example.com",
+            password="temporary-secret",
+            manual_browser=True,
+        )
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            driver = self.drivers.get(1)
+            if (
+                driver is not None
+                and "/challenge/totp" in driver.current_url
+                and self.manager.snapshot(1).state == MuseSessionState.LOGIN_REQUIRED
+            ):
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("Assisted login did not reach the manual 2FA challenge")
+
+        driver.complete_login()
+        future.result(timeout=2)
+
+        self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
+        self.assertEqual(driver.current_url, "https://muse.ai/chat")
 
     def test_discovers_and_binds_one_ready_muse_tab_per_profile(self):
         self._open_three()

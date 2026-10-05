@@ -795,7 +795,7 @@ class MuseSessionManager:
         if force_relogin and session.driver is not None:
             self._quit_driver(session)
         if open_mode == MuseSessionOpenMode.MANUAL_BROWSER and session.driver is None:
-            self._run_native_browser_login(session)
+            self._run_native_browser_login(session, assisted=bool(password))
         if session.driver is None:
             session.profile_dir.mkdir(parents=True, exist_ok=True)
             profile_key = str(session.profile_dir.resolve()).casefold()
@@ -820,7 +820,7 @@ class MuseSessionManager:
                     "Không thể mở Chrome profile Muse riêng; hãy đóng cửa sổ đang dùng cùng profile rồi thử lại."
                 ) from None
         helper = MuseLoginService(start_url=self.start_url, store=self.account_store)
-        if open_mode == MuseSessionOpenMode.MANUAL_BROWSER:
+        if open_mode == MuseSessionOpenMode.MANUAL_BROWSER and not password:
             self._open_manual_browser_login(session, helper)
             return
         target_google_url = google_muse_login_url(session.email)
@@ -1007,9 +1007,9 @@ class MuseSessionManager:
                     self._login_required(
                         session,
                         message=(
-                            "Google từ chối đăng nhập trong Chrome đang được Selenium điều khiển "
-                            "(browser or app may not be secure). Tool không được giả mạo trình duyệt để vượt chặn này; "
-                            "hãy hoàn tất đăng nhập Google bằng Chrome thường trong đúng profile rồi chạy lại."
+                            "Google từ chối bước điền tự động (browser or app may not be secure). "
+                            "Tool không giả mạo trình duyệt để vượt chặn; hãy hoàn tất đăng nhập thủ công "
+                            "ngay trong cửa sổ này, sau đó tool sẽ tự kiểm tra và mở Muse."
                         ),
                     )
                 elif helper._requires_manual_google_step(
@@ -1209,15 +1209,22 @@ class MuseSessionManager:
         session.known_handles.update(handles)
         session.owned_handles.add(handle)
 
-    def _run_native_browser_login(self, session: MuseSession) -> None:
+    def _run_native_browser_login(self, session: MuseSession, *, assisted: bool = False) -> None:
+        if assisted:
+            login_message = (
+                "Chrome/Edge thường đã mở. Tool sẽ chỉ điền email/mật khẩu trên accounts.google.com; "
+                "CAPTCHA, passkey hoặc 2FA sẽ chờ bạn xử lý thủ công."
+            )
+        else:
+            login_message = (
+                "Chrome/Edge thường đã mở. Hãy tự đăng nhập Google và mở Muse thành công; "
+                "giữ nguyên cửa sổ, tool sẽ tự nhận tab READY và tiếp tục."
+            )
         self._set_state(
             session,
             MuseSessionState.LOGIN_REQUIRED,
             progress=10,
-            status_message=(
-                "Chrome/Edge thường đã mở. Hãy tự đăng nhập Google và mở Muse thành công; "
-                "giữ nguyên cửa sổ, tool sẽ tự nhận tab READY và tiếp tục."
-            ),
+            status_message=login_message,
             error="",
         )
         session.profile_dir.mkdir(parents=True, exist_ok=True)
