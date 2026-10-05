@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -745,6 +748,72 @@ def create_muse_chrome_driver(profile: Path, download_dir: Path | None = None):
         )
     options.page_load_strategy = "eager"
     return webdriver.Chrome(options=options)
+
+
+def muse_native_browser_command(executable: str | Path, profile: Path, start_url: str) -> list[str]:
+    """Build a normal Chrome/Edge command without automation-evasion switches."""
+    return [
+        str(executable),
+        f"--user-data-dir={profile.resolve()}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--start-maximized",
+        validate_muse_start_url(start_url),
+    ]
+
+
+def launch_muse_native_browser(profile: Path, start_url: str = MUSE_START_URL) -> subprocess.Popen:
+    """Open an installed Chrome/Edge normally so the user can authenticate Muse."""
+    profile.mkdir(parents=True, exist_ok=True)
+    errors: list[str] = []
+    for name, executable in _native_browser_candidates():
+        try:
+            return subprocess.Popen(muse_native_browser_command(executable, profile, start_url))
+        except OSError as exc:
+            errors.append(f"{name}: {exc}")
+    detail = " | ".join(errors)
+    if detail:
+        detail = " " + detail
+    raise MuseLoginError(
+        "Không mở được Google Chrome hoặc Microsoft Edge bình thường. "
+        f"Hãy cài/cập nhật một trong hai trình duyệt.{detail}"
+    )
+
+
+def _native_browser_candidates() -> list[tuple[str, Path]]:
+    candidates: list[tuple[str, Path]] = []
+
+    def add(name: str, value: str | Path | None) -> None:
+        if not value:
+            return
+        path = Path(value)
+        if not path.is_file():
+            return
+        key = str(path.resolve()).casefold()
+        if any(str(existing.resolve()).casefold() == key for _label, existing in candidates):
+            return
+        candidates.append((name, path))
+
+    program_files = os.environ.get("PROGRAMFILES")
+    program_files_x86 = os.environ.get("PROGRAMFILES(X86)")
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    for name, root, relative in (
+        ("Google Chrome", program_files, "Google/Chrome/Application/chrome.exe"),
+        ("Google Chrome", program_files_x86, "Google/Chrome/Application/chrome.exe"),
+        ("Google Chrome", local_app_data, "Google/Chrome/Application/chrome.exe"),
+        ("Microsoft Edge", program_files_x86, "Microsoft/Edge/Application/msedge.exe"),
+        ("Microsoft Edge", program_files, "Microsoft/Edge/Application/msedge.exe"),
+        ("Microsoft Edge", local_app_data, "Microsoft/Edge/Application/msedge.exe"),
+    ):
+        if root:
+            add(name, Path(root) / relative)
+    for name, command in (
+        ("Google Chrome", "chrome"),
+        ("Google Chrome", "google-chrome"),
+        ("Microsoft Edge", "msedge"),
+    ):
+        add(name, shutil.which(command))
+    return candidates
 
 
 def _create_chrome_driver(profile: Path):

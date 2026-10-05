@@ -326,6 +326,20 @@ class FakeDriver:
         self.closed = True
 
 
+class FakeNativeBrowserProcess:
+    def poll(self):
+        return 0
+
+    def terminate(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        return None
+
+
 class MuseSessionManagerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -360,6 +374,7 @@ class MuseSessionManagerTests(unittest.TestCase):
             "checkpoint_path": self.root / "data" / "muse_sessions.json",
             "account_store": MuseAccountStore(self.root / "data" / "muse_accounts.json"),
             "driver_factory": factory,
+            "native_browser_factory": lambda _profile, _url: FakeNativeBrowserProcess(),
             "poll_interval": 0.01,
             "stable_seconds": 0,
             "generation_timeout": 0.35,
@@ -432,6 +447,65 @@ class MuseSessionManagerTests(unittest.TestCase):
 
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
         self.assertFalse(self.drivers[1].password.value)
+
+    def test_manual_browser_login_never_types_google_credentials(self):
+        self.driver_options[1] = {"login_required": True}
+
+        future = self.manager.open_session(
+            1,
+            "owner@example.com",
+            password="must-not-be-used",
+            manual_browser=True,
+        )
+        self._wait_state(1, MuseSessionState.LOGIN_REQUIRED)
+        driver = self.drivers[1]
+
+        self.assertEqual(driver.password.value, "")
+        self.assertEqual(driver.google_email, "")
+        self.assertEqual(driver.requested_urls, [])
+
+        driver._current_url = "https://muse.ai/chat"
+        driver.logged_in = True
+        future.result(timeout=2)
+
+        snapshot = self.manager.snapshot(1)
+        self.assertEqual(snapshot.state, MuseSessionState.READY)
+        self.assertTrue(snapshot.driver_open)
+
+    def test_discovers_and_binds_one_ready_muse_tab_per_profile(self):
+        self._open_three()
+
+        candidates = self.manager.discover_muse_tabs().result(timeout=2)
+
+        self.assertEqual(len(candidates), 3)
+        self.assertEqual({item.session_id for item in candidates}, {1, 2, 3})
+        self.assertTrue(all(item.ready for item in candidates))
+        selections = {item.session_id: item.handle for item in candidates}
+        emails = {session_id: f"owner{session_id}@example.com" for session_id in range(1, 4)}
+        navigation_counts = {session_id: len(driver.requested_urls) for session_id, driver in self.drivers.items()}
+
+        self.manager.bind_existing_tabs(emails, selections).result(timeout=2)
+
+        self.assertTrue(
+            all(self.manager.snapshot(session_id).state == MuseSessionState.READY for session_id in range(1, 4))
+        )
+        self.assertEqual(
+            navigation_counts,
+            {session_id: len(driver.requested_urls) for session_id, driver in self.drivers.items()},
+        )
+
+    def test_existing_tab_binding_rejects_non_muse_hostname(self):
+        self.manager.open_session(1, "owner@example.com").result(timeout=2)
+        self.drivers[1]._current_url = "https://muse.ai.evil.invalid/chat"
+
+        candidates = self.manager.discover_muse_tabs().result(timeout=2)
+
+        self.assertEqual(candidates, ())
+        with self.assertRaisesRegex(ValueError, "đúng một tab"):
+            self.manager.bind_existing_tabs(
+                {1: "one@example.com"},
+                {1: "main"},
+            )
 
     def test_password_is_autofilled_once_and_never_written_to_checkpoint(self):
         self.driver_options[1] = {"login_required": True}

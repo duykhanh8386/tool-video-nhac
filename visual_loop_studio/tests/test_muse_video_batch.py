@@ -368,6 +368,13 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertIn(MuseVideoJobState.SUBMITTED, transitions)
             self.assertIn(MuseVideoJobState.DOWNLOADING, transitions)
 
+            download_count = len(driver.downloaded_video_ids)
+            second_result = automation.process(driver, job, context)
+
+            self.assertEqual(second_result, target)
+            self.assertEqual(driver.generate_clicks, 1)
+            self.assertEqual(len(driver.downloaded_video_ids), download_count)
+
     def test_submits_three_images_once_and_downloads_three_distinct_videos_in_order(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

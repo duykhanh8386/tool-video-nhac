@@ -17,6 +17,7 @@ from auth.muse_login import (
     MuseLoginService,
     MuseLoginTimeout,
     MuseUnsafeNavigationError,
+    muse_native_browser_command,
 )
 
 
@@ -146,6 +147,18 @@ class MuseLoginServiceTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_native_login_browser_uses_real_profile_without_automation_evasion_flags(self):
+        executable = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")
+        profile = Path(self.temp.name) / "profile"
+
+        command = muse_native_browser_command(executable, profile, "https://muse.ai/")
+
+        self.assertEqual(command[0], str(executable))
+        self.assertIn(f"--user-data-dir={profile.resolve()}", command)
+        self.assertEqual(command[-1], "https://muse.ai/")
+        self.assertFalse(any("user-agent" in value.casefold() for value in command))
+        self.assertFalse(any("disable-blink-features" in value.casefold() for value in command))
 
     def service(self, driver: FakeDriver, **kwargs) -> MuseLoginService:
         return MuseLoginService(

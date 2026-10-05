@@ -30,6 +30,7 @@ from auth.muse_login import (
     _utc_now,
     create_muse_chrome_driver,
     google_muse_login_url,
+    launch_muse_native_browser,
     validate_muse_start_url,
 )
 from utils.config import read_json, write_json
@@ -108,6 +109,12 @@ class MuseSessionState(str, Enum):
     STOPPING = "STOPPING"
 
 
+class MuseSessionOpenMode(str, Enum):
+    AUTOMATIC = "automatic"
+    MANUAL_BROWSER = "manual_browser"
+    EXISTING_TAB = "existing_tab"
+
+
 class MuseSessionError(RuntimeError):
     """A safe, user-facing error that never includes browser session data."""
 
@@ -152,6 +159,21 @@ class MuseSessionSnapshot:
     driver_open: bool
 
 
+@dataclass(frozen=True)
+class MuseTabCandidate:
+    session_id: int
+    handle: str
+    title: str
+    url: str
+    ready: bool
+
+    @property
+    def label(self) -> str:
+        state = "READY" if self.ready else "Chưa đăng nhập"
+        title = self.title.strip() or "Muse"
+        return f"{title} — {state}"
+
+
 @dataclass
 class MuseSession:
     session_id: int
@@ -174,6 +196,9 @@ class MuseSession:
     owned_handles: set[str] = field(default_factory=set)
     known_handles: set[str] = field(default_factory=set)
     google_verified_email: str = ""
+    selected_handle: str = ""
+    open_mode: MuseSessionOpenMode = MuseSessionOpenMode.AUTOMATIC
+    native_browser_process: Any = None
     executor: ThreadPoolExecutor = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -184,6 +209,7 @@ class MuseSession:
 
 
 DriverFactory = Callable[[Path], Any]
+NativeBrowserFactory = Callable[[Path, str], Any]
 _UNSET = object()
 
 
@@ -198,6 +224,7 @@ class MuseSessionManager:
         checkpoint_path: str | Path = MUSE_SESSION_CHECKPOINT,
         account_store: MuseAccountStore | None = None,
         driver_factory: DriverFactory | None = None,
+        native_browser_factory: NativeBrowserFactory | None = None,
         login_timeout: float = 15 * 60,
         generation_timeout: float = 10 * 60,
         poll_interval: float = 0.35,
@@ -211,6 +238,7 @@ class MuseSessionManager:
         self.checkpoint_path = Path(checkpoint_path)
         self.account_store = account_store or MuseAccountStore()
         self._driver_factory = driver_factory or _create_session_chrome_driver
+        self._native_browser_factory = native_browser_factory or launch_muse_native_browser
         self.login_timeout = max(1.0, float(login_timeout))
         self.generation_timeout = max(0.05, float(generation_timeout))
         self.poll_interval = max(0.02, float(poll_interval))
@@ -259,6 +287,7 @@ class MuseSessionManager:
         *,
         password: str = "",
         force_relogin: bool = False,
+        manual_browser: bool = False,
     ) -> Future[Any]:
         normalized = str(email or "").strip().casefold()
         if not normalized or "@" not in normalized:
@@ -266,7 +295,13 @@ class MuseSessionManager:
         secret = bytearray(str(password or "").encode("utf-8"))
         try:
             return self._schedule(
-                self._launch_open(int(session_id), normalized, bool(force_relogin), secret)
+                self._launch_open(
+                    int(session_id),
+                    normalized,
+                    bool(force_relogin),
+                    secret,
+                    MuseSessionOpenMode.MANUAL_BROWSER if manual_browser else MuseSessionOpenMode.AUTOMATIC,
+                )
             )
         except Exception:
             _wipe_secret(secret)
@@ -277,6 +312,7 @@ class MuseSessionManager:
         credentials: dict[int, tuple[str, str]],
         *,
         force_relogin: bool = False,
+        manual_browser: bool = False,
     ) -> Future[Any]:
         if set(credentials) != set(range(1, MUSE_SESSION_COUNT + 1)):
             raise ValueError("Cần nhập đủ email Google cho cả 3 tài khoản Muse.")
@@ -299,12 +335,42 @@ class MuseSessionManager:
             raise ValueError("Ba phiên Muse phải sử dụng ba tài khoản Google khác nhau.")
         try:
             return self._schedule(
-                self._launch_open_all(prepared, bool(force_relogin))
+                self._launch_open_all(
+                    prepared,
+                    bool(force_relogin),
+                    MuseSessionOpenMode.MANUAL_BROWSER if manual_browser else MuseSessionOpenMode.AUTOMATIC,
+                )
             )
         except Exception:
             for _email, secret in prepared.values():
                 _wipe_secret(secret)
             raise
+
+    def discover_muse_tabs(self) -> Future[Any]:
+        """Return Muse tabs from the three tool-owned Chrome profiles.
+
+        Selenium drivers are thread-confined, so discovery is scheduled on each
+        session executor instead of touching drivers from the Qt thread.
+        """
+        return self._schedule(self._discover_muse_tabs())
+
+    def bind_existing_tabs(
+        self,
+        emails: dict[int, str],
+        selections: dict[int, str],
+    ) -> Future[Any]:
+        required = set(range(1, MUSE_SESSION_COUNT + 1))
+        if set(emails) != required or set(selections) != required:
+            raise ValueError("Cần chọn đúng một tab Muse cho cả 3 tài khoản.")
+        normalized = {key: str(value or "").strip().casefold() for key, value in emails.items()}
+        if any("@" not in value for value in normalized.values()):
+            raise ValueError("Hãy nhập email Google hợp lệ cho cả 3 tài khoản Muse.")
+        if len(set(normalized.values())) != MUSE_SESSION_COUNT:
+            raise ValueError("Ba tab Muse phải được gán cho ba tài khoản Google khác nhau.")
+        handles = {key: str(value or "").strip() for key, value in selections.items()}
+        if any(not value for value in handles.values()):
+            raise ValueError("Hãy quét và chọn một tab Muse cho từng tài khoản.")
+        return self._schedule(self._launch_bind_existing_tabs(normalized, handles))
 
     def send_prompt(self, session_id: int, prompt: str) -> Future[Any]:
         text = str(prompt or "").strip()
@@ -388,6 +454,7 @@ class MuseSessionManager:
         email: str,
         force_relogin: bool,
         password: bytearray,
+        open_mode: MuseSessionOpenMode = MuseSessionOpenMode.AUTOMATIC,
     ) -> None:
         session = self._require_session(session_id)
         assert self._manager_lock is not None
@@ -397,9 +464,10 @@ class MuseSessionManager:
                 self._ensure_available(session)
                 self._ensure_unique_account(session_id, email)
                 self._bind_account(session, email)
+                session.open_mode = open_mode
                 session.stop_event.clear()
                 task = asyncio.create_task(
-                    self._open(session, force_relogin, password),
+                    self._open(session, force_relogin, password, open_mode),
                     name=f"muse-open-{session_id}",
                 )
                 self._claim_task(session, task)
@@ -413,6 +481,7 @@ class MuseSessionManager:
         self,
         credentials: dict[int, tuple[str, bytearray]],
         force_relogin: bool,
+        open_mode: MuseSessionOpenMode = MuseSessionOpenMode.AUTOMATIC,
     ) -> dict[int, Any]:
         ordered = [
             (
@@ -422,6 +491,7 @@ class MuseSessionManager:
                     credentials[session_id][0],
                     force_relogin,
                     credentials[session_id][1],
+                    open_mode,
                 ),
             )
             for session_id in range(1, MUSE_SESSION_COUNT + 1)
@@ -441,6 +511,74 @@ class MuseSessionManager:
             session_id: result
             for (session_id, _coroutine), result in zip(ordered, results)
         }
+
+    async def _discover_muse_tabs(self) -> tuple[MuseTabCandidate, ...]:
+        async def discover(session: MuseSession) -> list[MuseTabCandidate]:
+            if not self._driver_looks_open(session):
+                return []
+            return await self._loop.run_in_executor(
+                session.executor,
+                self._discover_session_tabs_blocking,
+                session,
+            )
+
+        values = await asyncio.gather(
+            *(discover(self.sessions[session_id]) for session_id in range(1, MUSE_SESSION_COUNT + 1)),
+            return_exceptions=True,
+        )
+        tabs: list[MuseTabCandidate] = []
+        for value in values:
+            if isinstance(value, list):
+                tabs.extend(value)
+        return tuple(tabs)
+
+    async def _launch_bind_existing_tabs(
+        self,
+        emails: dict[int, str],
+        handles: dict[int, str],
+    ) -> dict[int, Any]:
+        ordered = [
+            (
+                session_id,
+                self._launch_bind_existing_tab(session_id, emails[session_id], handles[session_id]),
+            )
+            for session_id in range(1, MUSE_SESSION_COUNT + 1)
+        ]
+        results = await asyncio.gather(
+            *(coroutine for _session_id, coroutine in ordered),
+            return_exceptions=True,
+        )
+        failures = [
+            f"Tài khoản {session_id}: {result}"
+            for (session_id, _coroutine), result in zip(ordered, results)
+            if isinstance(result, BaseException)
+        ]
+        if failures:
+            raise MuseSessionError("; ".join(failures))
+        return {
+            session_id: result
+            for (session_id, _coroutine), result in zip(ordered, results)
+        }
+
+    async def _launch_bind_existing_tab(self, session_id: int, email: str, handle: str) -> None:
+        session = self._require_session(session_id)
+        assert self._manager_lock is not None
+        task: asyncio.Task[Any] | None = None
+        async with self._manager_lock:
+            self._ensure_available(session)
+            self._ensure_unique_account(session_id, email)
+            self._bind_account(session, email)
+            session.open_mode = MuseSessionOpenMode.EXISTING_TAB
+            session.stop_event.clear()
+            task = asyncio.create_task(
+                self._bind_existing_tab(session, handle),
+                name=f"muse-bind-tab-{session_id}",
+            )
+            self._claim_task(session, task)
+        try:
+            await task
+        finally:
+            self._release_task(session, task)
 
     async def _launch_send(self, session_id: int, prompt: str) -> str | None:
         session = self._require_session(session_id)
@@ -479,7 +617,13 @@ class MuseSessionManager:
                 self._release_task(session, task)
         return {session.session_id: result for (session, _task), result in zip(claimed, results)}
 
-    async def _open(self, session: MuseSession, force_relogin: bool, password: bytearray) -> None:
+    async def _open(
+        self,
+        session: MuseSession,
+        force_relogin: bool,
+        password: bytearray,
+        open_mode: MuseSessionOpenMode = MuseSessionOpenMode.AUTOMATIC,
+    ) -> None:
         async with session.lock:
             self._set_state(
                 session,
@@ -495,6 +639,7 @@ class MuseSessionManager:
                     session,
                     force_relogin,
                     password,
+                    open_mode,
                 )
             except MuseSessionStopped:
                 await self._loop.run_in_executor(session.executor, self._quit_driver, session)
@@ -527,6 +672,43 @@ class MuseSessionManager:
                 )
                 self._set_account_status(session, "error")
                 raise MuseSessionError(message) from None
+
+    async def _bind_existing_tab(self, session: MuseSession, handle: str) -> None:
+        async with session.lock:
+            self._set_state(
+                session,
+                MuseSessionState.OPENING,
+                progress=25,
+                status_message="Đang kiểm tra tab Muse đã chọn…",
+                error="",
+            )
+            try:
+                await self._loop.run_in_executor(
+                    session.executor,
+                    self._bind_existing_tab_blocking,
+                    session,
+                    handle,
+                )
+            except Exception as exc:
+                message = str(exc) if isinstance(exc, MuseSessionError) else (
+                    "Không thể gắn worker vào tab Muse đã chọn. Hãy quét lại danh sách tab."
+                )
+                self._set_state(
+                    session,
+                    MuseSessionState.FAILED,
+                    progress=0,
+                    status_message="Tab Muse đã chọn không còn sẵn sàng.",
+                    error=message,
+                )
+                raise MuseSessionError(message) from None
+            self._set_state(
+                session,
+                MuseSessionState.READY,
+                progress=100,
+                status_message=f"Đã gắn tab Muse có sẵn: {session.email}",
+                error="",
+            )
+            self._set_account_status(session, "connected")
 
     async def _send(self, session: MuseSession, prompt: str) -> str | None:
         async with session.lock:
@@ -603,10 +785,13 @@ class MuseSessionManager:
         session: MuseSession,
         force_relogin: bool,
         password: bytearray,
+        open_mode: MuseSessionOpenMode = MuseSessionOpenMode.AUTOMATIC,
     ) -> None:
         self._check_stopped(session)
         if force_relogin and session.driver is not None:
             self._quit_driver(session)
+        if open_mode == MuseSessionOpenMode.MANUAL_BROWSER and session.driver is None:
+            self._run_native_browser_login(session)
         if session.driver is None:
             session.profile_dir.mkdir(parents=True, exist_ok=True)
             profile_key = str(session.profile_dir.resolve()).casefold()
@@ -631,6 +816,9 @@ class MuseSessionManager:
                     "Không thể mở Chrome profile Muse riêng; hãy đóng cửa sổ đang dùng cùng profile rồi thử lại."
                 ) from None
         helper = MuseLoginService(start_url=self.start_url, store=self.account_store)
+        if open_mode == MuseSessionOpenMode.MANUAL_BROWSER:
+            self._open_manual_browser_login(session, helper)
+            return
         target_google_url = google_muse_login_url(session.email)
         if session.google_verified_email.casefold() != session.email.casefold():
             self._navigate_with_retry(session, target_google_url)
@@ -901,6 +1089,165 @@ class MuseSessionManager:
                 if not manual_mode and self._clock() - started >= self.login_timeout:
                     raise MuseSessionTimeout("Đăng nhập Muse đã hết thời gian chờ.") from None
 
+    def _open_manual_browser_login(self, session: MuseSession, helper: MuseLoginService) -> None:
+        """Wait for a human-driven Muse login without typing or clicking Google UI."""
+        current_host = _hostname(_safe_url(session.driver))
+        if current_host not in MUSE_ALLOWED_HOSTS:
+            self._navigate_with_retry(session, self.start_url)
+        started = self._clock()
+        announced = False
+        while True:
+            self._check_stopped(session)
+            driver = session.driver
+            try:
+                handles = {str(handle) for handle in driver.window_handles}
+            except Exception:
+                raise MuseSessionError("Chrome/driver của phiên Muse đã đóng bất ngờ.") from None
+            new_handles = handles - session.known_handles
+            session.known_handles.update(new_handles)
+            session.owned_handles.update(new_handles)
+            handle, _url, host = helper._switch_to_relevant_window(driver, session.owned_handles)
+            if not handle:
+                raise MuseSessionError("Không còn tab đăng nhập Muse trong Chrome profile này.")
+            if host == "muse.ai" and helper._is_muse_waitlist(driver):
+                raise MuseSessionError(
+                    "Tài khoản này đang ở waitlist hoặc Muse chưa hỗ trợ khu vực của tài khoản."
+                )
+            if host == "muse.ai" and helper._is_muse_logged_in(driver):
+                session.selected_handle = handle
+                self._set_state(
+                    session,
+                    MuseSessionState.READY,
+                    progress=100,
+                    status_message=f"Đã nhận phiên Muse đăng nhập thủ công: {session.email}",
+                    error="",
+                )
+                self._set_account_status(session, "connected")
+                return
+            if not announced:
+                announced = True
+                self._login_required(
+                    session,
+                    message=(
+                        "Chrome hệ thống đã mở. Hãy tự bấm Log in/Continue with Google và hoàn tất "
+                        "đăng nhập trong cửa sổ này; tool không nhập mật khẩu, không giả User-Agent "
+                        "và sẽ tự tiếp tục khi tab Muse đã READY."
+                    ),
+                )
+            # Human login/2FA has no fixed timeout. Stop remains responsive.
+            if self._clock() - started >= self.login_timeout:
+                started = self._clock()
+            time.sleep(self.poll_interval)
+
+    def _discover_session_tabs_blocking(self, session: MuseSession) -> list[MuseTabCandidate]:
+        driver = session.driver
+        if driver is None:
+            return []
+        helper = MuseLoginService(start_url=self.start_url, store=self.account_store)
+        try:
+            handles = [str(handle) for handle in driver.window_handles]
+            original = str(driver.current_window_handle)
+        except Exception:
+            return []
+        values: list[MuseTabCandidate] = []
+        for handle in handles:
+            try:
+                driver.switch_to.window(handle)
+                url = _safe_url(driver)
+                if _hostname(url) != "muse.ai":
+                    continue
+                try:
+                    title = str(driver.title or "")
+                except Exception:
+                    title = ""
+                values.append(
+                    MuseTabCandidate(
+                        session_id=session.session_id,
+                        handle=handle,
+                        title=title,
+                        url=url,
+                        ready=helper._is_muse_logged_in(driver),
+                    )
+                )
+            except Exception:
+                continue
+        restore = session.selected_handle if session.selected_handle in handles else original
+        try:
+            driver.switch_to.window(restore)
+        except Exception:
+            pass
+        return values
+
+    def _bind_existing_tab_blocking(self, session: MuseSession, handle: str) -> None:
+        driver = session.driver
+        if driver is None or not session.driver_open:
+            raise MuseSessionError(
+                "Chrome profile này chưa mở. Hãy bấm Mở 3 Chrome/Muse trước rồi quét tab."
+            )
+        try:
+            handles = {str(value) for value in driver.window_handles}
+        except Exception:
+            raise MuseSessionError("Chrome profile đã đóng; hãy mở lại rồi quét tab.") from None
+        if handle not in handles:
+            raise MuseSessionError("Tab Muse đã chọn không còn tồn tại; hãy bấm Quét tab Muse.")
+        try:
+            driver.switch_to.window(handle)
+        except Exception:
+            raise MuseSessionError("Không thể chuyển tới tab Muse đã chọn.") from None
+        if _hostname(_safe_url(driver)) != "muse.ai":
+            raise MuseSessionError("Tab đã chọn không còn ở đúng hostname muse.ai.")
+        helper = MuseLoginService(start_url=self.start_url, store=self.account_store)
+        if not helper._is_muse_logged_in(driver):
+            raise MuseSessionAuthenticationError(
+                "Tab Muse đã chọn chưa đăng nhập xong; hãy hoàn tất đăng nhập rồi quét lại."
+            )
+        session.selected_handle = handle
+        session.known_handles.update(handles)
+        session.owned_handles.add(handle)
+
+    def _run_native_browser_login(self, session: MuseSession) -> None:
+        self._set_state(
+            session,
+            MuseSessionState.LOGIN_REQUIRED,
+            progress=10,
+            status_message=(
+                "Chrome/Edge thường đã mở. Hãy tự đăng nhập Google, mở Muse thành công, "
+                "sau đó đóng toàn bộ cửa sổ profile này để tool tiếp tục."
+            ),
+            error="",
+        )
+        try:
+            process = self._native_browser_factory(session.profile_dir, self.start_url)
+        except Exception as exc:
+            if isinstance(exc, MuseSessionError):
+                raise
+            message = str(exc) if isinstance(exc, Exception) else ""
+            raise MuseSessionError(message or "Không thể mở Chrome/Edge thường để đăng nhập Muse.") from None
+        session.native_browser_process = process
+        try:
+            while process.poll() is None:
+                self._check_stopped(session)
+                time.sleep(self.poll_interval)
+        except MuseSessionStopped:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            raise
+        finally:
+            session.native_browser_process = None
+        self._set_state(
+            session,
+            MuseSessionState.OPENING,
+            progress=55,
+            status_message="Đã đóng trình duyệt đăng nhập; đang mở lại profile để kiểm tra phiên Muse…",
+            error="",
+        )
+
     def _send_blocking(self, session: MuseSession, prompt: str) -> str:
         self._check_stopped(session)
         driver = session.driver
@@ -1159,6 +1506,14 @@ class MuseSessionManager:
         return bool(session.driver_open and session.driver is not None)
 
     def _quit_driver(self, session: MuseSession) -> None:
+        process = session.native_browser_process
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.terminate()
+            except Exception:
+                pass
+        session.native_browser_process = None
         driver = session.driver
         if driver is not None:
             try:
@@ -1168,6 +1523,8 @@ class MuseSessionManager:
         session.driver = None
         session.driver_open = False
         session.google_verified_email = ""
+        session.selected_handle = ""
+        session.open_mode = MuseSessionOpenMode.AUTOMATIC
         session.owned_handles.clear()
         session.known_handles.clear()
         if session.profile_acquired:
