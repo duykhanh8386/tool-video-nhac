@@ -129,10 +129,10 @@ class MuseAccountsPage(QWidget):
         title.setObjectName("pageTitle")
         root.addWidget(title)
         notice = QLabel(
-            "Mỗi tài khoản dùng một Chrome profile/driver riêng. Gmail/mật khẩu chỉ được giữ tạm trong bộ nhớ "
-            "để điền email ở bước đầu Muse và chỉ điền mật khẩu trên accounts.google.com khi bấm Bắt đầu cả 3; "
+            "Mỗi tài khoản dùng một Chrome profile/driver riêng. Email/mật khẩu Muse/Meta chỉ được giữ tạm trong bộ nhớ "
+            "và chỉ được tự điền trên đúng muse.ai khi bấm Bắt đầu cả 3; "
             "tool không lưu bí mật và không vượt CAPTCHA, "
-            "2FA, quota hoặc rate limit."
+            "mã xác minh, 2FA, quota hoặc rate limit."
         )
         notice.setWordWrap(True)
         notice.setObjectName("notice")
@@ -243,12 +243,12 @@ class MuseAccountsPage(QWidget):
         account = QComboBox()
         account.setEditable(True)
         account.setMinimumHeight(36)
-        account.lineEdit().setPlaceholderText("Email Google được phép sử dụng")
+        account.lineEdit().setPlaceholderText("Email Muse/Meta được phép sử dụng")
         password = QLineEdit()
         password.setMinimumHeight(36)
         password.setEchoMode(QLineEdit.EchoMode.Password)
         password.setClearButtonEnabled(True)
-        password.setPlaceholderText("Mật khẩu Google — không lưu, có thể để trống nếu profile còn phiên")
+        password.setPlaceholderText("Mật khẩu Muse/Meta — không lưu, có thể để trống nếu profile còn phiên")
         stop = QPushButton("Dừng")
         retry = QPushButton("Chạy lại ảnh lỗi")
         stop.clicked.connect(lambda _checked=False, value=worker_id: self._stop_worker(value))
@@ -259,14 +259,14 @@ class MuseAccountsPage(QWidget):
         profile.setObjectName("muted")
         profile.setWordWrap(True)
         login_help = QLabel(
-            "Khi bấm Bắt đầu cả 3, tool sẽ tự mở Chrome, vào Muse, chọn đăng nhập Google rồi điền hai ô trên. "
-            "Mật khẩu bị xóa ngay; CAPTCHA, 2FA hoặc xác minh thiết bị vẫn làm trong Chrome."
+            "Khi bấm Bắt đầu cả 3, tool sẽ tự mở Chrome, bấm Log in rồi điền email và mật khẩu Muse/Meta nếu trang yêu cầu. "
+            "Mật khẩu bị xóa ngay; mã email, CAPTCHA, 2FA hoặc xác minh thiết bị vẫn làm trong Chrome."
         )
         login_help.setObjectName("muted")
         login_help.setWordWrap(True)
-        grid.addWidget(QLabel("Email"), 0, 0)
+        grid.addWidget(QLabel("Email Muse/Meta"), 0, 0)
         grid.addWidget(account, 0, 1, 1, 2)
-        grid.addWidget(QLabel("Mật khẩu"), 1, 0)
+        grid.addWidget(QLabel("Mật khẩu Muse/Meta"), 1, 0)
         grid.addWidget(password, 1, 1, 1, 2)
         grid.addWidget(QLabel("Đăng nhập"), 2, 0)
         grid.addWidget(login_state, 2, 1, 1, 2)
@@ -560,9 +560,9 @@ class MuseAccountsPage(QWidget):
         emails = [widgets.account.currentText().strip().casefold() for widgets in self._workers.values()]
         invalid_accounts = [str(index) for index, email in enumerate(emails, 1) if "@" not in email]
         if invalid_accounts:
-            blockers.append("nhập Gmail hợp lệ cho tài khoản " + ", ".join(invalid_accounts))
+            blockers.append("nhập email Muse/Meta hợp lệ cho tài khoản " + ", ".join(invalid_accounts))
         elif len(set(emails)) != MUSE_SESSION_COUNT:
-            blockers.append("ba Gmail phải khác nhau")
+            blockers.append("ba email Muse/Meta phải khác nhau")
         if not batch.source_paths:
             blockers.append("bấm Phân bổ ảnh")
         if not self.prompt.toPlainText().strip():

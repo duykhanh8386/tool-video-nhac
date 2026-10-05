@@ -9,6 +9,8 @@ from auth.muse_login import (
     GOOGLE_ENTER_KEY,
     MUSE_APP_SELECTORS,
     MUSE_IDENTIFIER_SELECTORS,
+    MUSE_PASSWORD_SELECTORS,
+    MUSE_SECURITY_SELECTORS,
     MuseAccountStore,
     MuseLoginCancelled,
     MuseLoginService,
@@ -220,6 +222,38 @@ class MuseLoginServiceTests(unittest.TestCase):
             self.service(driver)._fill_muse_identifier(driver, "owner@example.com")
 
         self.assertEqual(identifier.value, "")
+
+    def test_meta_password_is_filled_only_on_exact_muse_host(self):
+        password = FakeElement(attrs={"type": "password", "aria-label": "Password"})
+        driver = FakeDriver(
+            FakePage(
+                "https://muse.ai/",
+                security={MUSE_PASSWORD_SELECTORS[0]: [password]},
+                body_text="Enter your password",
+            )
+        )
+        service = self.service(driver)
+        secret = bytearray(b"meta-secret")
+
+        self.assertFalse(service._requires_manual_muse_step(driver, allow_password=True))
+        self.assertTrue(service._fill_muse_password(driver, secret))
+        self.assertEqual(password.value, "meta-secret" + GOOGLE_ENTER_KEY)
+
+        driver.pages["task"].url = "https://muse.ai.evil.invalid/"
+        with self.assertRaises(MuseUnsafeNavigationError):
+            service._fill_muse_password(driver, bytearray(b"never-send"))
+
+    def test_muse_security_code_always_stays_manual(self):
+        security_code = FakeElement(attrs={"autocomplete": "one-time-code"})
+        driver = FakeDriver(
+            FakePage(
+                "https://muse.ai/",
+                security={MUSE_SECURITY_SELECTORS[1]: [security_code]},
+                body_text="Enter the 6-digit security code",
+            )
+        )
+
+        self.assertTrue(self.service(driver)._requires_manual_muse_step(driver, allow_password=True))
 
     def test_selects_exact_google_account_from_existing_profile(self):
         driver = FakeDriver(FakePage("https://accounts.google.com/o/oauth2/auth"))

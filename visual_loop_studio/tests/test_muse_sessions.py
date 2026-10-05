@@ -14,6 +14,8 @@ from auth.muse_login import (
     MUSE_APP_SELECTORS,
     MUSE_CONTINUE_TEXT,
     MUSE_IDENTIFIER_SELECTORS,
+    MUSE_PASSWORD_SELECTORS,
+    MUSE_SECURITY_SELECTORS,
     MuseAccountStore,
 )
 from auth.muse_sessions import (
@@ -91,6 +93,7 @@ class FakeDriver:
         quota: bool = False,
         login_barrier: threading.Barrier | None = None,
         muse_identifier_login: bool = False,
+        muse_security_code: bool = False,
     ) -> None:
         self.profile = Path(profile)
         self.response = response
@@ -99,6 +102,8 @@ class FakeDriver:
         self.quota = quota
         self.login_barrier = login_barrier
         self.muse_identifier_login = muse_identifier_login
+        self.muse_security_code = muse_security_code
+        self.muse_stage = "landing" if muse_identifier_login else ""
         self.closed = False
         self.quit_called = False
         self.logged_in = not login_required
@@ -118,12 +123,18 @@ class FakeDriver:
             tag_name="input",
             attrs={"aria-label": "Mobile number or email", "autocomplete": "username"},
         )
+        self.login_button = FakeElement("Log in", element_id="login", on_click=self._open_muse_login)
         self.continue_button = FakeElement("Continue", element_id="continue", on_click=self._continue_login)
         self.password = FakeElement(
             element_id="password",
             tag_name="input",
             attrs={"type": "password", "name": "Passwd"},
             on_send=self._password_send,
+        )
+        self.security_code = FakeElement(
+            element_id="security-code",
+            tag_name="input",
+            attrs={"aria-label": "6-digit security code", "autocomplete": "one-time-code"},
         )
         self.thread_ids: set[int] = set()
 
@@ -161,13 +172,24 @@ class FakeDriver:
             raise RuntimeError("driver died")
         if by == "css selector" and selector == CLICKABLE_SELECTOR:
             if self.muse_identifier_login and self._current_url.startswith("https://muse.ai/"):
-                return [self.continue_button]
+                if self.muse_stage == "landing":
+                    return [self.login_button]
+                if self.muse_stage == "identifier":
+                    return [self.continue_button]
             return []
         if by == "css selector" and selector in MUSE_APP_SELECTORS:
             return [FakeElement("Muse", element_id="app")] if self.logged_in else []
         if by == "css selector" and selector in MUSE_IDENTIFIER_SELECTORS:
-            if self.muse_identifier_login and self._current_url.startswith("https://muse.ai/"):
+            if self.muse_identifier_login and self.muse_stage == "identifier":
                 return [self.identifier]
+            return []
+        if by == "css selector" and selector in MUSE_PASSWORD_SELECTORS:
+            if self.muse_identifier_login and self.muse_stage == "password":
+                return [self.password]
+            return []
+        if by == "css selector" and selector in MUSE_SECURITY_SELECTORS:
+            if self.muse_identifier_login and self.muse_stage == "security":
+                return [self.security_code]
             return []
         if by == "css selector" and selector in GOOGLE_PASSWORD_SELECTORS:
             on_google = self._current_url.startswith("https://accounts.google.com/")
@@ -185,9 +207,13 @@ class FakeDriver:
             return [self.body]
         return []
 
+    def _open_muse_login(self):
+        if self.muse_identifier_login:
+            self.muse_stage = "identifier"
+
     def _continue_login(self):
         if self.muse_identifier_login and self.identifier.value:
-            self._current_url = "https://accounts.google.com/signin/v2/challenge/pwd"
+            self.muse_stage = "security" if self.muse_security_code else "password"
 
     def _password_send(self, *values):
         if GOOGLE_ENTER_KEY in {str(value) for value in values}:
@@ -206,6 +232,7 @@ class FakeDriver:
 
     def complete_login(self):
         self.logged_in = True
+        self.muse_stage = ""
         self._current_url = "https://muse.ai/chat"
 
     def quit(self):
@@ -322,7 +349,7 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertFalse(self.drivers[1].password.value)
 
     def test_password_is_autofilled_once_and_never_written_to_checkpoint(self):
-        self.driver_options[1] = {"login_required": True}
+        self.driver_options[1] = {"login_required": True, "muse_identifier_login": True}
         secret = "Only-In-Memory-123!"
 
         self.manager.open_session(
@@ -337,9 +364,9 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertNotIn(secret, checkpoint)
         self.assertNotIn(secret, repr(self.manager.snapshot(1)))
 
-    def test_new_muse_identifier_screen_is_filled_before_google_password(self):
+    def test_clicks_login_then_fills_muse_identifier_and_meta_password(self):
         self.driver_options[1] = {"login_required": True, "muse_identifier_login": True}
-        secret = "Only-For-Google-123!"
+        secret = "Only-For-Meta-123!"
 
         self.manager.open_session(
             1,
@@ -348,6 +375,7 @@ class MuseSessionManagerTests(unittest.TestCase):
         ).result(timeout=2)
 
         self.assertEqual(self.drivers[1].identifier.value, "owner@example.com")
+        self.assertEqual(self.drivers[1].login_button.text, "Log in")
         self.assertEqual(self.drivers[1].continue_button.text, MUSE_CONTINUE_TEXT[0].title())
         self.assertEqual(self.drivers[1].password.value, secret + GOOGLE_ENTER_KEY)
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
@@ -357,7 +385,7 @@ class MuseSessionManagerTests(unittest.TestCase):
         credentials = {}
         secrets = []
         for session_id in range(1, 4):
-            self.driver_options[session_id] = {"login_required": True}
+            self.driver_options[session_id] = {"login_required": True, "muse_identifier_login": True}
             secret = f"temporary-{session_id}"
             secrets.append(secret)
             credentials[session_id] = (f"owner{session_id}@example.com", secret)
@@ -371,6 +399,33 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertEqual(len({next(iter(driver.thread_ids)) for driver in self.drivers.values()}), 3)
         checkpoint = (self.root / "data" / "muse_sessions.json").read_text(encoding="utf-8")
         self.assertTrue(all(secret not in checkpoint for secret in secrets))
+
+    def test_muse_security_code_stays_manual_and_password_is_not_entered(self):
+        self.driver_options[1] = {
+            "login_required": True,
+            "muse_identifier_login": True,
+            "muse_security_code": True,
+        }
+        future = self.manager.open_session(1, "owner@example.com", password="meta-secret")
+        self._wait_state(1, MuseSessionState.LOGIN_REQUIRED)
+
+        self.assertEqual(self.drivers[1].password.value, "")
+        self.assertTrue(self.manager.snapshot(1).driver_open)
+        self.drivers[1].complete_login()
+        future.result(timeout=2)
+
+        self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
+
+    def test_meta_password_is_never_sent_to_google(self):
+        self.driver_options[1] = {"login_required": True}
+        future = self.manager.open_session(1, "owner@example.com", password="meta-secret")
+        self._wait_state(1, MuseSessionState.LOGIN_REQUIRED)
+
+        self.assertEqual(self.drivers[1].password.value, "")
+        self.drivers[1].complete_login()
+        future.result(timeout=2)
+
+        self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
 
     def test_generation_timeout_is_local_to_one_session(self):
         self.driver_options[1] = {"never_respond": True}

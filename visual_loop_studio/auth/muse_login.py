@@ -37,8 +37,18 @@ MUSE_IDENTIFIER_SELECTORS = (
     "input[autocomplete='username']",
 )
 MUSE_PASSWORD_SELECTORS = (
+    "input[aria-label='Password']",
+    "input[placeholder='Password']",
     "input[type='password']",
     "input[autocomplete='current-password']",
+)
+MUSE_SECURITY_SELECTORS = (
+    "input[type='tel']",
+    "input[autocomplete='one-time-code']",
+    "input[aria-label*='security code' i]",
+    "input[aria-label*='verification code' i]",
+    "input[name*='captcha' i]",
+    "iframe[src*='recaptcha' i]",
 )
 GOOGLE_ENTER_KEY = "\ue007"
 MUSE_APP_SELECTORS = (
@@ -101,7 +111,7 @@ class MuseLoginResult:
 
 
 class MuseAccountStore:
-    """Store only account labels/profile paths; browser credentials stay inside Chrome."""
+    """Store only account labels/profile paths; credentials are never persisted here."""
 
     def __init__(self, path: str | Path = MUSE_ACCOUNTS_FILE):
         self.path = Path(path)
@@ -123,7 +133,7 @@ class MuseAccountStore:
     def ensure(self, email: str) -> MuseAccount:
         normalized = _normalize_email(email)
         if not normalized:
-            raise ValueError("Hãy nhập email tài khoản Google cần dùng với Muse.")
+            raise ValueError("Hãy nhập email tài khoản Muse/Meta cần dùng.")
         existing = self.get_by_email(normalized)
         if existing:
             return existing
@@ -459,22 +469,65 @@ class MuseLoginService:
                     continue
         return False
 
-    def _requires_manual_muse_step(self, driver: Any) -> bool:
-        """Muse/Meta passwords and security challenges must stay manual."""
+    def _has_muse_password_field(self, driver: Any) -> bool:
         if _hostname(_safe_url(driver)) != "muse.ai":
             return False
-        security_selectors = (
-            *MUSE_PASSWORD_SELECTORS,
-            "input[type='tel']",
-            "input[autocomplete='one-time-code']",
-            "input[name*='captcha' i]",
-            "iframe[src*='recaptcha' i]",
-        )
         return any(
             _is_visible(element)
-            for selector in security_selectors
+            for selector in MUSE_PASSWORD_SELECTORS
             for element in _find_elements(driver, "css selector", selector)
         )
+
+    def _requires_manual_muse_step(self, driver: Any, *, allow_password: bool = False) -> bool:
+        """Keep Muse/Meta security challenges manual; optionally allow its password field."""
+        if _hostname(_safe_url(driver)) != "muse.ai":
+            return False
+        if any(
+            _is_visible(element)
+            for selector in MUSE_SECURITY_SELECTORS
+            for element in _find_elements(driver, "css selector", selector)
+        ):
+            return True
+        if not allow_password and self._has_muse_password_field(driver):
+            return True
+        body = " ".join(_element_text(item) for item in _find_elements(driver, "tag name", "body")).casefold()
+        return any(
+            marker in body
+            for marker in (
+                "captcha",
+                "enter the code",
+                "security code",
+                "verification code",
+                "two-factor authentication",
+                "2fa",
+                "approve this login",
+                "confirm your identity",
+                "use your passkey",
+            )
+        )
+
+    def _fill_muse_password(self, driver: Any, password: bytearray) -> bool:
+        if _hostname(_safe_url(driver)) != "muse.ai":
+            raise MuseUnsafeNavigationError("Tool từ chối điền mật khẩu Muse/Meta ngoài muse.ai.")
+        if not password:
+            return False
+        value = ""
+        try:
+            value = password.decode("utf-8")
+            for selector in MUSE_PASSWORD_SELECTORS:
+                for element in _find_elements(driver, "css selector", selector):
+                    if not _is_clickable(element):
+                        continue
+                    try:
+                        element.clear()
+                        element.send_keys(value)
+                        element.send_keys(GOOGLE_ENTER_KEY)
+                        return True
+                    except Exception:
+                        continue
+            return False
+        finally:
+            value = ""
 
     def _fill_google_password(self, driver: Any, password: bytearray) -> bool:
         if not password:
