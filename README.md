@@ -89,7 +89,7 @@ Trang **Muse Batch — 3 tài khoản** quét JPG/JPEG/PNG/WEBP trong một thư
 
 - Mỗi phiên có Selenium driver, worker thread, task, lock và Chrome `user-data-dir` riêng; không chia sẻ cookie, window handle hoặc trạng thái đăng nhập.
 - Tool chỉ tương tác trên `muse.ai`, `auth.muse.ai` và `accounts.google.com`, đồng thời chỉ tự chọn đúng email đã cấu hình khi Google đã hiển thị sẵn tài khoản đó.
-- Mật khẩu, CAPTCHA, 2FA, xác minh thiết bị và quyền mới luôn do người dùng hoàn tất trong Chrome. Phiên chuyển sang `LOGIN_REQUIRED`, giữ Chrome mở và tự tiếp tục sau callback hợp lệ.
+- Gmail/mật khẩu có thể nhập riêng trong từng tab và chỉ được giữ tạm trong bộ nhớ để điền trên đúng `accounts.google.com`; mật khẩu không được ghi vào settings, checkpoint hoặc log. CAPTCHA, 2FA, passkey, xác minh thiết bị và quyền mới vẫn do người dùng hoàn tất trong Chrome.
 - Mỗi ảnh là một job có ID theo đường dẫn/metadata/hash ảnh/hash prompt/cài đặt. Checkpoint giữ trạng thái sau từng bước; job đã submit chỉ được khôi phục kết quả/download, không tự bấm Generate lần hai.
 - Video mới được phân biệt với kết quả cũ, tải thành MP4 theo tên `<ảnh>__<account_id>__<job_id>.mp4` và kiểm tra file hoàn tất trước khi đánh dấu thành công. Rate limit/quota chỉ dừng đúng worker đó và không chuyển ảnh sang tài khoản khác.
 - Checkpoint chỉ chứa email nhãn, đường dẫn, prompt, cài đặt, mapping output và trạng thái; không chứa mật khẩu, cookie hoặc token. Dựng lại UI sẽ nối với manager còn chạy thay vì tạo driver trùng.
@@ -97,7 +97,7 @@ Trang **Muse Batch — 3 tài khoản** quét JPG/JPEG/PNG/WEBP trong một thư
 
 Quy trình sử dụng: đăng nhập đủ ba tab đến trạng thái `READY`, chọn thư mục ảnh và output, nhập prompt chung, bấm **Phân bổ ảnh** để xem trước, rồi **Bắt đầu cả 3**. Có thể dừng/tiếp tục, chạy lại ảnh lỗi hoặc phân bổ lại riêng các ảnh chưa submit.
 
-Trong mỗi tab, nhập email rồi bấm **Mở Chrome đăng nhập Google**. Mật khẩu, CAPTCHA và 2FA chỉ nhập trực tiếp trong cửa sổ Google; ứng dụng không có ô mật khẩu, không tự gõ và không lưu thông tin đăng nhập. Nút **Bắt đầu cả 3** chỉ mở khi cả ba tab hiển thị `READY`, ảnh đã được phân bổ, prompt và thư mục output đã có.
+Trong mỗi tab, nhập Gmail và mật khẩu rồi bấm **Mở Chrome đăng nhập Google**. Tool tự điền hai giá trị trên trang Google, sau đó xóa ngay ô mật khẩu; CAPTCHA/2FA vẫn xử lý trong Chrome. Có thể để trống mật khẩu nếu Chrome profile còn phiên đăng nhập. Nút **Bắt đầu cả 3** chỉ mở khi cả ba tab hiển thị `READY`, ảnh đã được phân bổ, prompt và thư mục output đã có.
 
 Provider **Muse AI Web** trong **AI Video hàng loạt** vẫn dùng tài khoản được chọn và không tự xoay tài khoản để né quota.
 

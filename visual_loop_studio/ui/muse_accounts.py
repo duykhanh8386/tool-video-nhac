@@ -65,6 +65,7 @@ WORKER_LABELS = {
 @dataclass
 class _WorkerWidgets:
     account: QComboBox
+    password: QLineEdit
     login_state: QLabel
     profile: QLabel
     assigned_count: QLabel
@@ -127,8 +128,8 @@ class MuseAccountsPage(QWidget):
         title.setObjectName("pageTitle")
         root.addWidget(title)
         notice = QLabel(
-            "Mỗi tài khoản dùng một Chrome profile/driver riêng. Tool không nhập mật khẩu, không vượt CAPTCHA, "
-            "2FA, quota hoặc rate limit; job đã gửi sẽ không tự bấm Generate lần hai."
+            "Mỗi tài khoản dùng một Chrome profile/driver riêng. Gmail/mật khẩu chỉ được giữ tạm trong bộ nhớ "
+            "để điền trên accounts.google.com; tool không lưu bí mật và không vượt CAPTCHA, 2FA, quota hoặc rate limit."
         )
         notice.setWordWrap(True)
         notice.setObjectName("notice")
@@ -234,12 +235,17 @@ class MuseAccountsPage(QWidget):
         page.setWidget(content)
         root = QVBoxLayout(content)
         account_group = QGroupBox(f"Tài khoản Muse {worker_id}")
-        account_group.setMinimumHeight(145)
+        account_group.setMinimumHeight(195)
         grid = QGridLayout(account_group)
         account = QComboBox()
         account.setEditable(True)
         account.setMinimumHeight(36)
         account.lineEdit().setPlaceholderText("Email Google được phép sử dụng")
+        password = QLineEdit()
+        password.setMinimumHeight(36)
+        password.setEchoMode(QLineEdit.EchoMode.Password)
+        password.setClearButtonEnabled(True)
+        password.setPlaceholderText("Mật khẩu Google — không lưu, có thể để trống nếu profile còn phiên")
         login = QPushButton("Mở Chrome đăng nhập Google")
         login.setMinimumHeight(36)
         stop = QPushButton("Dừng")
@@ -253,19 +259,21 @@ class MuseAccountsPage(QWidget):
         profile.setObjectName("muted")
         profile.setWordWrap(True)
         login_help = QLabel(
-            "Chỉ nhập email để chọn đúng tài khoản. Mật khẩu, CAPTCHA và 2FA được nhập trực tiếp "
-            "trong cửa sổ Google; ứng dụng không đọc hoặc lưu các dữ liệu này."
+            "Mật khẩu chỉ tồn tại tạm trong bộ nhớ và ô này sẽ bị xóa ngay khi bấm đăng nhập. "
+            "CAPTCHA, 2FA, passkey hoặc xác minh thiết bị vẫn phải hoàn tất trực tiếp trong Chrome."
         )
         login_help.setObjectName("muted")
         login_help.setWordWrap(True)
         grid.addWidget(QLabel("Email"), 0, 0)
         grid.addWidget(account, 0, 1)
-        grid.addWidget(login, 0, 2)
-        grid.addWidget(QLabel("Đăng nhập"), 1, 0)
-        grid.addWidget(login_state, 1, 1, 1, 2)
-        grid.addWidget(QLabel("Profile"), 2, 0)
-        grid.addWidget(profile, 2, 1, 1, 2)
-        grid.addWidget(login_help, 3, 0, 1, 3)
+        grid.addWidget(login, 0, 2, 2, 1)
+        grid.addWidget(QLabel("Mật khẩu"), 1, 0)
+        grid.addWidget(password, 1, 1)
+        grid.addWidget(QLabel("Đăng nhập"), 2, 0)
+        grid.addWidget(login_state, 2, 1, 1, 2)
+        grid.addWidget(QLabel("Profile"), 3, 0)
+        grid.addWidget(profile, 3, 1, 1, 2)
+        grid.addWidget(login_help, 4, 0, 1, 3)
         root.addWidget(account_group)
 
         assigned_count = QLabel("Được phân bổ: 0 ảnh")
@@ -303,6 +311,7 @@ class MuseAccountsPage(QWidget):
         root.addWidget(logs, 1)
         return page, _WorkerWidgets(
             account=account,
+            password=password,
             login_state=login_state,
             profile=profile,
             assigned_count=assigned_count,
@@ -449,11 +458,23 @@ class MuseAccountsPage(QWidget):
         self.refresh()
 
     def _login(self, worker_id: int) -> None:
-        email = self._workers[worker_id].account.currentText().strip()
+        widgets = self._workers[worker_id]
+        email = widgets.account.currentText().strip()
+        password = widgets.password.text()
         try:
-            self._track(self.session_manager.open_session(worker_id, email, force_relogin=True))
+            self._track(
+                self.session_manager.open_session(
+                    worker_id,
+                    email,
+                    password=password,
+                    force_relogin=True,
+                )
+            )
         except Exception as exc:
             QMessageBox.warning(self, f"Tài khoản {worker_id}", str(exc))
+        finally:
+            widgets.password.clear()
+            password = ""
 
     def _stop_worker(self, worker_id: int) -> None:
         if self.batch_manager.stop_worker(worker_id):
@@ -580,6 +601,7 @@ class MuseAccountsPage(QWidget):
         widgets.stop.setEnabled(session.task_running or worker.task_running)
         widgets.retry.setEnabled(worker.failed > 0 and not worker.task_running)
         widgets.account.setEnabled(not session.driver_open and not session.task_running and not worker.task_running)
+        widgets.password.setEnabled(not session.task_running and not worker.task_running)
         self.tabs.setTabText(
             worker.worker_id - 1,
             f"Tài khoản {worker.worker_id} • {SESSION_LABELS[session.state]}",

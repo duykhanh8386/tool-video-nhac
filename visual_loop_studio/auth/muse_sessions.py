@@ -249,11 +249,25 @@ class MuseSessionManager:
         with self._state_lock:
             return self._snapshot(self._require_session(session_id))
 
-    def open_session(self, session_id: int, email: str, *, force_relogin: bool = False) -> Future[Any]:
+    def open_session(
+        self,
+        session_id: int,
+        email: str,
+        *,
+        password: str = "",
+        force_relogin: bool = False,
+    ) -> Future[Any]:
         normalized = str(email or "").strip().casefold()
         if not normalized or "@" not in normalized:
             raise ValueError("Hãy chọn hoặc nhập email Google hợp lệ cho phiên Muse.")
-        return self._schedule(self._launch_open(int(session_id), normalized, bool(force_relogin)))
+        secret = bytearray(str(password or "").encode("utf-8"))
+        try:
+            return self._schedule(
+                self._launch_open(int(session_id), normalized, bool(force_relogin), secret)
+            )
+        except Exception:
+            _wipe_secret(secret)
+            raise
 
     def send_prompt(self, session_id: int, prompt: str) -> Future[Any]:
         text = str(prompt or "").strip()
@@ -331,20 +345,32 @@ class MuseSessionManager:
                 raise RuntimeError("MuseSessionManager đã đóng.")
         return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
 
-    async def _launch_open(self, session_id: int, email: str, force_relogin: bool) -> None:
+    async def _launch_open(
+        self,
+        session_id: int,
+        email: str,
+        force_relogin: bool,
+        password: bytearray,
+    ) -> None:
         session = self._require_session(session_id)
         assert self._manager_lock is not None
-        async with self._manager_lock:
-            self._ensure_available(session)
-            self._ensure_unique_account(session_id, email)
-            self._bind_account(session, email)
-            session.stop_event.clear()
-            task = asyncio.create_task(self._open(session, force_relogin), name=f"muse-open-{session_id}")
-            self._claim_task(session, task)
+        task: asyncio.Task[Any] | None = None
         try:
+            async with self._manager_lock:
+                self._ensure_available(session)
+                self._ensure_unique_account(session_id, email)
+                self._bind_account(session, email)
+                session.stop_event.clear()
+                task = asyncio.create_task(
+                    self._open(session, force_relogin, password),
+                    name=f"muse-open-{session_id}",
+                )
+                self._claim_task(session, task)
             await task
         finally:
-            self._release_task(session, task)
+            if task is not None:
+                self._release_task(session, task)
+            _wipe_secret(password)
 
     async def _launch_send(self, session_id: int, prompt: str) -> str | None:
         session = self._require_session(session_id)
@@ -383,7 +409,7 @@ class MuseSessionManager:
                 self._release_task(session, task)
         return {session.session_id: result for (session, _task), result in zip(claimed, results)}
 
-    async def _open(self, session: MuseSession, force_relogin: bool) -> None:
+    async def _open(self, session: MuseSession, force_relogin: bool, password: bytearray) -> None:
         async with session.lock:
             self._set_state(
                 session,
@@ -398,6 +424,7 @@ class MuseSessionManager:
                     self._open_blocking,
                     session,
                     force_relogin,
+                    password,
                 )
             except MuseSessionStopped:
                 await self._loop.run_in_executor(session.executor, self._quit_driver, session)
@@ -501,7 +528,12 @@ class MuseSessionManager:
                 )
                 return result
 
-    def _open_blocking(self, session: MuseSession, force_relogin: bool) -> None:
+    def _open_blocking(
+        self,
+        session: MuseSession,
+        force_relogin: bool,
+        password: bytearray,
+    ) -> None:
         self._check_stopped(session)
         if force_relogin and session.driver is not None:
             self._quit_driver(session)
@@ -576,30 +608,58 @@ class MuseSessionManager:
                     if key not in actions and helper._click_by_text(driver, MUSE_LOGIN_TEXT):
                         actions.add(key)
             elif host == "accounts.google.com":
-                if helper._requires_manual_google_step(driver):
+                password_submitted = (url, "google_password") in actions
+                if helper._requires_manual_google_step(
+                    driver,
+                    allow_email=True,
+                    allow_password=bool(password) or password_submitted,
+                ):
                     manual_mode = True
                     self._login_required(session)
                 elif not manual_mode:
-                    key = (url, "account")
-                    if key not in actions and helper._select_google_account(driver, session.email):
+                    key = (url, "google_email")
+                    if key not in actions and helper._fill_google_email(driver, session.email):
                         actions.add(key)
                         idle_polls = 0
                         self._set_state(
                             session,
                             MuseSessionState.OPENING,
-                            progress=60,
-                            status_message=f"Đã chọn đúng tài khoản {session.email}…",
+                            progress=50,
+                            status_message=f"Đã điền email Google {session.email}…",
                         )
                     else:
-                        key = (url, "continue")
-                        if key not in actions and helper._click_by_text(driver, GOOGLE_CONTINUE_TEXT):
+                        key = (url, "google_password")
+                        if key not in actions and password and helper._fill_google_password(driver, password):
                             actions.add(key)
+                            _wipe_secret(password)
                             idle_polls = 0
+                            self._set_state(
+                                session,
+                                MuseSessionState.OPENING,
+                                progress=70,
+                                status_message="Đã gửi thông tin đăng nhập Google; đang chờ phản hồi…",
+                            )
                         else:
-                            idle_polls += 1
-                            if idle_polls >= 4:
-                                manual_mode = True
-                                self._login_required(session)
+                            key = (url, "account")
+                            if key not in actions and helper._select_google_account(driver, session.email):
+                                actions.add(key)
+                                idle_polls = 0
+                                self._set_state(
+                                    session,
+                                    MuseSessionState.OPENING,
+                                    progress=60,
+                                    status_message=f"Đã chọn đúng tài khoản {session.email}…",
+                                )
+                            else:
+                                key = (url, "continue")
+                                if key not in actions and helper._click_by_text(driver, GOOGLE_CONTINUE_TEXT):
+                                    actions.add(key)
+                                    idle_polls = 0
+                                else:
+                                    idle_polls += 1
+                                    if idle_polls >= 4:
+                                        manual_mode = True
+                                        self._login_required(session)
             return False
 
         while True:
@@ -812,7 +872,7 @@ class MuseSessionManager:
             MuseSessionState.LOGIN_REQUIRED,
             progress=50,
             status_message=(
-                "Google cần mật khẩu, CAPTCHA, 2FA hoặc xác minh thiết bị. "
+                "Google cần CAPTCHA, 2FA, xác minh thiết bị hoặc thao tác bổ sung. "
                 "Hãy hoàn tất thủ công trong Chrome; phiên sẽ tự tiếp tục."
             ),
             error="",
@@ -1068,3 +1128,9 @@ def get_muse_session_manager(*, start_url: str = MUSE_START_URL) -> MuseSessionM
 def _create_session_chrome_driver(profile: Path):
     """Create a persistent session driver with an isolated download folder."""
     return create_muse_chrome_driver(profile, MUSE_SESSION_DOWNLOADS_DIR / profile.name)
+
+
+def _wipe_secret(secret: bytearray) -> None:
+    for index in range(len(secret)):
+        secret[index] = 0
+    secret.clear()

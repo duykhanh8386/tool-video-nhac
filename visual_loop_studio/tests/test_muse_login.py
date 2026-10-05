@@ -6,6 +6,7 @@ from pathlib import Path
 
 from auth.muse_login import (
     CLICKABLE_SELECTOR,
+    GOOGLE_ENTER_KEY,
     MUSE_APP_SELECTORS,
     MuseAccountStore,
     MuseLoginCancelled,
@@ -16,13 +17,24 @@ from auth.muse_login import (
 
 
 class FakeElement:
-    def __init__(self, text: str = "", *, attrs=None, on_click=None, visible: bool = True, enabled: bool = True):
+    def __init__(
+        self,
+        text: str = "",
+        *,
+        attrs=None,
+        on_click=None,
+        on_send=None,
+        visible: bool = True,
+        enabled: bool = True,
+    ):
         self.text = text
         self.attrs = attrs or {}
         self.on_click = on_click
+        self.on_send = on_send
         self.visible = visible
         self.enabled = enabled
         self.clicks = 0
+        self.value = ""
 
     def is_displayed(self):
         return self.visible
@@ -37,6 +49,14 @@ class FakeElement:
         self.clicks += 1
         if self.on_click:
             self.on_click()
+
+    def clear(self):
+        self.value = ""
+
+    def send_keys(self, *values):
+        self.value += "".join(str(value) for value in values)
+        if self.on_send:
+            self.on_send(*values)
 
 
 class FakePage:
@@ -209,6 +229,37 @@ class MuseLoginServiceTests(unittest.TestCase):
         self.assertEqual(result.account.status, "connected")
         self.assertIn("manual_required", events)
         self.assertEqual(password.clicks, 0)
+
+    def test_google_password_can_be_filled_but_two_factor_stays_manual(self):
+        password = FakeElement(attrs={"type": "password", "name": "Passwd"})
+        driver = FakeDriver(
+            FakePage(
+                "https://accounts.google.com/signin/v2/challenge/pwd",
+                security={"input[name='Passwd']": [password]},
+                body_text="Enter your password",
+            )
+        )
+        service = self.service(driver)
+        secret = bytearray(b"secret-value")
+
+        self.assertFalse(
+            service._requires_manual_google_step(
+                driver,
+                allow_email=True,
+                allow_password=True,
+            )
+        )
+        self.assertTrue(service._fill_google_password(driver, secret))
+        self.assertEqual(password.value, "secret-value" + GOOGLE_ENTER_KEY)
+
+        driver.pages["task"].body.text = "2-Step Verification - check your phone"
+        self.assertTrue(
+            service._requires_manual_google_step(
+                driver,
+                allow_email=True,
+                allow_password=True,
+            )
+        )
 
     def test_google_continue_callback_is_verified_on_muse_main_ui(self):
         driver = FakeDriver(FakePage("https://accounts.google.com/o/oauth2/approval"))

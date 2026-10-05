@@ -103,11 +103,11 @@ Google Vids hiện không có API công khai dành cho việc tạo clip. Adapte
 
 Trang **Muse Batch — 3 tài khoản** có ba tab tương ứng ba `user-data-dir` cố định: `data/muse_profiles/account_1`, `account_2`, `account_3`. Chọn thư mục ảnh, prompt chung và output; ảnh được chuẩn hóa, loại trùng, sắp xếp rồi chia round-robin cho ba worker. Mỗi worker sở hữu riêng Selenium driver, hàng đợi, worker thread, asyncio task, stop event và lock.
 
-Selenium chỉ tương tác trên `muse.ai`, `auth.muse.ai` và `accounts.google.com`, dùng selector theo `data-testid`, role, aria-label hoặc placeholder. Mật khẩu, CAPTCHA, 2FA, xác minh thiết bị và màn hình quyền mới luôn do người dùng xử lý trực tiếp trong Chrome; phiên chuyển sang `LOGIN_REQUIRED`, giữ mở và tự phát hiện khi đăng nhập hoàn tất.
+Selenium chỉ tương tác trên `muse.ai`, `auth.muse.ai` và `accounts.google.com`, dùng selector theo `data-testid`, role, aria-label hoặc placeholder. Gmail/mật khẩu nhập trong từng tab chỉ được giữ tạm trong bộ nhớ để điền trên đúng trang Google và không được ghi vào settings/checkpoint/log. CAPTCHA, 2FA, passkey, xác minh thiết bị và màn hình quyền mới vẫn do người dùng xử lý trực tiếp trong Chrome.
 
 Manager ghi checkpoint không bí mật sau mỗi trạng thái job. Job đã submit không được gửi lại khi tiếp tục/restart; lỗi download chỉ retry download. Nút dừng chỉ tác động đúng worker, còn **Dừng tất cả Muse** không gọi tới Auto Registry hoặc YouTube. Prompt, phân bổ, tiến độ và kết quả vẫn giữ nguyên sau khi dừng; driver được quit khi ứng dụng đóng nhưng thư mục profile không bị xóa.
 
-Mỗi tab có ô email và nút **Mở Chrome đăng nhập Google**. Người dùng nhập mật khẩu/CAPTCHA/2FA trực tiếp trong Chrome; ứng dụng không thu thập hoặc tự điền mật khẩu. Dòng điều kiện ngay trên ba tab cho biết chính xác tài khoản nào chưa `READY` hoặc dữ liệu batch nào còn thiếu.
+Mỗi tab có ô Gmail, mật khẩu và nút **Mở Chrome đăng nhập Google**. Ô mật khẩu dùng chế độ che ký tự và bị xóa ngay khi bắt đầu đăng nhập; nếu profile còn phiên thì có thể để trống. CAPTCHA/2FA vẫn xử lý trực tiếp trong Chrome. Dòng điều kiện ngay trên ba tab cho biết chính xác tài khoản nào chưa `READY` hoặc dữ liệu batch nào còn thiếu.
 
 Provider **Muse AI Web** trong **AI Video hàng loạt** vẫn chạy với đúng tài khoản được chọn và dừng phần Muse khi phát hiện hết quota; không có tự động đổi tài khoản.
 

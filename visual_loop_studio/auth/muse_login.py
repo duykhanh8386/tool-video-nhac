@@ -21,6 +21,17 @@ MUSE_ACCOUNTS_FILE = DATA_DIR / "muse_accounts.json"
 
 CLICKABLE_SELECTOR = "button, [role='button'], a[role='button'], a"
 ACCOUNT_SELECTOR = "[data-identifier], [data-email], [role='link'], [role='button']"
+GOOGLE_EMAIL_SELECTORS = (
+    "#identifierId",
+    "input[type='email']",
+    "input[autocomplete='username']",
+)
+GOOGLE_PASSWORD_SELECTORS = (
+    "input[name='Passwd']",
+    "input[type='password']",
+    "input[autocomplete='current-password']",
+)
+GOOGLE_ENTER_KEY = "\ue007"
 MUSE_APP_SELECTORS = (
     "[data-testid*='account' i]",
     "[data-testid*='avatar' i]",
@@ -352,21 +363,27 @@ class MuseLoginService:
                 return True
         return False
 
-    def _requires_manual_google_step(self, driver: Any) -> bool:
+    def _requires_manual_google_step(
+        self,
+        driver: Any,
+        *,
+        allow_email: bool = False,
+        allow_password: bool = False,
+    ) -> bool:
         if _hostname(_safe_url(driver)) != "accounts.google.com":
             return False
         url = _safe_url(driver).casefold()
-        if any(marker in url for marker in ("/challenge/", "/signin/challenge", "/speedbump/")):
+        password_challenge = "/challenge/pwd" in url
+        if (
+            any(marker in url for marker in ("/challenge/", "/signin/challenge", "/speedbump/"))
+            and not (password_challenge and allow_password)
+        ):
             return True
         security_selectors = (
-            "input[type='password']",
-            "input[type='email']",
-            "input[autocomplete='username']",
             "input[type='tel']",
             "input[autocomplete='one-time-code']",
             "input[name*='captcha' i]",
             "iframe[src*='recaptcha' i]",
-            "input[type='checkbox']",
         )
         if any(
             _is_visible(element)
@@ -375,12 +392,11 @@ class MuseLoginService:
         ):
             return True
         body = " ".join(_element_text(item) for item in _find_elements(driver, "tag name", "body")).casefold()
-        manual_markers = (
+        manual_markers = [
             "2-step verification",
             "2 factor authentication",
             "verify it’s you",
             "verify it's you",
-            "enter your password",
             "enter a verification code",
             "check your phone",
             "confirm your recovery",
@@ -394,8 +410,54 @@ class MuseLoginService:
             "scan the qr code",
             "confirm it’s you",
             "confirm it's you",
-        )
+        ]
+        if not allow_password:
+            manual_markers.append("enter your password")
+        if not allow_email and any(
+            _is_visible(element)
+            for selector in GOOGLE_EMAIL_SELECTORS
+            for element in _find_elements(driver, "css selector", selector)
+        ):
+            return True
+        if not allow_password and any(
+            _is_visible(element)
+            for selector in GOOGLE_PASSWORD_SELECTORS
+            for element in _find_elements(driver, "css selector", selector)
+        ):
+            return True
         return any(marker in body for marker in manual_markers)
+
+    def _fill_google_email(self, driver: Any, email: str) -> bool:
+        return self._fill_google_field(driver, GOOGLE_EMAIL_SELECTORS, _normalize_email(email))
+
+    def _fill_google_password(self, driver: Any, password: bytearray) -> bool:
+        if not password:
+            return False
+        value = ""
+        try:
+            value = password.decode("utf-8")
+            return self._fill_google_field(driver, GOOGLE_PASSWORD_SELECTORS, value)
+        finally:
+            value = ""
+
+    @staticmethod
+    def _fill_google_field(driver: Any, selectors: tuple[str, ...], value: str) -> bool:
+        if _hostname(_safe_url(driver)) != "accounts.google.com":
+            raise MuseUnsafeNavigationError("Tool từ chối điền thông tin ngoài accounts.google.com.")
+        if not value:
+            return False
+        for selector in selectors:
+            for element in _find_elements(driver, "css selector", selector):
+                if not _is_clickable(element):
+                    continue
+                try:
+                    element.clear()
+                    element.send_keys(value)
+                    element.send_keys(GOOGLE_ENTER_KEY)
+                    return True
+                except Exception:
+                    continue
+        return False
 
     def _click_by_text(self, driver: Any, accepted: tuple[str, ...]) -> bool:
         accepted_values = {value.casefold() for value in accepted}

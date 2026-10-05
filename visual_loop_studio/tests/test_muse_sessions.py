@@ -7,7 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from auth.muse_login import CLICKABLE_SELECTOR, MUSE_APP_SELECTORS, MuseAccountStore
+from auth.muse_login import (
+    CLICKABLE_SELECTOR,
+    GOOGLE_ENTER_KEY,
+    GOOGLE_PASSWORD_SELECTORS,
+    MUSE_APP_SELECTORS,
+    MuseAccountStore,
+)
 from auth.muse_sessions import (
     GENERATION_SELECTORS,
     PROMPT_SELECTORS,
@@ -100,7 +106,12 @@ class FakeDriver:
         self.body = FakeElement("", element_id="body")
         self.prompt = FakeElement(element_id="prompt", tag_name="textarea")
         self.send = FakeElement("Send", element_id="send", on_click=self._send)
-        self.password = FakeElement(element_id="password", tag_name="input")
+        self.password = FakeElement(
+            element_id="password",
+            tag_name="input",
+            attrs={"type": "password", "name": "Passwd"},
+            on_send=self._password_send,
+        )
         self.thread_ids: set[int] = set()
 
     def _record_thread(self):
@@ -139,7 +150,7 @@ class FakeDriver:
             return []
         if by == "css selector" and selector in MUSE_APP_SELECTORS:
             return [FakeElement("Muse", element_id="app")] if self.logged_in else []
-        if by == "css selector" and selector == "input[type='password']":
+        if by == "css selector" and selector in GOOGLE_PASSWORD_SELECTORS:
             return [self.password] if not self.logged_in else []
         if by == "css selector" and selector in PROMPT_SELECTORS:
             return [self.prompt] if self.logged_in else []
@@ -153,6 +164,10 @@ class FakeDriver:
             self.body.text = "rate limit reached" if self.quota else ""
             return [self.body]
         return []
+
+    def _password_send(self, *values):
+        if GOOGLE_ENTER_KEY in {str(value) for value in values}:
+            self.complete_login()
 
     def _send(self):
         self._record_thread()
@@ -277,6 +292,22 @@ class MuseSessionManagerTests(unittest.TestCase):
 
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
         self.assertFalse(self.drivers[1].password.value)
+
+    def test_password_is_autofilled_once_and_never_written_to_checkpoint(self):
+        self.driver_options[1] = {"login_required": True}
+        secret = "Only-In-Memory-123!"
+
+        self.manager.open_session(
+            1,
+            "owner@example.com",
+            password=secret,
+        ).result(timeout=2)
+
+        self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
+        self.assertEqual(self.drivers[1].password.value, secret + GOOGLE_ENTER_KEY)
+        checkpoint = (self.root / "data" / "muse_sessions.json").read_text(encoding="utf-8")
+        self.assertNotIn(secret, checkpoint)
+        self.assertNotIn(secret, repr(self.manager.snapshot(1)))
 
     def test_generation_timeout_is_local_to_one_session(self):
         self.driver_options[1] = {"never_respond": True}
