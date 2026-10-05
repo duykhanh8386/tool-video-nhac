@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 from auth.muse_login import ACCOUNT_SELECTOR, CLICKABLE_SELECTOR, MUSE_APP_SELECTORS, MuseAccountStore
+from auth.muse_generation import _video_fingerprint
 from auth.muse_sessions import MuseSessionManager, MuseSessionState
 from auth.muse_video_batch import (
     MUSE_IMAGES_PER_REQUEST,
@@ -302,7 +303,7 @@ class AutomationDriver:
         return []
 
     def execute_script(self, script, video):
-        if "querySelector" in script and "download" in script:
+        if "document.querySelectorAll(sel)" in script or "a.download='muse-video.mp4'" in script:
             self.downloaded_video_id = video.id
             self.downloaded_video_ids.append(video.id)
             self.download_dir.mkdir(parents=True, exist_ok=True)
@@ -314,6 +315,20 @@ class AutomationDriver:
 
 
 class MuseVideoAutomationTests(unittest.TestCase):
+    def test_video_fingerprint_ignores_dom_id_and_poster_changes_for_same_media(self):
+        first = AutomationElement(
+            "old-dom-id",
+            tag_name="video",
+            attrs={"src": "https://example/result.mp4", "poster": "https://example/poster-a.jpg"},
+        )
+        rerendered = AutomationElement(
+            "new-dom-id",
+            tag_name="video",
+            attrs={"src": "https://example/result.mp4", "poster": "https://example/poster-b.jpg"},
+        )
+
+        self.assertEqual(_video_fingerprint(first), _video_fingerprint(rerendered))
+
     def test_uploads_one_image_submits_once_and_downloads_only_new_video(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

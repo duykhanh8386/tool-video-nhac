@@ -157,6 +157,8 @@ class MuseLoginServiceTests(unittest.TestCase):
         self.assertEqual(command[0], str(executable))
         self.assertIn(f"--user-data-dir={profile.resolve()}", command)
         self.assertEqual(command[-1], "https://muse.ai/")
+        self.assertIn("--remote-debugging-address=127.0.0.1", command)
+        self.assertIn("--remote-debugging-port=0", command)
         self.assertFalse(any("user-agent" in value.casefold() for value in command))
         self.assertFalse(any("disable-blink-features" in value.casefold() for value in command))
 

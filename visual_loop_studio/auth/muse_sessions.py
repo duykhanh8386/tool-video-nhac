@@ -28,6 +28,7 @@ from auth.muse_login import (
     _is_visible,
     _safe_url,
     _utc_now,
+    create_muse_attached_driver,
     create_muse_chrome_driver,
     google_muse_login_url,
     launch_muse_native_browser,
@@ -210,6 +211,7 @@ class MuseSession:
 
 DriverFactory = Callable[[Path], Any]
 NativeBrowserFactory = Callable[[Path, str], Any]
+AttachedDriverFactory = Callable[[Path, Path], Any]
 _UNSET = object()
 
 
@@ -225,6 +227,7 @@ class MuseSessionManager:
         account_store: MuseAccountStore | None = None,
         driver_factory: DriverFactory | None = None,
         native_browser_factory: NativeBrowserFactory | None = None,
+        attached_driver_factory: AttachedDriverFactory | None = None,
         login_timeout: float = 15 * 60,
         generation_timeout: float = 10 * 60,
         poll_interval: float = 0.35,
@@ -239,6 +242,7 @@ class MuseSessionManager:
         self.account_store = account_store or MuseAccountStore()
         self._driver_factory = driver_factory or _create_session_chrome_driver
         self._native_browser_factory = native_browser_factory or launch_muse_native_browser
+        self._attached_driver_factory = attached_driver_factory or create_muse_attached_driver
         self.login_timeout = max(1.0, float(login_timeout))
         self.generation_timeout = max(0.05, float(generation_timeout))
         self.poll_interval = max(0.02, float(poll_interval))
@@ -1211,40 +1215,59 @@ class MuseSessionManager:
             MuseSessionState.LOGIN_REQUIRED,
             progress=10,
             status_message=(
-                "Chrome/Edge thường đã mở. Hãy tự đăng nhập Google, mở Muse thành công, "
-                "sau đó đóng toàn bộ cửa sổ profile này để tool tiếp tục."
+                "Chrome/Edge thường đã mở. Hãy tự đăng nhập Google và mở Muse thành công; "
+                "giữ nguyên cửa sổ, tool sẽ tự nhận tab READY và tiếp tục."
             ),
             error="",
         )
+        session.profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_key = str(session.profile_dir.resolve()).casefold()
         try:
+            MuseLoginService._acquire_profile(profile_key)
+            session.profile_acquired = True
             process = self._native_browser_factory(session.profile_dir, self.start_url)
         except Exception as exc:
+            if session.profile_acquired:
+                MuseLoginService._release_profile(profile_key)
+                session.profile_acquired = False
             if isinstance(exc, MuseSessionError):
                 raise
             message = str(exc) if isinstance(exc, Exception) else ""
             raise MuseSessionError(message or "Không thể mở Chrome/Edge thường để đăng nhập Muse.") from None
         session.native_browser_process = process
-        try:
-            while process.poll() is None:
-                self._check_stopped(session)
-                time.sleep(self.poll_interval)
-        except MuseSessionStopped:
+        while session.driver is None:
+            self._check_stopped(session)
             try:
-                process.terminate()
-                process.wait(timeout=5)
-            except Exception:
+                session.driver = self._attached_driver_factory(
+                    session.profile_dir,
+                    MUSE_SESSION_DOWNLOADS_DIR / session.profile_dir.name,
+                )
+            except Exception as exc:
                 try:
-                    process.kill()
+                    exited = process.poll() is not None
                 except Exception:
-                    pass
-            raise
-        finally:
-            session.native_browser_process = None
+                    exited = False
+                if exited:
+                    raise MuseSessionError(
+                        str(exc).strip() or "Chrome/Edge đã đóng trước khi tool kết nối được vào tab Muse."
+                    ) from None
+                time.sleep(self.poll_interval)
+        session.driver_open = True
+        try:
+            session.driver.set_page_load_timeout(30)
+        except Exception:
+            pass
+        try:
+            handles = {str(handle) for handle in session.driver.window_handles}
+        except Exception:
+            handles = set()
+        session.known_handles = set(handles)
+        session.owned_handles = set(handles)
         self._set_state(
             session,
             MuseSessionState.OPENING,
             progress=55,
-            status_message="Đã đóng trình duyệt đăng nhập; đang mở lại profile để kiểm tra phiên Muse…",
+            status_message="Đã kết nối tool vào Chrome/Edge đang mở; đang chờ tab Muse READY…",
             error="",
         )
 

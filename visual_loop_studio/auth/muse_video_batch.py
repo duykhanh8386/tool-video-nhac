@@ -768,15 +768,16 @@ class MuseVideoAutomation:
                 driver.execute_script(
                     "const v=arguments[0],sel=\"button[aria-label*='download' i],"
                     "[data-testid*='download' i],[role='button'][aria-label*='download' i],a[download]\";"
-                    "const vr=v.getBoundingClientRect();let n=v.parentElement,depth=0;"
-                    "while(n&&n!==document.body&&depth++<8){"
-                    "const bs=[...n.querySelectorAll(sel)].filter(b=>b.offsetParent!==null);"
-                    "if(bs.length){bs.sort((a,b)=>{const ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();"
-                    "const ad=Math.abs((ar.top+ar.bottom)/2-(vr.top+vr.bottom)/2)+"
-                    "Math.abs((ar.left+ar.right)/2-(vr.left+vr.right)/2);"
-                    "const bd=Math.abs((br.top+br.bottom)/2-(vr.top+vr.bottom)/2)+"
-                    "Math.abs((br.left+br.right)/2-(vr.left+vr.right)/2);return ad-bd;});"
-                    "bs[0].click();return true;}n=n.parentElement;}return false;",
+                    "const visible=e=>!!(e&&e.offsetParent!==null);"
+                    "const center=e=>{const r=e.getBoundingClientRect();return [(r.left+r.right)/2,(r.top+r.bottom)/2]};"
+                    "const dist=(a,b)=>Math.abs(a[0]-b[0])+Math.abs(a[1]-b[1]);"
+                    "const vc=center(v),buttons=[...document.querySelectorAll(sel)].filter(visible);"
+                    "const valid=buttons.filter(b=>{let n=b.parentElement,depth=0;"
+                    "while(n&&n!==document.body&&depth++<10){const videos=[...n.querySelectorAll('video')].filter(visible);"
+                    "if(videos.includes(v)){return videos.sort((a,c)=>dist(center(a),center(b))-dist(center(c),center(b)))[0]===v;}"
+                    "n=n.parentElement;}return false;});"
+                    "if(!valid.length)return false;valid.sort((a,b)=>dist(center(a),vc)-dist(center(b),vc));"
+                    "valid[0].click();return true;",
                     video,
                 )
             )
@@ -784,13 +785,13 @@ class MuseVideoAutomation:
             clicked = False
         if not clicked:
             try:
-                driver.execute_script(
+                clicked = bool(driver.execute_script(
                     "const v=arguments[0],a=document.createElement('a');"
-                    "a.href=v.currentSrc||v.src;a.download='muse-video.mp4';"
-                    "document.body.appendChild(a);a.click();a.remove();",
+                    "const src=v.currentSrc||v.src;if(!src)return false;"
+                    "a.href=src;a.download='muse-video.mp4';"
+                    "document.body.appendChild(a);a.click();a.remove();return true;",
                     video,
-                )
-                clicked = True
+                ))
             except Exception:
                 pass
         if not clicked:

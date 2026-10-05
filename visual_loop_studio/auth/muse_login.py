@@ -758,6 +758,8 @@ def muse_native_browser_command(executable: str | Path, profile: Path, start_url
         "--no-first-run",
         "--no-default-browser-check",
         "--start-maximized",
+        "--remote-debugging-address=127.0.0.1",
+        "--remote-debugging-port=0",
         validate_muse_start_url(start_url),
     ]
 
@@ -765,6 +767,9 @@ def muse_native_browser_command(executable: str | Path, profile: Path, start_url
 def launch_muse_native_browser(profile: Path, start_url: str = MUSE_START_URL) -> subprocess.Popen:
     """Open an installed Chrome/Edge normally so the user can authenticate Muse."""
     profile.mkdir(parents=True, exist_ok=True)
+    # Chrome rewrites this file for every debug-enabled launch. A stale value
+    # must never make the app attach to a previous browser process.
+    (profile / "DevToolsActivePort").unlink(missing_ok=True)
     errors: list[str] = []
     for name, executable in _native_browser_candidates():
         try:
@@ -777,6 +782,54 @@ def launch_muse_native_browser(profile: Path, start_url: str = MUSE_START_URL) -
     raise MuseLoginError(
         "Không mở được Google Chrome hoặc Microsoft Edge bình thường. "
         f"Hãy cài/cập nhật một trong hai trình duyệt.{detail}"
+    )
+
+
+def create_muse_attached_driver(profile: Path, download_dir: Path | None = None):
+    """Attach Selenium to the normal browser opened for human authentication."""
+    port_file = profile / "DevToolsActivePort"
+    try:
+        lines = port_file.read_text(encoding="utf-8").splitlines()
+        port = int(lines[0].strip())
+    except (OSError, ValueError, IndexError):
+        raise MuseLoginError("Chrome/Edge chưa sẵn sàng cho tool kết nối.") from None
+    if not 1 <= port <= 65535:
+        raise MuseLoginError("Chrome/Edge trả về cổng kết nối không hợp lệ.")
+
+    try:
+        from selenium import webdriver
+    except ModuleNotFoundError as exc:
+        raise MuseLoginError("Thiếu Selenium. Hãy cài lại ứng dụng từ requirements.txt.") from exc
+
+    address = f"127.0.0.1:{port}"
+    errors: list[str] = []
+    factories = (
+        (webdriver.ChromeOptions, webdriver.Chrome),
+        (webdriver.EdgeOptions, webdriver.Edge),
+    )
+    for options_type, factory in factories:
+        try:
+            options = options_type()
+            options.add_experimental_option("debuggerAddress", address)
+            driver = factory(options=options)
+            if download_dir is not None:
+                download_dir.mkdir(parents=True, exist_ok=True)
+                params = {
+                    "behavior": "allow",
+                    "downloadPath": str(download_dir.resolve()),
+                    "eventsEnabled": True,
+                }
+                try:
+                    driver.execute_cdp_cmd("Browser.setDownloadBehavior", params)
+                except Exception:
+                    driver.execute_cdp_cmd("Page.setDownloadBehavior", params)
+            return driver
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+    raise MuseLoginError(
+        "Không thể kết nối tool vào Chrome/Edge đang mở. "
+        "Hãy giữ cửa sổ đăng nhập Muse mở và thử lại. "
+        + "/".join(errors)
     )
 
 

@@ -327,17 +327,20 @@ class FakeDriver:
 
 
 class FakeNativeBrowserProcess:
+    def __init__(self):
+        self.running = True
+
     def poll(self):
-        return 0
+        return None if self.running else 0
 
     def terminate(self):
-        return None
+        self.running = False
 
     def wait(self, timeout=None):
         return 0
 
     def kill(self):
-        return None
+        self.running = False
 
 
 class MuseSessionManagerTests(unittest.TestCase):
@@ -375,6 +378,7 @@ class MuseSessionManagerTests(unittest.TestCase):
             "account_store": MuseAccountStore(self.root / "data" / "muse_accounts.json"),
             "driver_factory": factory,
             "native_browser_factory": lambda _profile, _url: FakeNativeBrowserProcess(),
+            "attached_driver_factory": lambda profile, _download: factory(profile),
             "poll_interval": 0.01,
             "stable_seconds": 0,
             "generation_timeout": 0.35,
