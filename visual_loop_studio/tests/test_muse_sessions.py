@@ -545,8 +545,17 @@ class MuseSessionManagerTests(unittest.TestCase):
             password="",
             manual_browser=True,
         )
-        self._wait_state(1, MuseSessionState.LOGIN_REQUIRED)
-        driver = self.drivers[1]
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            driver = self.drivers.get(1)
+            if (
+                driver is not None
+                and self.manager.snapshot(1).state == MuseSessionState.LOGIN_REQUIRED
+            ):
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("Manual browser did not attach before the myaccount redirect test")
         driver.google_email = "owner@example.com"
         driver.google_authenticated = True
         driver._current_url = "https://myaccount.google.com/?pli=1"
