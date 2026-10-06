@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import threading
+import time
 from concurrent.futures import Future
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -29,7 +30,7 @@ from utils.paths import DATA_DIR
 
 MUSE_VIDEO_BATCH_CHECKPOINT = DATA_DIR / "muse_video_batch.json"
 MUSE_IMAGES_PER_REQUEST = 3
-MUSE_JOB_PROTOCOL = "single-image-summary-artifact-v4"
+MUSE_JOB_PROTOCOL = "single-image-exact-video-v3"
 SUPPORTED_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 TRANSIENT_NETWORK_MARKERS = (
     "network error",
@@ -1713,9 +1714,12 @@ class MuseVideoAutomation:
                 message_floor=message_floor,
             )
 
-        anchor = find_anchor()
-        if anchor:
-            return anchor
+        for _ in range(3):
+            anchor = find_anchor()
+            if anchor:
+                return anchor
+            if self._wait_stop(context, min(0.05, self.poll_interval)):
+                raise MuseVideoStopped("Đã dừng worker Muse.")
         context.log(
             "Muse không công khai ID tin nhắn mới trong DOM; "
             "đang nhận video bằng mốc theo dõi được cài ngay trước lúc Send."
@@ -1748,35 +1752,38 @@ class MuseVideoAutomation:
                 "wantedIndex=arguments[3],wantedText=(arguments[4]||'').replace(/\\s+/g,' ').trim(),"
                 "baselineIds=new Set(arguments[5]||[]),floor=arguments[6]||0,"
                 "watchToken=arguments[7]||'',sentAt=Number(arguments[8]||0);"
+                "const isImageSrc=s=>!s||/^data:image[/]/i.test(s)||/^https?:.*\\.(png|jpe?g|webp|gif)(?:[?#]|$)/i.test(s);"
+                "const mediaSrc=v=>String(v.currentSrc||v.src||(v.querySelector&&v.querySelector('source')&&v.querySelector('source').src)||'').trim();"
+                "const isMediaVideo=v=>{"
+                "const s=mediaSrc(v);return Boolean(s&&!isImageSrc(s)&&/^(blob:|https?:)/i.test(s));};"
                 "const users=[...document.querySelectorAll("
                 "'[data-message-role=\\\"user\\\"],[data-role=\\\"user\\\"],"
-                "[data-author=\\\"user\\\"],[data-testid*=\\\"user-message\\\" i]')];"
+                "[data-author=\\\"user\\\"],[data-message-author=\\\"user\\\"],[data-testid*=\\\"user-message\\\" i]')];"
                 "const norm=e=>(e&&(e.innerText||e.textContent)||'').replace(/\\s+/g,' ').trim();"
-                "const all=[...document.querySelectorAll('video')];"
+                "const all=[...document.querySelectorAll('video')].filter(isMediaVideo);"
                 "const root=window.__visualLoopVideoWatches||{},watch=watchToken?root[watchToken]:null;"
-                "const appearedAt=video=>{if(!watch)return 0;"
-                "const touched=Number(watch.touched.get(video)||0);if(touched)return touched;"
+                "const appearedAt=video=>{"
+                "if(!watch)return 0;const touched=Number(watch.touched.get(video)||0);if(touched)return touched;"
                 "if(!watch.baseline.has(video))return Date.now();"
-                "return watch.source(video)!==watch.baselineSources.get(video)?Date.now():0;};"
+                "const currentSrc=watch.source(video);const oldSrc=watch.baselineSources.get(video);"
+                "return (currentSrc&&currentSrc!==oldSrc)?Date.now():0;};"
                 "const videos=watch?all.filter(video=>appearedAt(video)>=Math.max(0,sentAt-1000)):all;"
                 "let message=(live&&live.isConnected)?live:null;"
-                "if(!message&&wantedId)message=users.find(e=>e.getAttribute('data-message-id')===wantedId)||null;"
-                "if(!message&&wantedGroup)message=users.find(e=>"
-                "e.getAttribute('data-message-group-id')===wantedGroup&&(!wantedText||norm(e).includes(wantedText)))||null;"
-                "if(!message&&wantedIndex>=0&&users[wantedIndex]&&(!wantedText||norm(users[wantedIndex]).includes(wantedText)))"
-                "message=users[wantedIndex];"
-                "if(!message)message=users.find((e,index)=>index>=floor&&"
-                "!baselineIds.has(e.getAttribute('data-message-id')||'')&&(!wantedText||norm(e).includes(wantedText)))||null;"
+                "if(!message&&wantedId)message=users.find(e=>e.getAttribute('data-message-id')===wantedId)||"
+                "document.querySelector(`[data-message-id=\"${wantedId}\"]`)||null;"
+                "if(!message&&wantedGroup)message=users.find(e=>e.getAttribute('data-message-group-id')===wantedGroup&&(!wantedText||norm(e).includes(wantedText)))||null;"
+                "if(!message&&wantedIndex>=0&&users[wantedIndex]&&(!wantedText||norm(users[wantedIndex]).includes(wantedText)))message=users[wantedIndex];"
+                "if(!message)message=users.find((e,index)=>index>=floor&&!baselineIds.has(e.getAttribute('data-message-id')||'')&&(!wantedText||norm(e).includes(wantedText)))||null;"
                 "if(!message)return watch?videos:[];"
                 "const following=(a,b)=>!!(a.compareDocumentPosition(b)&Node.DOCUMENT_POSITION_FOLLOWING);"
                 "const nextUser=users.find(e=>e!==message&&following(message,e))||null;"
+                "const candidates=videos.filter(video=>following(message,video)&&(!nextUser||following(video,nextUser)));"
                 "const group=message.getAttribute('data-message-group-id')||wantedGroup;"
-                "const grouped=group?videos.filter(video=>{const item=video.closest('[data-message-group-id]');"
-                "return item&&item.getAttribute('data-message-group-id')===group;}):[];"
-                "const bounded=videos.filter(video=>following(message,video)&&(!nextUser||following(video,nextUser)));"
-                "const scoped=videos.filter(video=>!!video.closest('[data-message-item=\\\"true\\\"],[data-message-group-id]'));"
-                "const result=[],seen=new Set();for(const video of [...grouped,...bounded,...scoped])"
-                "if(!seen.has(video)){seen.add(video);result.push(video);}return result;",
+                "const grouped=group?candidates.filter(video=>{"
+                "const item=video.closest('[data-message-group-id]');return item&&item.getAttribute('data-message-group-id')===group;}):[];"
+                "const result=[],seen=new Set();"
+                "for(const video of [...grouped,...candidates]){"
+                "if(!seen.has(video)){seen.add(video);result.push(video);}}return result;",
                 anchor.element,
                 anchor.message_id,
                 anchor.message_group_id,
@@ -1796,14 +1803,18 @@ class MuseVideoAutomation:
     @staticmethod
     def _video_ready(driver: Any, video: Any) -> bool:
         try:
-            ready = bool(driver.execute_script("return arguments[0].readyState >= 2", video))
-            if ready:
-                return True
+            return bool(
+                driver.execute_script(
+                    "const v=arguments[0];if(!v)return false;"
+                    "const src=String(v.currentSrc||v.src||(v.querySelector&&v.querySelector('source')&&v.querySelector('source').src)||'').trim();"
+                    "if(!src||/^data:image[/]/i.test(src)||/^https?:.*\\.(png|jpe?g|webp|gif)(?:[?#]|$)/i.test(src))return false;"
+                    "if(!/^(blob:|https?:)/i.test(src))return false;"
+                    "return (v.readyState>=2)||(v.duration>0)||Boolean(src);",
+                    video,
+                )
+            )
         except Exception:
-            pass
-        # Some fake/remote elements do not expose readyState through WebDriver;
-        # a concrete media URL is the safe fallback for downloadability.
-        return bool(_attr(video, "src") or _attr(video, "currentSrc"))
+            return False
 
     def _new_visible_element(self, driver: Any, selectors: tuple[str, ...], baseline: set[str]):
         return next(
