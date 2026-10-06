@@ -250,6 +250,7 @@ class AutomationDriver:
         self.unrelated_video = None
         self.inject_unrelated_on_generate = False
         self.fail_direct_download = False
+        self.direct_download_barrier = None
         self.old_user_message = AutomationElement(
             "old-user-message",
             text="make a cinematic video",
@@ -263,6 +264,7 @@ class AutomationDriver:
         self.video_poll_count = 0
         self.session_poll_delay = 0
         self.session_poll_count = 0
+        self.new_session_base_epoch_ms = 1_700_000_060_000
         self.session_clicks = []
         self.session_click_video_poll_counts = []
         self.old_session = AutomationElement(
@@ -471,7 +473,7 @@ class AutomationDriver:
                     "text": item.text,
                     "key": item.get_attribute("data-testid"),
                     "epoch_ms": (
-                        1_700_000_060_000
+                        self.new_session_base_epoch_ms
                         + max(0, int(item.id.rsplit("-", 1)[-1]) - 1) * 60_000
                         if item in self.new_sessions
                         else 1_700_000_000_000
@@ -543,6 +545,8 @@ class AutomationDriver:
         if "document.querySelectorAll(sel)" in script or "a.download='muse-video.mp4'" in script:
             if self.fail_direct_download:
                 return False
+            if self.direct_download_barrier is not None:
+                self.direct_download_barrier.wait(timeout=1)
             source = str(video.get_attribute("src") or "").casefold()
             if source.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")) or source.startswith("data:image/"):
                 return False
@@ -904,6 +908,122 @@ class MuseVideoAutomationTests(unittest.TestCase):
                 second_lock.release()
             finally:
                 first_lock.release()
+
+    def test_same_minute_complete_session_is_never_clicked_after_send(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.png"
+            source.write_bytes(b"image")
+            driver = AutomationDriver(root / "downloads")
+            driver.fail_direct_download = True
+            driver.new_session_base_epoch_ms = 1_700_000_000_000
+            job = MuseVideoJob(
+                job_id="same-minute-session",
+                source_path=str(source),
+                worker_id=1,
+                account_id="account-1",
+                email="owner@example.com",
+                prompt="never click an old same-minute session",
+                settings=MuseVideoSettings(),
+                output_path=str(root / "output" / "result.mp4"),
+            )
+
+            def transition(state, **changes):
+                job.state = state
+                for key, value in changes.items():
+                    if hasattr(job, key):
+                        setattr(job, key, value)
+
+            context = MuseVideoRunContext(
+                worker_id=1,
+                download_dir=driver.download_dir,
+                stopped=lambda: False,
+                transition=transition,
+                log=lambda _message: None,
+                retry_limit=1,
+                backoff_base=0,
+            )
+
+            with self.assertRaises(MuseVideoTimeout):
+                MuseVideoAutomation(
+                    poll_interval=0.01,
+                    timeout=0.1,
+                    upload_timeout=0.1,
+                    download_timeout=0.1,
+                ).process(driver, job, context)
+
+            self.assertEqual(driver.session_clicks, [])
+            self.assertEqual(driver.downloaded_video_ids, [])
+
+    def test_two_tabs_download_videos_below_their_prompts_concurrently(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            automation = MuseVideoAutomation(
+                poll_interval=0.01,
+                timeout=1,
+                upload_timeout=1,
+                download_timeout=1,
+            )
+            barrier = threading.Barrier(2)
+            runs = []
+            for worker_id in (1, 2):
+                worker_root = root / f"worker-{worker_id}"
+                worker_root.mkdir()
+                source = worker_root / "source.png"
+                source.write_bytes(f"image-{worker_id}".encode())
+                driver = AutomationDriver(worker_root / "downloads")
+                driver.direct_download_barrier = barrier
+                job = MuseVideoJob(
+                    job_id=f"concurrent-job-{worker_id}",
+                    source_path=str(source),
+                    worker_id=worker_id,
+                    account_id=f"account-{worker_id}",
+                    email=f"owner{worker_id}@example.com",
+                    prompt=f"concurrent prompt {worker_id}",
+                    settings=MuseVideoSettings(),
+                    output_path=str(worker_root / "output" / "result.mp4"),
+                )
+
+                def transition(state, _job=job, **changes):
+                    _job.state = state
+                    for key, value in changes.items():
+                        if hasattr(_job, key):
+                            setattr(_job, key, value)
+
+                context = MuseVideoRunContext(
+                    worker_id=worker_id,
+                    download_dir=driver.download_dir,
+                    stopped=lambda: False,
+                    transition=transition,
+                    log=lambda _message: None,
+                    retry_limit=1,
+                    backoff_base=0,
+                )
+                runs.append((driver, job, context))
+
+            results = {}
+            errors = []
+
+            def run(driver, job, context):
+                try:
+                    results[job.job_id] = automation.process(driver, job, context)
+                except BaseException as exc:
+                    errors.append(exc)
+
+            threads = [
+                threading.Thread(target=run, args=run_args)
+                for run_args in runs
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=3)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            self.assertEqual(set(results), {"concurrent-job-1", "concurrent-job-2"})
+            self.assertTrue(all(Path(result).is_file() for result in results.values()))
+            self.assertTrue(all(driver.session_clicks == [] for driver, _job, _context in runs))
 
     def test_send_selector_does_not_click_other_submit_buttons(self):
         with tempfile.TemporaryDirectory() as folder:
