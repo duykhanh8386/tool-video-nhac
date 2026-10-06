@@ -247,6 +247,8 @@ class AutomationDriver:
         self.previews = []
         self.old_video = AutomationElement("old-video", tag_name="video", attrs={"src": "https://example/old.mp4"})
         self.new_videos = []
+        self.unrelated_video = None
+        self.inject_unrelated_on_generate = False
         self.uploaded = ""
         self.uploaded_paths = []
         self.generate_clicks = 0
@@ -276,6 +278,12 @@ class AutomationDriver:
 
     def _generated(self):
         self.generate_clicks += 1
+        if self.inject_unrelated_on_generate:
+            self.unrelated_video = AutomationElement(
+                "unrelated-video",
+                tag_name="video",
+                attrs={"src": "https://example/unrelated.mp4"},
+            )
         self.new_videos = [
             AutomationElement(
                 f"new-video-{index}",
@@ -299,12 +307,15 @@ class AutomationDriver:
         if selector in self.selectors.generate_buttons:
             return [self.generate]
         if selector in self.selectors.video_results:
-            return [self.old_video, *self.new_videos]
+            unrelated = [self.unrelated_video] if self.unrelated_video is not None else []
+            return [self.old_video, *unrelated, *self.new_videos]
         if selector in self.selectors.processing:
             return []
         return []
 
     def execute_script(self, script, video):
+        if "VISUAL_LOOP_VIDEOS_AFTER_PROMPT" in script:
+            return list(self.new_videos)
         if "document.querySelectorAll(sel)" in script or "a.download='muse-video.mp4'" in script:
             self.downloaded_video_id = video.id
             self.downloaded_video_ids.append(video.id)
@@ -391,6 +402,53 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertEqual(second_result, target)
             self.assertEqual(driver.generate_clicks, 1)
             self.assertEqual(len(driver.downloaded_video_ids), download_count)
+
+    def test_result_is_bound_to_prompt_and_ignores_unrelated_video_added_later(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.png"
+            source.write_bytes(b"image")
+            download_dir = root / "downloads"
+            target = root / "output" / "result.mp4"
+            driver = AutomationDriver(download_dir)
+            driver.inject_unrelated_on_generate = True
+            job = MuseVideoJob(
+                job_id="job-prompt-bound",
+                source_path=str(source),
+                worker_id=1,
+                account_id="account-1",
+                email="owner@example.com",
+                prompt="the exact submitted prompt",
+                settings=MuseVideoSettings(),
+                output_path=str(target),
+            )
+
+            def transition(state, **changes):
+                job.state = state
+                for key, value in changes.items():
+                    if hasattr(job, key):
+                        setattr(job, key, value)
+
+            context = MuseVideoRunContext(
+                worker_id=1,
+                download_dir=download_dir,
+                stopped=lambda: False,
+                transition=transition,
+                log=lambda _message: None,
+                retry_limit=1,
+                backoff_base=0,
+            )
+
+            result = MuseVideoAutomation(
+                poll_interval=0.01,
+                timeout=1,
+                upload_timeout=1,
+                download_timeout=1,
+            ).process(driver, job, context)
+
+            self.assertEqual(result, target)
+            self.assertEqual(driver.downloaded_video_id, "new-video-1")
+            self.assertNotIn("unrelated-video", driver.downloaded_video_ids)
 
     def test_submits_three_images_once_and_downloads_three_distinct_videos_in_order(self):
         with tempfile.TemporaryDirectory() as folder:

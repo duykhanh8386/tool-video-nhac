@@ -457,6 +457,7 @@ class MuseVideoAutomation:
             driver,
             expected=len(jobs),
             baseline=set(baseline_videos),
+            prompt=prompt,
             context=primary,
         )
         results: dict[str, Path | BaseException] = {}
@@ -500,6 +501,7 @@ class MuseVideoAutomation:
             driver,
             expected=expected,
             baseline=baseline,
+            prompt=jobs[0].prompt,
             context=primary,
         )
         by_fingerprint = {_video_fingerprint(video): video for video in videos}
@@ -545,6 +547,7 @@ class MuseVideoAutomation:
         *,
         expected: int,
         baseline: set[str],
+        prompt: str,
         context: MuseVideoRunContext,
     ) -> list[Any]:
         transient_retries = 0
@@ -567,7 +570,10 @@ class MuseVideoAutomation:
                 return False
             values: list[Any] = []
             seen: set[str] = set()
-            for video in self._videos(driver):
+            # Bind results to the exact user prompt which started this group.
+            # This prevents an older/off-screen video card which appears late
+            # in the DOM from being mistaken for the newly generated result.
+            for video in self._videos_after_prompt(driver, prompt):
                 fingerprint = _video_fingerprint(video)
                 if fingerprint in baseline or fingerprint in seen or not self._video_ready(driver, video):
                     continue
@@ -619,7 +625,7 @@ class MuseVideoAutomation:
                 if self._wait_stop(context, delay):
                     raise MuseVideoStopped("Đã dừng worker Muse.")
                 return False
-            videos = self._videos(driver)
+            videos = self._videos_after_prompt(driver, job.prompt)
             if job.result_fingerprint:
                 matched = next(
                     (
@@ -635,7 +641,7 @@ class MuseVideoAutomation:
             return next(
                 (
                     video
-                    for video in reversed(videos)
+                    for video in videos
                     if _video_fingerprint(video) not in baseline and self._video_ready(driver, video)
                 ),
                 False,
@@ -901,7 +907,37 @@ class MuseVideoAutomation:
         return [item for item in self._elements(driver, self.selectors.video_results) if _visible(item)]
 
     def _video_fingerprints(self, driver: Any) -> set[str]:
-        return {_video_fingerprint(item) for item in self._videos(driver)}
+        # Include hidden/off-screen cards. Muse can lazy-show an old card after
+        # a new prompt; excluding it here made that old media look newly added.
+        return {_video_fingerprint(item) for item in self._all_videos(driver)}
+
+    def _all_videos(self, driver: Any) -> list[Any]:
+        return self._elements(driver, self.selectors.video_results)
+
+    def _videos_after_prompt(self, driver: Any, prompt: str) -> list[Any]:
+        """Return only videos following the newest exact copy of this prompt."""
+        text = " ".join(str(prompt or "").split())
+        if not text:
+            return []
+        try:
+            values = driver.execute_script(
+                "/* VISUAL_LOOP_VIDEOS_AFTER_PROMPT */"
+                "const norm=s=>(s||'').replace(/\\s+/g,' ').trim();"
+                "const wanted=norm(arguments[0]);"
+                "const nodes=[...document.querySelectorAll("
+                "'p,span,div,[role=\\\"textbox\\\"],[data-testid*=\\\"message\\\" i]')];"
+                "const exact=nodes.filter(e=>norm(e.innerText||e.textContent)===wanted);"
+                "if(!exact.length)return [];"
+                "const anchor=exact[exact.length-1];"
+                "return [...document.querySelectorAll('video')].filter(v=>"
+                "!!(anchor.compareDocumentPosition(v)&Node.DOCUMENT_POSITION_FOLLOWING));",
+                text,
+            )
+        except Exception:
+            return []
+        if not isinstance(values, (list, tuple)):
+            return []
+        return [item for item in values if item is not None]
 
     @staticmethod
     def _video_ready(driver: Any, video: Any) -> bool:
