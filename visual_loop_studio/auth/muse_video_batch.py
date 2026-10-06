@@ -3178,7 +3178,28 @@ def _valid_mp4(path: Path) -> bool:
             return False
         with path.open("rb") as stream:
             header = stream.read(64)
-        return b"ftyp" in header
+        if b"ftyp" not in header:
+            return False
+        if path.stat().st_size < 500_000:
+            try:
+                import subprocess, json
+                res = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries", "stream=width,height,duration", "-of", "json", str(path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if res.returncode == 0:
+                    data = json.loads(res.stdout)
+                    for s in data.get("streams", []):
+                        w = int(s.get("width") or 0)
+                        h = int(s.get("height") or 0)
+                        d = float(s.get("duration") or 0.0)
+                        if w == 480 and h == 480 and abs(d - 5.04) < 0.25:
+                            return False
+            except Exception:
+                pass
+        return True
     except OSError:
         return False
 
