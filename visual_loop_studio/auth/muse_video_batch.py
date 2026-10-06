@@ -400,6 +400,7 @@ class MuseCompletedSession:
     fingerprint: str
     text: str
     completed_epoch_ms: int = 0
+    visual_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -407,6 +408,7 @@ class MuseSummaryArtifact:
     options_button: Any
     fingerprint: str
     text: str
+    index: int = 0
 
 
 class MuseVideoAutomation:
@@ -428,6 +430,10 @@ class MuseVideoAutomation:
         self.upload_timeout = max(0.1, float(upload_timeout))
         self.download_timeout = max(0.1, float(download_timeout))
         self.poll_interval = max(0.02, float(poll_interval))
+        # Rendering may run concurrently in isolated profiles, but Summary UI
+        # interaction is intentionally serialized so one tab is fully drained
+        # before automation starts clicking a different tab.
+        self._summary_download_lock = threading.Lock()
 
     def process(self, driver: Any, job: MuseVideoJob, context: MuseVideoRunContext) -> Path:
         existing = Path(job.output_path)
@@ -498,8 +504,10 @@ class MuseVideoAutomation:
         baseline_session_fingerprints = sorted(
             session.fingerprint for session in self._completed_sessions(driver)
         )
-        submission_started_epoch_ms = self._browser_epoch_ms(driver)
         group_id = hashlib.sha256("|".join(job.job_id for job in jobs).encode("utf-8")).hexdigest()[:24]
+        watch_token = f"visual-loop-{group_id}"
+        watch_started_epoch_ms = self._install_video_watch(driver, watch_token)
+        submission_started_epoch_ms = watch_started_epoch_ms or self._browser_epoch_ms(driver)
         for index, context in enumerate(contexts):
             context.transition(
                 MuseVideoJobState.READY_TO_GENERATE,
@@ -516,79 +524,160 @@ class MuseVideoAutomation:
                 MuseVideoJobState.SUBMITTING,
                 progress=20,
                 submission_attempted=True,
+                submission_watch_token=watch_token,
                 submission_started_epoch_ms=submission_started_epoch_ms,
             )
-        self._click_generate_once(driver)
-        submitted_at = _utc_now()
-        for context in contexts:
-            context.transition(
-                MuseVideoJobState.SUBMITTED,
-                progress=22,
-                submitted=True,
-                submitted_at=submitted_at,
-            )
-        anchor = self._wait_for_submission_message(
-            driver,
-            prompt=prompt,
-            baseline_message_ids=set(baseline_message_ids),
-            message_floor=message_floor,
-            context=primary,
-        )
-        for context in contexts:
-            context.transition(
-                MuseVideoJobState.SUBMITTED,
-                progress=24,
-                submission_message_id=anchor.message_id,
-                submission_message_group_id=anchor.message_group_id,
-                submission_message_index=anchor.dom_index,
-            )
-        primary.log(
-            f"Đã gửi lúc {submitted_at}; đang chờ đúng session mới nhất hoàn tất để mở Summary."
-        )
-        session = self._wait_for_completed_session(
-            driver,
-            baseline=set(baseline_session_fingerprints),
-            wanted_fingerprint="",
-            wanted_text="",
-            started_epoch_ms=submission_started_epoch_ms,
-            context=primary,
-        )
-        for context in contexts:
-            context.transition(
-                MuseVideoJobState.GENERATING,
-                progress=82,
-                result_session_fingerprint=session.fingerprint,
-                result_session_text=session.text,
-            )
-        artifacts = self._open_summary_and_wait_for_mp4(
-            driver,
-            session=session,
-            expected=len(jobs),
-            context=primary,
-        )
-        results: dict[str, Path | BaseException] = {}
-        for index, (job, context, artifact) in enumerate(zip(jobs, contexts, artifacts), start=1):
-            fingerprint = artifact.fingerprint
-            context.log(f"Đang tải MP4 {index}/{len(jobs)} từ Summary của đúng session vừa hoàn tất…")
-            context.transition(
-                MuseVideoJobState.DOWNLOADING,
-                progress=85 + round(index / len(jobs) * 10),
-                result_fingerprint=fingerprint,
-                download_attempts=job.download_attempts + 1,
-            )
-            try:
-                results[job.job_id] = self._download_summary_artifact(
-                    driver,
-                    artifact,
-                    Path(job.output_path),
-                    context,
+        try:
+            self._click_generate_once(driver)
+            submitted_at = _utc_now()
+            for context in contexts:
+                context.transition(
+                    MuseVideoJobState.SUBMITTED,
+                    progress=22,
+                    submitted=True,
+                    submitted_at=submitted_at,
                 )
-            except (MuseVideoStopped, MuseVideoLoginRequired, MuseVideoQuotaExhausted, MuseVideoDriverError):
-                raise
-            except BaseException as exc:
-                results[job.job_id] = exc
-        self._close_summary(driver)
-        return results
+            found_anchor = self._wait_for_submission_message(
+                driver,
+                prompt=prompt,
+                baseline_message_ids=set(baseline_message_ids),
+                message_floor=message_floor,
+                context=primary,
+            )
+            anchor = MuseSubmissionAnchor(
+                element=found_anchor.element,
+                message_id=found_anchor.message_id,
+                message_group_id=found_anchor.message_group_id,
+                dom_index=found_anchor.dom_index,
+                prompt=found_anchor.prompt,
+                baseline_message_ids=found_anchor.baseline_message_ids,
+                message_floor=found_anchor.message_floor,
+                watch_token=watch_token,
+                started_epoch_ms=submission_started_epoch_ms,
+            )
+            for context in contexts:
+                context.transition(
+                    MuseVideoJobState.GENERATING,
+                    progress=24,
+                    submission_message_id=anchor.message_id,
+                    submission_message_group_id=anchor.message_group_id,
+                    submission_message_index=anchor.dom_index,
+                )
+            primary.log(
+                f"Đã gửi lúc {submitted_at}; đang chờ đủ {len(jobs)} video của đúng tin nhắn render xong."
+            )
+            self._wait_for_distinct_videos(
+                driver,
+                expected=len(jobs),
+                baseline=set(baseline_videos),
+                anchor=anchor,
+                context=primary,
+            )
+            for context in contexts:
+                context.transition(MuseVideoJobState.GENERATING, progress=78)
+        finally:
+            self._stop_video_watch(driver, watch_token)
+
+        primary.log(
+            "Video đã render đủ; đang chờ Chat Session có dấu tick Complete, "
+            "theo thứ tự gần thời điểm Send nhất."
+        )
+        return self._download_new_completed_sessions(
+            driver,
+            jobs=jobs,
+            contexts=contexts,
+            baseline=set(baseline_session_fingerprints),
+            started_epoch_ms=submission_started_epoch_ms,
+        )
+
+    def _acquire_summary_download_turn(self, driver: Any, context: MuseVideoRunContext) -> None:
+        waiting_logged = False
+        while not self._summary_download_lock.acquire(timeout=self.poll_interval):
+            self._check(driver, context)
+            if not waiting_logged:
+                context.log("Đang chờ tab trước tải hết MP4 rồi mới chuyển sang tab này…")
+                waiting_logged = True
+
+    def _download_new_completed_sessions(
+        self,
+        driver: Any,
+        *,
+        jobs: list[MuseVideoJob],
+        contexts: list[MuseVideoRunContext],
+        baseline: set[str],
+        started_epoch_ms: int,
+    ) -> dict[str, Path | BaseException]:
+        """Drain tick-complete sessions chronologically, one browser tab at a time."""
+        primary = contexts[0]
+        claimed_sessions: set[str] = set()
+        results: dict[str, Path | BaseException] = {}
+        output_index = 0
+        self._acquire_summary_download_turn(driver, primary)
+        try:
+            while output_index < len(jobs):
+                session = self._wait_for_completed_session(
+                    driver,
+                    baseline=baseline,
+                    wanted_fingerprint="",
+                    wanted_text="",
+                    started_epoch_ms=started_epoch_ms,
+                    context=primary,
+                    claimed=claimed_sessions,
+                )
+                claimed_sessions.add(session.fingerprint)
+                primary.log(
+                    f"Mở Chat Session Complete gần mốc Send tiếp theo: {session.text or session.fingerprint[:12]}"
+                )
+                artifacts = self._open_summary_and_wait_for_all_mp4(
+                    driver,
+                    session=session,
+                    context=primary,
+                )
+                remaining = len(jobs) - output_index
+                if len(artifacts) > remaining:
+                    self._close_summary(driver)
+                    raise MuseVideoDownloadError(
+                        "Chat Session trả về nhiều MP4 hơn số video đang chờ; tool dừng để không bỏ sót hoặc ghép sai file."
+                    )
+                try:
+                    for artifact in artifacts:
+                        job = jobs[output_index]
+                        context = contexts[output_index]
+                        number = output_index + 1
+                        context.log(
+                            f"Đang tải MP4 {number}/{len(jobs)}; phải tải xong file này mới chuyển tiếp."
+                        )
+                        context.transition(
+                            MuseVideoJobState.DOWNLOADING,
+                            progress=82 + round(number / len(jobs) * 13),
+                            result_session_fingerprint=session.fingerprint,
+                            result_session_text=session.text,
+                            result_fingerprint=artifact.fingerprint,
+                            download_attempts=job.download_attempts + 1,
+                        )
+                        try:
+                            results[job.job_id] = self._download_summary_artifact(
+                                driver,
+                                artifact,
+                                Path(job.output_path),
+                                context,
+                            )
+                        except (
+                            MuseVideoStopped,
+                            MuseVideoLoginRequired,
+                            MuseVideoQuotaExhausted,
+                            MuseVideoDriverError,
+                        ):
+                            raise
+                        except BaseException as exc:
+                            results[job.job_id] = exc
+                        output_index += 1
+                finally:
+                    self._close_summary(driver)
+            primary.log("Đã tải đủ toàn bộ MP4 của các Chat Session Complete; tab hiện tại đã xong.")
+            return results
+        finally:
+            self._summary_download_lock.release()
 
     def recover_batch(
         self,
@@ -603,64 +692,124 @@ class MuseVideoAutomation:
         self._check(driver, primary)
         expected = max(job.submission_size for job in jobs)
         primary.log(f"Khôi phục lượt đã gửi gồm {expected} MP4 từ Summary; không bấm Send lần hai.")
-        session = self._wait_for_completed_session(
-            driver,
-            baseline=set(jobs[0].baseline_session_fingerprints),
-            wanted_fingerprint=jobs[0].result_session_fingerprint,
-            wanted_text=jobs[0].result_session_text,
-            started_epoch_ms=jobs[0].submission_started_epoch_ms,
-            context=primary,
-        )
-        for context in contexts:
-            context.transition(
-                MuseVideoJobState.GENERATING,
-                progress=82,
-                result_session_fingerprint=session.fingerprint,
-                result_session_text=session.text,
+        if any(not job.result_session_fingerprint for job in jobs):
+            primary.log(f"Đang chờ đủ {expected} video của lượt đã gửi render xong trước khi mở Chat Session.")
+            self._wait_for_distinct_videos(
+                driver,
+                expected=expected,
+                baseline=set(jobs[0].baseline_videos),
+                anchor=self._anchor_from_job(jobs[0]),
+                context=primary,
             )
-        artifacts = self._open_summary_and_wait_for_mp4(
-            driver,
-            session=session,
-            expected=expected,
-            context=primary,
-        )
-        by_fingerprint = {artifact.fingerprint: artifact for artifact in artifacts}
         results: dict[str, Path | BaseException] = {}
-        claimed: set[str] = set()
+        pending: list[tuple[MuseVideoJob, MuseVideoRunContext]] = []
         for job, context in zip(jobs, contexts):
             target = Path(job.output_path)
             if target.is_file() and _valid_mp4(target):
                 results[job.job_id] = target
-                continue
-            artifact = by_fingerprint.get(job.result_fingerprint) if job.result_fingerprint else None
-            if artifact is None and 0 <= job.submission_index < len(artifacts):
-                artifact = artifacts[job.submission_index]
-            if artifact is None:
-                results[job.job_id] = MuseVideoDownloadError(
-                    "Không ghép được MP4 trong Summary với đúng ảnh của lượt cũ."
+            else:
+                pending.append((job, context))
+        if not pending:
+            return results
+
+        baseline = set(jobs[0].baseline_session_fingerprints)
+        claimed_sessions: set[str] = set()
+        self._acquire_summary_download_turn(driver, primary)
+        try:
+            while pending:
+                first_job, _first_context = pending[0]
+                wanted_fingerprint = first_job.result_session_fingerprint
+                wanted_text = first_job.result_session_text
+                session = self._wait_for_completed_session(
+                    driver,
+                    baseline=baseline,
+                    wanted_fingerprint=wanted_fingerprint,
+                    wanted_text=wanted_text,
+                    started_epoch_ms=first_job.submission_started_epoch_ms,
+                    context=primary,
+                    claimed=claimed_sessions,
                 )
-                continue
-            fingerprint = artifact.fingerprint
-            if fingerprint in claimed:
-                results[job.job_id] = MuseVideoDownloadError(
-                    "Summary trả về cùng một MP4 cho hai ảnh; tool từ chối lưu sai file."
+                claimed_sessions.add(session.fingerprint)
+                artifacts = self._open_summary_and_wait_for_all_mp4(
+                    driver,
+                    session=session,
+                    context=primary,
                 )
-                continue
-            claimed.add(fingerprint)
-            context.transition(
-                MuseVideoJobState.DOWNLOADING,
-                progress=90,
-                result_fingerprint=fingerprint,
-                download_attempts=job.download_attempts + 1,
-            )
-            try:
-                results[job.job_id] = self._download_summary_artifact(driver, artifact, target, context)
-            except (MuseVideoStopped, MuseVideoLoginRequired, MuseVideoQuotaExhausted, MuseVideoDriverError):
-                raise
-            except BaseException as exc:
-                results[job.job_id] = exc
-        self._close_summary(driver)
-        return results
+                claimed_artifacts: set[str] = set()
+                processed: list[tuple[MuseVideoJob, MuseVideoRunContext]] = []
+                if wanted_fingerprint:
+                    candidates = [
+                        pair for pair in pending if pair[0].result_session_fingerprint == wanted_fingerprint
+                    ]
+                elif wanted_text:
+                    candidates = [pair for pair in pending if pair[0].result_session_text == wanted_text]
+                else:
+                    candidates = [pair for pair in pending if not pair[0].result_session_fingerprint]
+                try:
+                    for job, context in candidates:
+                        artifact = next(
+                            (
+                                item
+                                for item in artifacts
+                                if item.fingerprint == job.result_fingerprint
+                                and item.fingerprint not in claimed_artifacts
+                            ),
+                            None,
+                        )
+                        if artifact is None:
+                            artifact = next(
+                                (
+                                    item
+                                    for item in artifacts
+                                    if item.fingerprint not in claimed_artifacts
+                                ),
+                                None,
+                            )
+                        if artifact is None:
+                            if wanted_fingerprint or wanted_text:
+                                results[job.job_id] = MuseVideoDownloadError(
+                                    "Không ghép được MP4 trong đúng Chat Session Complete của lượt cũ."
+                                )
+                                processed.append((job, context))
+                            break
+                        claimed_artifacts.add(artifact.fingerprint)
+                        context.transition(
+                            MuseVideoJobState.DOWNLOADING,
+                            progress=90,
+                            result_session_fingerprint=session.fingerprint,
+                            result_session_text=session.text,
+                            result_fingerprint=artifact.fingerprint,
+                            download_attempts=job.download_attempts + 1,
+                        )
+                        try:
+                            results[job.job_id] = self._download_summary_artifact(
+                                driver,
+                                artifact,
+                                Path(job.output_path),
+                                context,
+                            )
+                        except (
+                            MuseVideoStopped,
+                            MuseVideoLoginRequired,
+                            MuseVideoQuotaExhausted,
+                            MuseVideoDriverError,
+                        ):
+                            raise
+                        except BaseException as exc:
+                            results[job.job_id] = exc
+                        processed.append((job, context))
+                finally:
+                    self._close_summary(driver)
+                if not processed:
+                    raise MuseVideoDownloadError(
+                        "Chat Session Complete không có MP4 chưa tải phù hợp với lượt đang khôi phục."
+                    )
+                processed_ids = {job.job_id for job, _context in processed}
+                pending = [pair for pair in pending if pair[0].job_id not in processed_ids]
+            primary.log("Đã khôi phục và tải đủ MP4 theo từng Chat Session Complete.")
+            return results
+        finally:
+            self._summary_download_lock.release()
 
     def _wait_for_distinct_videos(
         self,
@@ -973,16 +1122,16 @@ class MuseVideoAutomation:
                 "const visible=e=>{const r=e.getBoundingClientRect();const s=getComputedStyle(e);"
                 "return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';};"
                 "const norm=s=>(s||'').replace(/\\s+/g,' ').trim();"
-                "const completed=/(generated|rendered|delivered|finished|ready|created|đã tạo|hoàn tất)/i;"
                 "const media=/(video|videos|clip|clips|mp4)/i;"
                 "const clock=/\\b\\d{1,2}:\\d{2}(?:\\s*[ap]m)?\\b/i;"
+                "const completedTick='M15.79 7.66C16.08 7.27 16.63 7.18 17.02 7.47C17.41 7.75 17.49 8.3 17.21 8.69L11.13 17.02C10.97 17.23 10.72 17.36 10.45 17.37C10.18 17.38 9.93 17.27 9.75 17.06L6.58 13.3C6.27 12.94 6.32 12.38 6.69 12.07C7.05 11.76 7.61 11.81 7.92 12.18L10.37 15.08L15.79 7.66Z';"
                 "return [...document.querySelectorAll('button')].filter(button=>{"
                 "if(!visible(button)||button.closest('[role=\\\"dialog\\\"]'))return false;"
                 "const text=norm(button.innerText||button.textContent);"
-                "return completed.test(text)&&media.test(text)&&clock.test(text);"
-                "}).map((element,index)=>{if(!element.dataset.visualLoopSessionId)"
-                "element.dataset.visualLoopSessionId=(crypto.randomUUID?crypto.randomUUID():"
-                "Date.now().toString(36)+Math.random().toString(36).slice(2));"
+                "const hasCompletedTick=[...button.querySelectorAll('svg path')].some(path=>"
+                "norm(path.getAttribute('d'))===completedTick);"
+                "return hasCompletedTick&&media.test(text)&&clock.test(text);"
+                "}).map((element,index)=>{"
                 "const text=norm(element.innerText||element.textContent),match=text.match(clock);let epochMs=0;"
                 "if(match){let hour=Number(match[0].match(/^\\d{1,2}/)[0]),minute=Number(match[0].match(/:(\\d{2})/)[1]);"
                 "const suffix=(match[0].match(/[ap]m/i)||[''])[0].toLowerCase();"
@@ -990,9 +1139,9 @@ class MuseVideoAutomation:
                 "const date=new Date();date.setHours(hour,minute,0,0);if(date.getTime()>Date.now()+21600000)date.setDate(date.getDate()-1);"
                 "epochMs=date.getTime();}return {element,index,epoch_ms:epochMs,"
                 "top:element.getBoundingClientRect().top,text,"
-                "key:[element.dataset.visualLoopSessionId,element.getAttribute('data-testid')||'',"
+                "key:[element.getAttribute('data-testid')||'',"
                 "element.getAttribute('data-pel-impression')||'',element.getAttribute('aria-label')||'',"
-                "element.getAttribute('href')||''].join('|')};})"
+                "element.getAttribute('title')||'',element.getAttribute('href')||''].join('|')};})"
                 ".sort((a,b)=>a.top-b.top||a.index-b.index);"
             )
         except Exception:
@@ -1014,6 +1163,7 @@ class MuseVideoAutomation:
                     fingerprint=fingerprint,
                     text=text,
                     completed_epoch_ms=max(0, int(value.get("epoch_ms") or 0)),
+                    visual_index=index,
                 )
             )
         return sessions
@@ -1027,13 +1177,14 @@ class MuseVideoAutomation:
         wanted_text: str,
         started_epoch_ms: int,
         context: MuseVideoRunContext,
+        claimed: set[str] | None = None,
     ) -> MuseCompletedSession:
-        """Wait until the timeline entry created/updated by this submission is complete."""
+        """Wait for the earliest unclaimed tick-complete session after Send."""
+
+        claimed_fingerprints = claimed if claimed is not None else set()
 
         def find_session():
             self._check(driver, context)
-            if self._generation_in_progress(driver):
-                return False
             sessions = self._completed_sessions(driver)
             if started_epoch_ms > 0:
                 cutoff = started_epoch_ms - (started_epoch_ms % 60_000)
@@ -1052,17 +1203,26 @@ class MuseVideoAutomation:
                 if wanted_text:
                     return next((session for session in sessions if session.text == wanted_text), False)
                 return False
-            return next(
-                (session for session in sessions if session.fingerprint not in baseline),
-                False,
+            sessions = [
+                session
+                for session in sessions
+                if session.fingerprint not in baseline
+                and session.fingerprint not in claimed_fingerprints
+            ]
+            sessions.sort(
+                key=lambda session: (
+                    session.completed_epoch_ms or (2 ** 63 - 1),
+                    -session.visual_index,
+                )
             )
+            return sessions[0] if sessions else False
 
         return self._wait(
             driver,
             find_session,
             self.timeout,
             context,
-            "Muse chưa xuất hiện session hoàn tất mới sau lúc gửi; tool không tải video cũ.",
+            "Muse chưa xuất hiện Chat Session mới có đúng dấu tick Complete sau lúc gửi; tool không tải video cũ.",
         )
 
     @staticmethod
@@ -1133,6 +1293,7 @@ class MuseVideoAutomation:
                     options_button=value.get("element"),
                     fingerprint=fingerprint,
                     text=text,
+                    index=int(value.get("index", index) or 0),
                 )
             )
         return artifacts
@@ -1171,6 +1332,53 @@ class MuseVideoAutomation:
             )
         )
 
+    def _open_summary_and_wait_for_all_mp4(
+        self,
+        driver: Any,
+        *,
+        session: MuseCompletedSession,
+        context: MuseVideoRunContext,
+    ) -> list[MuseSummaryArtifact]:
+        """Open one tick-complete session and wait until its MP4 card list is stable."""
+        try:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
+                session.element,
+            )
+        except Exception:
+            try:
+                session.element.click()
+            except Exception as exc:
+                raise MuseVideoDownloadError(
+                    "Không mở được Chat Session có dấu tick Complete để đọc Summary."
+                ) from exc
+
+        previous: tuple[str, ...] = ()
+        stable_reads = 0
+
+        def find_all_artifacts():
+            nonlocal previous, stable_reads
+            self._check(driver, context)
+            artifacts = self._summary_mp4_artifacts(driver)
+            if not artifacts:
+                previous = ()
+                stable_reads = 0
+                return False
+            current = tuple(item.fingerprint for item in artifacts)
+            stable_reads = stable_reads + 1 if current == previous else 0
+            previous = current
+            return artifacts if stable_reads >= 2 else False
+
+        return list(
+            self._wait(
+                driver,
+                find_all_artifacts,
+                min(self.timeout, 180.0),
+                context,
+                "Chat Session đã Complete nhưng Summary chưa hiển thị ổn định danh sách MP4.",
+            )
+        )
+
     @staticmethod
     def _summary_download_action(driver: Any) -> Any:
         try:
@@ -1179,11 +1387,53 @@ class MuseVideoAutomation:
                 "const visible=e=>{const r=e.getBoundingClientRect();const s=getComputedStyle(e);"
                 "return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';};"
                 "const norm=s=>(s||'').replace(/\\s+/g,' ').trim().toLowerCase();"
-                "return [...document.querySelectorAll('button,[role=\\\"menuitem\\\"],[role=\\\"button\\\"]')]"
-                ".find(e=>visible(e)&&norm(e.innerText||e.textContent)==='download')||null;"
+                "const exact=e=>visible(e)&&(norm(e.innerText||e.textContent)==='download'||"
+                "norm(e.getAttribute('aria-label'))==='download');"
+                "const menuItems=[...document.querySelectorAll('[role=\\\"menuitem\\\"]')].filter(exact);"
+                "if(menuItems.length)return menuItems[menuItems.length-1];"
+                "const openRoots=[...document.querySelectorAll('[role=\\\"menu\\\"],[data-state=\\\"open\\\"],"
+                "[data-testid*=\\\"menu\\\" i]')].filter(visible);"
+                "for(let i=openRoots.length-1;i>=0;i--){const found=[...openRoots[i].querySelectorAll('button,[role=\\\"button\\\"]')]"
+                ".find(exact);if(found)return found;}"
+                "const fallback=[...document.querySelectorAll('button,[role=\\\"button\\\"]')].filter(exact);"
+                "return fallback.length?fallback[fallback.length-1]:null;"
             )
         except Exception:
             return None
+
+    def _fresh_summary_artifact(
+        self,
+        driver: Any,
+        artifact: MuseSummaryArtifact,
+        context: MuseVideoRunContext,
+    ) -> MuseSummaryArtifact:
+        """Resolve the card again because every completed download can rerender Summary."""
+
+        def find_artifact():
+            self._check(driver, context)
+            artifacts = self._summary_mp4_artifacts(driver)
+            exact = next(
+                (item for item in artifacts if item.fingerprint == artifact.fingerprint),
+                None,
+            )
+            if exact is not None:
+                return exact
+            return next(
+                (
+                    item
+                    for item in artifacts
+                    if item.index == artifact.index and item.text == artifact.text
+                ),
+                False,
+            )
+
+        return self._wait(
+            driver,
+            find_artifact,
+            min(30.0, self.download_timeout),
+            context,
+            "Summary đã render lại nhưng không tìm thấy đúng card MP4 cần tải.",
+        )
 
     def _download_summary_artifact(
         self,
@@ -1201,10 +1451,18 @@ class MuseVideoAutomation:
             for item in context.download_dir.iterdir()
             if item.is_file()
         }
+        artifact = self._fresh_summary_artifact(driver, artifact, context)
         try:
-            driver.execute_script("arguments[0].click();", artifact.options_button)
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center',inline:'nearest'});arguments[0].click();",
+                artifact.options_button,
+            )
         except Exception:
-            artifact.options_button.click()
+            artifact = self._fresh_summary_artifact(driver, artifact, context)
+            try:
+                driver.execute_script("arguments[0].click();", artifact.options_button)
+            except Exception:
+                artifact.options_button.click()
         action = self._wait(
             driver,
             lambda: self._summary_download_action(driver),

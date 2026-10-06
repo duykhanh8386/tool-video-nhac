@@ -263,6 +263,7 @@ class AutomationDriver:
         self.session_poll_delay = 0
         self.session_poll_count = 0
         self.session_clicks = []
+        self.session_click_video_poll_counts = []
         self.old_session = AutomationElement(
             "old-session",
             text="Rendered old video 8:44 am",
@@ -270,8 +271,14 @@ class AutomationDriver:
             click=lambda: self._open_session("old-session"),
         )
         self.new_session = None
+        self.new_sessions = []
+        self.split_summary_sessions = False
+        self.session_artifact_indices = {}
+        self.current_summary_indices = []
         self.summary_open = False
         self.summary_artifacts = []
+        self.summary_generation = 0
+        self.summary_snapshot_calls = 0
         self.active_summary_artifact = None
         self.watch_started = []
         self.watch_stopped = []
@@ -295,6 +302,11 @@ class AutomationDriver:
 
     def _open_session(self, session_id):
         self.session_clicks.append(str(session_id))
+        self.session_click_video_poll_counts.append(self.video_poll_count)
+        self.current_summary_indices = list(
+            self.session_artifact_indices.get(str(session_id), range(1, len(self.previews) + 1))
+        )
+        self._rebuild_summary_artifacts()
         self.summary_open = True
 
     def get(self, _url):
@@ -332,8 +344,47 @@ class AutomationDriver:
             )
             for index in range(1, len(self.previews) + 1)
         ]
+        self.current_summary_indices = list(range(1, len(self.previews) + 1))
+        self._rebuild_summary_artifacts()
+
+        if self.split_summary_sessions:
+            chronological = []
+            for index in range(1, len(self.previews) + 1):
+                session_id = f"new-session-{index}"
+                minute = 48 + index
+                self.session_artifact_indices[session_id] = [index]
+                chronological.append(
+                    AutomationElement(
+                        session_id,
+                        text=f"Generated video 10:{minute:02d} am",
+                        attrs={"data-testid": f"timeline-session-{index}"},
+                        click=lambda _session_id=session_id: self._open_session(_session_id),
+                    )
+                )
+            self.new_sessions = list(reversed(chronological))
+            self.new_session = self.new_sessions[0]
+        else:
+            session_id = f"new-session-{self.generate_clicks}"
+            self.session_artifact_indices[session_id] = list(range(1, len(self.previews) + 1))
+            self.new_session = AutomationElement(
+                session_id,
+                text=f"Generated {len(self.previews)} gentle motion videos 10:49 am",
+                attrs={"data-testid": f"timeline-session-{self.generate_clicks}"},
+                click=lambda: self._open_session(session_id),
+            )
+            self.new_sessions = [self.new_session]
+
+    def _activate_summary_artifact(self, index, generation):
+        if generation != self.summary_generation:
+            raise RuntimeError("stale summary options button")
+        self.active_summary_artifact = index
+
+    def _rebuild_summary_artifacts(self):
+        self.summary_generation += 1
+        generation = self.summary_generation
         self.summary_artifacts = []
-        for index in range(1, len(self.previews) + 1):
+        indices = self.current_summary_indices or list(range(1, len(self.previews) + 1))
+        for index in indices:
             artifact = AutomationElement(
                 f"summary-mp4-{index}",
                 text=f"media-generation-{index}.mp4 MP4",
@@ -342,7 +393,9 @@ class AutomationDriver:
                     "aria-label": "More options",
                     "data-testid": "sandbox-file-card-options",
                 },
-                click=lambda _index=index: setattr(self, "active_summary_artifact", _index),
+                click=lambda _index=index, _generation=generation: self._activate_summary_artifact(
+                    _index, _generation
+                ),
             )
             self.summary_artifacts.append(artifact)
             if index == 1:
@@ -358,13 +411,6 @@ class AutomationDriver:
                         click=lambda: self.downloaded_json_ids.append("summary-json-1"),
                     )
                 )
-        self.new_session = AutomationElement(
-            f"new-session-{self.generate_clicks}",
-            text=f"Generated {len(self.previews)} gentle motion videos 10:49 am",
-            attrs={"data-testid": f"timeline-session-{self.generate_clicks}"},
-            click=lambda: self._open_session(f"new-session-{self.generate_clicks}"),
-        )
-
     def _download_active_summary_artifact(self):
         index = int(self.active_summary_artifact or 0)
         if index <= 0:
@@ -377,6 +423,7 @@ class AutomationDriver:
             b"\x00\x00\x00\x18ftypmp42" + artifact_id.encode()
         )
         self.active_summary_artifact = None
+        self._rebuild_summary_artifacts()
 
     def find_elements(self, by, selector):
         if by == "tag name" and selector == "body":
@@ -412,7 +459,7 @@ class AutomationDriver:
             if self.new_session is not None:
                 self.session_poll_count += 1
                 if self.session_poll_count > self.session_poll_delay:
-                    sessions.insert(0, self.new_session)
+                    sessions = [*self.new_sessions, *sessions]
             return [
                 {
                     "element": item,
@@ -420,13 +467,19 @@ class AutomationDriver:
                     "top": index * 80,
                     "text": item.text,
                     "key": item.get_attribute("data-testid"),
-                    "epoch_ms": 1_700_000_060_000 if item is self.new_session else 1_699_999_000_000,
+                    "epoch_ms": (
+                        1_700_000_060_000
+                        + max(0, int(item.id.rsplit("-", 1)[-1]) - 1) * 60_000
+                        if item in self.new_sessions
+                        else 1_699_999_000_000
+                    ),
                 }
                 for index, item in enumerate(sessions)
             ]
         if "VISUAL_LOOP_SUMMARY_MP4_ARTIFACTS" in script:
             if not self.summary_open:
                 return []
+            self.summary_snapshot_calls += 1
             return [
                 {
                     "element": item,
@@ -545,6 +598,7 @@ class MuseVideoAutomationTests(unittest.TestCase):
             download_dir = root / "downloads"
             target = root / "output" / "result.mp4"
             driver = AutomationDriver(download_dir)
+            driver.video_poll_delay = 2
             driver.session_poll_delay = 2
             job = MuseVideoJob(
                 job_id="job-1",
@@ -586,10 +640,12 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertEqual(driver.uploaded, str(source.resolve()))
             self.assertEqual(driver.prompt.value, "make a cinematic video")
             self.assertEqual(driver.generate_clicks, 1)
+            self.assertGreaterEqual(driver.video_poll_count, 3)
             self.assertGreaterEqual(driver.session_poll_count, 3)
             self.assertEqual(driver.downloaded_video_id, "summary-mp4-1")
             self.assertEqual(driver.downloaded_json_ids, [])
             self.assertEqual(driver.session_clicks, ["new-session-1"])
+            self.assertGreaterEqual(driver.session_click_video_poll_counts[0], 3)
             self.assertEqual(job.submission_message_id, "new-message-id-1")
             self.assertEqual(job.submission_message_group_id, "new-message-group-1")
             self.assertEqual(job.submission_message_index, 1)
@@ -598,6 +654,14 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertTrue(job.baseline_session_fingerprints)
             self.assertTrue(job.result_session_fingerprint)
             self.assertIn("Generated 1", job.result_session_text)
+            self.assertEqual(driver.watch_started, driver.watch_stopped)
+            self.assertTrue(
+                any(
+                    "M15.79 7.66C16.08 7.27" in script
+                    for script in driver.executed_scripts
+                    if "VISUAL_LOOP_COMPLETED_SESSION_SNAPSHOT" in script
+                )
+            )
             self.assertEqual(result, target)
             self.assertTrue(target.is_file())
             self.assertIn(MuseVideoJobState.SUBMITTED, transitions)
@@ -715,6 +779,8 @@ class MuseVideoAutomationTests(unittest.TestCase):
                 driver.downloaded_video_ids,
                 ["summary-mp4-1", "summary-mp4-2", "summary-mp4-3"],
             )
+            self.assertGreaterEqual(driver.summary_generation, 4)
+            self.assertGreaterEqual(driver.summary_snapshot_calls, 4)
             self.assertEqual(driver.downloaded_json_ids, [])
             self.assertEqual(set(results), {job.job_id for job in jobs})
             self.assertTrue(all(Path(result).is_file() for result in results.values()))
@@ -735,6 +801,114 @@ class MuseVideoAutomationTests(unittest.TestCase):
             )
             self.assertTrue(all(Path(result).is_file() for result in recovered.values()))
             self.assertEqual(len({Path(result).read_bytes() for result in recovered.values()}), 3)
+
+    def test_downloads_split_complete_sessions_from_closest_send_time_to_newest(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            download_dir = root / "downloads"
+            driver = AutomationDriver(download_dir)
+            driver.split_summary_sessions = True
+            jobs = []
+            contexts = []
+            for index in range(1, 4):
+                source = root / f"split-source-{index}.png"
+                source.write_bytes(f"image-{index}".encode())
+                job = MuseVideoJob(
+                    job_id=f"split-job-{index}",
+                    source_path=str(source),
+                    worker_id=1,
+                    account_id="account-1",
+                    email="owner@example.com",
+                    prompt="one prompt creates split sessions",
+                    settings=MuseVideoSettings(),
+                    output_path=str(root / "output" / f"split-result-{index}.mp4"),
+                )
+                jobs.append(job)
+
+                def transition(state, _job=job, **changes):
+                    _job.state = state
+                    for key, value in changes.items():
+                        if hasattr(_job, key):
+                            setattr(_job, key, value)
+
+                contexts.append(
+                    MuseVideoRunContext(
+                        worker_id=1,
+                        download_dir=download_dir,
+                        stopped=lambda: False,
+                        transition=transition,
+                        log=lambda _message: None,
+                        retry_limit=1,
+                        backoff_base=0,
+                    )
+                )
+
+            automation = MuseVideoAutomation(
+                poll_interval=0.01,
+                timeout=1,
+                upload_timeout=1,
+                download_timeout=1,
+            )
+            results = automation.process_batch(driver, jobs, contexts)
+
+            self.assertEqual(
+                driver.session_clicks,
+                ["new-session-1", "new-session-2", "new-session-3"],
+            )
+            self.assertEqual(
+                driver.downloaded_video_ids,
+                ["summary-mp4-1", "summary-mp4-2", "summary-mp4-3"],
+            )
+            self.assertTrue(all(Path(result).is_file() for result in results.values()))
+            self.assertEqual(len({job.result_session_fingerprint for job in jobs}), 3)
+
+            for result in results.values():
+                Path(result).unlink()
+            driver.downloaded_video_ids.clear()
+            driver.session_clicks.clear()
+            recovered = automation.recover_batch(driver, jobs, contexts)
+
+            self.assertEqual(
+                driver.session_clicks,
+                ["new-session-1", "new-session-2", "new-session-3"],
+            )
+            self.assertEqual(
+                driver.downloaded_video_ids,
+                ["summary-mp4-1", "summary-mp4-2", "summary-mp4-3"],
+            )
+            self.assertTrue(all(Path(result).is_file() for result in recovered.values()))
+
+    def test_next_tab_waits_until_previous_tab_releases_summary_download_turn(self):
+        with tempfile.TemporaryDirectory() as folder:
+            automation = MuseVideoAutomation(poll_interval=0.01)
+            driver = AutomationDriver(Path(folder) / "downloads")
+            logs = []
+            context = MuseVideoRunContext(
+                worker_id=2,
+                download_dir=driver.download_dir,
+                stopped=lambda: False,
+                transition=lambda *_args, **_kwargs: None,
+                log=logs.append,
+                retry_limit=1,
+                backoff_base=0,
+            )
+            acquired = threading.Event()
+            automation._summary_download_lock.acquire()
+
+            def wait_for_turn():
+                automation._acquire_summary_download_turn(driver, context)
+                acquired.set()
+                automation._summary_download_lock.release()
+
+            thread = threading.Thread(target=wait_for_turn)
+            thread.start()
+            time.sleep(0.05)
+            self.assertFalse(acquired.is_set())
+            automation._summary_download_lock.release()
+            thread.join(timeout=1)
+
+            self.assertTrue(acquired.is_set())
+            self.assertTrue(any("tab trước tải hết MP4" in message for message in logs))
 
     def test_send_selector_does_not_click_other_submit_buttons(self):
         with tempfile.TemporaryDirectory() as folder:
