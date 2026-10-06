@@ -1609,20 +1609,30 @@ class MuseVideoAutomation:
         context: MuseVideoRunContext,
     ) -> list[MuseSummaryArtifact]:
         """Open one tick-complete session and wait until its MP4 card list is stable."""
-        current_artifacts = self._summary_mp4_artifacts(driver)
-        if not current_artifacts:
+        try:
+            self._close_summary(driver)
+        except Exception:
+            pass
+        try:
+            driver.execute_script(
+                "const btn=arguments[0];"
+                "btn.scrollIntoView({block:'center',inline:'nearest'});"
+                "try{btn.focus();}catch(e){}"
+                "const opts={bubbles:true,cancelable:true,view:window};"
+                "try{btn.dispatchEvent(new PointerEvent('pointerdown',opts));}catch(e){}"
+                "try{btn.dispatchEvent(new MouseEvent('mousedown',opts));}catch(e){}"
+                "try{btn.dispatchEvent(new PointerEvent('pointerup',opts));}catch(e){}"
+                "try{btn.dispatchEvent(new MouseEvent('mouseup',opts));}catch(e){}"
+                "btn.click();",
+                session.element,
+            )
+        except Exception:
             try:
-                driver.execute_script(
-                    "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
-                    session.element,
-                )
-            except Exception:
-                try:
-                    session.element.click()
-                except Exception as exc:
-                    raise MuseVideoDownloadError(
-                        "Không mở được Chat Session có dấu tick Complete để đọc Summary."
-                    ) from exc
+                session.element.click()
+            except Exception as exc:
+                raise MuseVideoDownloadError(
+                    "Không mở được Chat Session có dấu tick Complete để đọc Summary."
+                ) from exc
 
         previous: tuple[str, ...] = ()
         stable_reads = 0
@@ -1664,16 +1674,16 @@ class MuseVideoAutomation:
                 "const t=norm(e.innerText||e.textContent);"
                 "const aria=norm(e.getAttribute('aria-label')||'');"
                 "const title=norm(e.getAttribute('title')||'');"
-                "return reg.test(t)||reg.test(aria)||reg.test(title)||t==='download'||aria==='download'||t.includes('download')||aria.includes('download');"
+                "return reg.test(t)||reg.test(aria)||reg.test(title)||t==='download'||aria==='download';"
                 "};"
-                "const menuItems=[...document.querySelectorAll('[role=\"menuitem\"],[role=\"option\"]')].filter(isDownload);"
-                "if(menuItems.length)return menuItems[menuItems.length-1];"
-                "const openRoots=[...document.querySelectorAll('[role=\"menu\"],[data-state=\"open\"],[data-radix-popper-content-wrapper],[data-testid*=\"menu\" i],div[class*=\"menu\" i],div[class*=\"dropdown\" i],div[class*=\"popover\" i]')].filter(visible);"
+                "const items=[...document.querySelectorAll('[role=\"menuitem\"],[data-slot=\"dropdown-menu-item\"],[role=\"option\"]')].filter(isDownload);"
+                "if(items.length)return items[items.length-1];"
+                "const openRoots=[...document.querySelectorAll('[role=\"menu\"],[data-state=\"open\"],[data-radix-popper-content-wrapper],[data-radix-menu-content],[data-testid*=\"menu\" i],div[class*=\"menu\" i],div[class*=\"dropdown\" i],div[class*=\"popover\" i]')].filter(visible);"
                 "for(let i=openRoots.length-1;i>=0;i--){"
-                "const found=[...openRoots[i].querySelectorAll('button,[role=\"button\"],a')].find(isDownload);"
+                "const found=[...openRoots[i].querySelectorAll('button,[role=\"button\"],a,div[role=\"menuitem\"],[data-slot=\"dropdown-menu-item\"]')].find(isDownload);"
                 "if(found)return found;"
                 "}"
-                "const fallback=[...document.querySelectorAll('button,[role=\"button\"],a')].filter(isDownload);"
+                "const fallback=[...document.querySelectorAll('button,[role=\"button\"],a,[role=\"menuitem\"]')].filter(isDownload);"
                 "return fallback.length?fallback[fallback.length-1]:null;"
             )
         except Exception:
@@ -1729,92 +1739,73 @@ class MuseVideoAutomation:
             for item in context.download_dir.iterdir()
             if item.is_file()
         }
-        artifact = self._fresh_summary_artifact(driver, artifact, context)
-        # Kích hoạt chuỗi sự kiện chuột đầy đủ để mở menu 3 chấm
-        try:
-            driver.execute_script(
-                "const btn=arguments[0];"
-                "btn.scrollIntoView({block:'center',inline:'nearest'});"
-                "try{btn.focus();}catch(e){}"
-                "const opts={bubbles:true,cancelable:true,view:window};"
-                "try{btn.dispatchEvent(new PointerEvent('pointerdown',opts));}catch(e){}"
-                "try{btn.dispatchEvent(new MouseEvent('mousedown',opts));}catch(e){}"
-                "try{btn.dispatchEvent(new PointerEvent('pointerup',opts));}catch(e){}"
-                "try{btn.dispatchEvent(new MouseEvent('mouseup',opts));}catch(e){}"
-                "btn.click();",
-                artifact.options_button,
-            )
-        except Exception:
-            try:
-                driver.execute_script("arguments[0].click();", artifact.options_button)
-            except Exception:
-                artifact.options_button.click()
 
         action = None
-        try:
-            action = self._wait(
-                driver,
-                lambda: self._summary_download_action(driver),
-                min(20.0, self.download_timeout * 0.25),
-                context,
-                "Đã mở dấu ba chấm của MP4 nhưng Muse chưa hiện nút Download.",
-            )
-        except Exception:
-            action = None
-
-        if action is not None:
+        for attempt in range(3):
+            self._check(driver, context)
+            current_art = self._fresh_summary_artifact(driver, artifact, context)
+            btn = current_art.options_button
             try:
-                action.click()
-            except Exception:
-                try:
-                    driver.execute_script(
-                        "const el=arguments[0];"
-                        "try{el.focus();}catch(e){}"
-                        "const opts={bubbles:true,cancelable:true,view:window};"
-                        "try{el.dispatchEvent(new MouseEvent('mousedown',opts));}catch(e){}"
-                        "try{el.dispatchEvent(new MouseEvent('mouseup',opts));}catch(e){}"
-                        "el.click();",
-                        action,
-                    )
-                except Exception as exc:
-                    raise MuseVideoDownloadError("Không click được Download của card MP4 trong Summary.") from exc
-        else:
-            # Fallback: Kiểm tra xem thẻ <video> preview ngay trong modal Summary hoặc trên trang có src video để tải không
-            context.log("Không thấy menu Download từ nút 3 chấm; đang thử tải trực tiếp từ thẻ video…")
-            downloaded_direct = False
-            try:
-                downloaded_direct = bool(
-                    driver.execute_script(
-                        "const mediaSrc=v=>String(v.currentSrc||v.src||(v.querySelector&&v.querySelector('source')&&v.querySelector('source').src)||'').trim();"
-                        "const isImageSrc=s=>!s||/^data:image[/]/i.test(s)||/^https?:.*\\.(png|jpe?g|webp|gif)(?:[?#]|$)/i.test(s);"
-                        "const isBotOrAvatar=v=>{"
-                        "if(!v)return true;"
-                        "const s=mediaSrc(v).toLowerCase();"
-                        "if(/(avatar|mascot|muse[-_]?bot|icon|reaction|subagent|status[-_]?anim|thinking|loading[-_]anim|placeholders?|animations?|assets?\\/static)/i.test(s))return true;"
-                        "const bad='header,nav,aside,[data-testid*=\"avatar\" i],[class*=\"avatar\" i],[data-testid*=\"mascot\" i],[class*=\"mascot\" i],[data-testid*=\"loading\" i],[class*=\"loading\" i],[class*=\"thinking\" i],[class*=\"reaction\" i],[class*=\"badge\" i],[class*=\"status\" i],[class*=\"indicator\" i],[data-testid*=\"subagent\" i],[class*=\"subagent\" i],[data-testid*=\"placeholder\" i],[class*=\"placeholder\" i]';"
-                        "if(v.matches&&v.matches(bad))return true;"
-                        "if(v.closest&&v.closest(bad))return true;"
-                        "const r=v.getBoundingClientRect?v.getBoundingClientRect():null;"
-                        "if(r&&r.width>0&&r.height>0&&(r.width<160||r.height<160))return true;"
-                        "if(v.videoWidth>0&&v.videoHeight>0&&(v.videoWidth<280&&v.videoHeight<280))return true;"
-                        "if(v.videoWidth>0&&v.videoHeight>0&&v.videoWidth===v.videoHeight&&v.duration>0&&v.duration<6.5)return true;"
-                        "if(v.duration>0&&Math.abs(v.duration-5.04)<0.25)return true;"
-                        "if(v.loop&&!v.controls)return true;"
-                        "if(v.autoplay&&v.muted&&!v.controls)return true;"
-                        "return false;};"
-                        "const isMediaVideo=v=>Boolean(mediaSrc(v)&&!isImageSrc(mediaSrc(v))&&/^(blob:|https?:)/i.test(mediaSrc(v))&&!isBotOrAvatar(v));"
-                        "const videos=[...document.querySelectorAll('video')].filter(isMediaVideo);"
-                        "if(!videos.length)return false;"
-                        "const v=videos[videos.length-1];"
-                        "const src=mediaSrc(v);"
-                        "const a=document.createElement('a');a.href=src;a.download='muse-video.mp4';"
-                        "a.style.display='none';document.body.appendChild(a);a.click();a.remove();return true;"
-                    )
+                driver.execute_script(
+                    "const btn=arguments[0];"
+                    "btn.scrollIntoView({block:'center',inline:'nearest'});"
+                    "try{btn.focus();}catch(e){}"
+                    "const opts={bubbles:true,cancelable:true,view:window};"
+                    "try{btn.dispatchEvent(new PointerEvent('pointerdown',opts));}catch(e){}"
+                    "try{btn.dispatchEvent(new MouseEvent('mousedown',opts));}catch(e){}"
+                    "try{btn.dispatchEvent(new PointerEvent('pointerup',opts));}catch(e){}"
+                    "try{btn.dispatchEvent(new MouseEvent('mouseup',opts));}catch(e){}"
+                    "btn.click();",
+                    btn,
                 )
             except Exception:
-                downloaded_direct = False
-            if not downloaded_direct:
-                raise MuseVideoDownloadError("Không click được nút Download và không lấy được video preview để tải.")
+                try:
+                    driver.execute_script("arguments[0].click();", btn)
+                except Exception:
+                    try:
+                        btn.click()
+                    except Exception:
+                        pass
+
+            deadline = time.monotonic() + 4.0
+            while time.monotonic() < deadline:
+                self._check(driver, context)
+                act = self._summary_download_action(driver)
+                if act is not None:
+                    action = act
+                    break
+                time.sleep(0.3)
+            if action is not None:
+                break
+
+        if action is None:
+            raise MuseVideoDownloadError(
+                f"Đã mở dấu ba chấm của card '{artifact.text[:40]}' nhưng không tìm thấy nút Download trong Summary popup."
+            )
+
+        clicked = False
+        try:
+            action.click()
+            clicked = True
+        except Exception:
+            pass
+        try:
+            driver.execute_script(
+                "const el=arguments[0];"
+                "try{el.focus();}catch(e){}"
+                "const opts={bubbles:true,cancelable:true,view:window};"
+                "try{el.dispatchEvent(new PointerEvent('pointerdown',opts));}catch(e){}"
+                "try{el.dispatchEvent(new MouseEvent('mousedown',opts));}catch(e){}"
+                "try{el.dispatchEvent(new PointerEvent('pointerup',opts));}catch(e){}"
+                "try{el.dispatchEvent(new MouseEvent('mouseup',opts));}catch(e){}"
+                "el.click();",
+                action,
+            )
+            clicked = True
+        except Exception:
+            pass
+        if not clicked:
+            raise MuseVideoDownloadError("Không click được nút Download của card MP4 trong Summary popup.")
 
         previous: tuple[Path, int] | None = None
         stable = 0
@@ -2653,7 +2644,12 @@ class MuseVideoBatchManager:
                                 if candidate.submission_group_id == first.submission_group_id
                             ]
                         else:
-                            jobs = [first]
+                            jobs = [
+                                candidate
+                                for candidate in candidates
+                                if (candidate.submitted or candidate.submission_attempted)
+                                and (not candidate.account_id or candidate.account_id == session.account_id)
+                            ][:MUSE_IMAGES_PER_REQUEST * 2]
                     else:
                         jobs = []
                         for candidate in candidates:
