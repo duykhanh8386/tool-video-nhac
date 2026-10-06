@@ -249,6 +249,19 @@ class AutomationDriver:
         self.new_videos = []
         self.unrelated_video = None
         self.inject_unrelated_on_generate = False
+        self.old_user_message = AutomationElement(
+            "old-user-message",
+            text="make a cinematic video",
+            attrs={
+                "data-message-id": "old-message-id",
+                "data-message-group-id": "old-message-group",
+            },
+        )
+        self.new_user_message = None
+        self.video_poll_delay = 0
+        self.video_poll_count = 0
+        self.watch_started = []
+        self.watch_stopped = []
         self.uploaded = ""
         self.uploaded_paths = []
         self.generate_clicks = 0
@@ -279,6 +292,14 @@ class AutomationDriver:
 
     def _generated(self):
         self.generate_clicks += 1
+        self.new_user_message = AutomationElement(
+            f"new-user-message-{self.generate_clicks}",
+            text=self.prompt.value,
+            attrs={
+                "data-message-id": f"new-message-id-{self.generate_clicks}",
+                "data-message-group-id": f"new-message-group-{self.generate_clicks}",
+            },
+        )
         if self.inject_unrelated_on_generate:
             self.unrelated_video = AutomationElement(
                 "unrelated-video",
@@ -314,10 +335,37 @@ class AutomationDriver:
             return []
         return []
 
-    def execute_script(self, script, video):
+    def execute_script(self, script, *args):
         self.executed_scripts.append(str(script))
-        if "VISUAL_LOOP_VIDEOS_AFTER_PROMPT" in script:
+        if "VISUAL_LOOP_INSTALL_VIDEO_WATCH" in script:
+            self.watch_started.append(str(args[0]))
+            return 1_700_000_000_000
+        if "VISUAL_LOOP_STOP_VIDEO_WATCH" in script:
+            self.watch_stopped.append(str(args[0]))
+            return True
+        if "VISUAL_LOOP_USER_MESSAGE_SNAPSHOT" in script:
+            messages = [self.old_user_message]
+            if self.new_user_message is not None:
+                messages.append(self.new_user_message)
+            return [
+                {
+                    "element": item,
+                    "dom_index": index,
+                    "message_id": item.get_attribute("data-message-id"),
+                    "message_group_id": item.get_attribute("data-message-group-id"),
+                    "text": item.text,
+                }
+                for index, item in enumerate(messages)
+            ]
+        if "VISUAL_LOOP_VIDEOS_AFTER_MESSAGE" in script:
+            self.video_poll_count += 1
+            if self.video_poll_count <= self.video_poll_delay:
+                return []
+            message_id = str(args[1] if len(args) > 1 else "")
+            if message_id and message_id != self.new_user_message.get_attribute("data-message-id"):
+                return []
             return list(self.new_videos)
+        video = args[0] if args else None
         if "document.querySelectorAll(sel)" in script or "a.download='muse-video.mp4'" in script:
             source = str(video.get_attribute("src") or "").casefold()
             if source.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")) or source.startswith("data:image/"):
@@ -381,6 +429,7 @@ class MuseVideoAutomationTests(unittest.TestCase):
             download_dir = root / "downloads"
             target = root / "output" / "result.mp4"
             driver = AutomationDriver(download_dir)
+            driver.video_poll_delay = 2
             job = MuseVideoJob(
                 job_id="job-1",
                 source_path=str(source),
@@ -421,7 +470,14 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertEqual(driver.uploaded, str(source.resolve()))
             self.assertEqual(driver.prompt.value, "make a cinematic video")
             self.assertEqual(driver.generate_clicks, 1)
+            self.assertGreaterEqual(driver.video_poll_count, 3)
             self.assertEqual(driver.downloaded_video_id, "new-video-1")
+            self.assertEqual(job.submission_message_id, "new-message-id-1")
+            self.assertEqual(job.submission_message_group_id, "new-message-group-1")
+            self.assertEqual(job.submission_message_index, 1)
+            self.assertEqual(job.baseline_message_ids, ["old-message-id"])
+            self.assertEqual(job.submission_started_epoch_ms, 1_700_000_000_000)
+            self.assertEqual(driver.watch_started, driver.watch_stopped)
             self.assertEqual(result, target)
             self.assertTrue(target.is_file())
             self.assertIn(MuseVideoJobState.SUBMITTED, transitions)
@@ -443,6 +499,7 @@ class MuseVideoAutomationTests(unittest.TestCase):
             target = root / "output" / "result.mp4"
             driver = AutomationDriver(download_dir)
             driver.inject_unrelated_on_generate = True
+            driver.old_user_message.text = "the exact submitted prompt"
             job = MuseVideoJob(
                 job_id="job-prompt-bound",
                 source_path=str(source),

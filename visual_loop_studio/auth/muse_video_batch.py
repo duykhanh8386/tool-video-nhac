@@ -29,7 +29,7 @@ from utils.paths import DATA_DIR
 
 MUSE_VIDEO_BATCH_CHECKPOINT = DATA_DIR / "muse_video_batch.json"
 MUSE_IMAGES_PER_REQUEST = 3
-MUSE_JOB_PROTOCOL = "single-image-exact-video-v2"
+MUSE_JOB_PROTOCOL = "single-image-message-time-video-v3"
 SUPPORTED_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 TRANSIENT_NETWORK_MARKERS = (
     "network error",
@@ -229,6 +229,13 @@ class MuseVideoJob:
     submission_group_id: str = ""
     submission_index: int = 0
     submission_size: int = 1
+    baseline_message_ids: list[str] = field(default_factory=list)
+    submission_message_floor: int = 0
+    submission_message_id: str = ""
+    submission_message_group_id: str = ""
+    submission_message_index: int = -1
+    submission_watch_token: str = ""
+    submission_started_epoch_ms: int = 0
     result_fingerprint: str = ""
     started_at: str = ""
     submitted_at: str = ""
@@ -279,6 +286,17 @@ class MuseVideoJob:
             submission_group_id=str(value.get("submission_group_id") or ""),
             submission_index=max(0, int(value.get("submission_index") or 0)),
             submission_size=max(1, int(value.get("submission_size") or 1)),
+            baseline_message_ids=[str(item) for item in value.get("baseline_message_ids", []) if str(item)],
+            submission_message_floor=max(0, int(value.get("submission_message_floor") or 0)),
+            submission_message_id=str(value.get("submission_message_id") or ""),
+            submission_message_group_id=str(value.get("submission_message_group_id") or ""),
+            submission_message_index=int(
+                value.get("submission_message_index")
+                if value.get("submission_message_index") is not None
+                else -1
+            ),
+            submission_watch_token=str(value.get("submission_watch_token") or ""),
+            submission_started_epoch_ms=max(0, int(value.get("submission_started_epoch_ms") or 0)),
             result_fingerprint=str(value.get("result_fingerprint") or ""),
             started_at=str(value.get("started_at") or ""),
             submitted_at=str(value.get("submitted_at") or ""),
@@ -351,6 +369,21 @@ class MuseVideoRunContext:
     log: Callable[[str], None]
     retry_limit: int
     backoff_base: float
+
+
+@dataclass(frozen=True)
+class MuseSubmissionAnchor:
+    """Stable boundary for the exact user message created by one Send click."""
+
+    element: Any = None
+    message_id: str = ""
+    message_group_id: str = ""
+    dom_index: int = -1
+    prompt: str = ""
+    baseline_message_ids: tuple[str, ...] = ()
+    message_floor: int = 0
+    watch_token: str = ""
+    started_epoch_ms: int = 0
 
 
 class MuseVideoAutomation:
@@ -427,7 +460,21 @@ class MuseVideoAutomation:
         self._fill_prompt(driver, prompt)
         self._apply_settings(driver, settings)
         baseline_videos = sorted(self._video_fingerprints(driver))
+        message_snapshot = self._submission_messages(driver)
+        baseline_message_ids = sorted(
+            {
+                str(item.get("message_id") or "")
+                for item in message_snapshot
+                if str(item.get("message_id") or "")
+            }
+        )
+        message_floor = max(
+            (int(item.get("dom_index", -1)) + 1 for item in message_snapshot),
+            default=0,
+        )
         group_id = hashlib.sha256("|".join(job.job_id for job in jobs).encode("utf-8")).hexdigest()[:24]
+        watch_token = f"visual-loop-{group_id}"
+        watch_started_epoch_ms = self._install_video_watch(driver, watch_token)
         for index, context in enumerate(contexts):
             context.transition(
                 MuseVideoJobState.READY_TO_GENERATE,
@@ -436,31 +483,65 @@ class MuseVideoAutomation:
                 submission_group_id=group_id,
                 submission_index=index,
                 submission_size=len(jobs),
+                baseline_message_ids=baseline_message_ids,
+                submission_message_floor=message_floor,
             )
             context.transition(
                 MuseVideoJobState.SUBMITTING,
                 progress=20,
                 submission_attempted=True,
+                submission_watch_token=watch_token,
+                submission_started_epoch_ms=watch_started_epoch_ms,
             )
-        self._click_generate_once(driver)
-        submitted_at = _utc_now()
-        for context in contexts:
-            context.transition(
-                MuseVideoJobState.SUBMITTED,
-                progress=22,
-                submitted=True,
-                submitted_at=submitted_at,
+        try:
+            self._click_generate_once(driver)
+            submitted_at = _utc_now()
+            for context in contexts:
+                context.transition(
+                    MuseVideoJobState.SUBMITTED,
+                    progress=22,
+                    submitted=True,
+                    submitted_at=submitted_at,
+                )
+            found_anchor = self._wait_for_submission_message(
+                driver,
+                prompt=prompt,
+                baseline_message_ids=set(baseline_message_ids),
+                message_floor=message_floor,
+                context=primary,
             )
-        primary.log(
-            f"Đã gửi một prompt cho {len(jobs)} ảnh; đang chờ đủ {len(jobs)} video mới trước khi tải."
-        )
-        videos = self._wait_for_distinct_videos(
-            driver,
-            expected=len(jobs),
-            baseline=set(baseline_videos),
-            prompt=prompt,
-            context=primary,
-        )
+            anchor = MuseSubmissionAnchor(
+                element=found_anchor.element,
+                message_id=found_anchor.message_id,
+                message_group_id=found_anchor.message_group_id,
+                dom_index=found_anchor.dom_index,
+                prompt=found_anchor.prompt,
+                baseline_message_ids=found_anchor.baseline_message_ids,
+                message_floor=found_anchor.message_floor,
+                watch_token=watch_token,
+                started_epoch_ms=watch_started_epoch_ms,
+            )
+            for context in contexts:
+                context.transition(
+                    MuseVideoJobState.SUBMITTED,
+                    progress=24,
+                    submission_message_id=anchor.message_id,
+                    submission_message_group_id=anchor.message_group_id,
+                    submission_message_index=anchor.dom_index,
+                )
+            primary.log(
+                f"Đã khóa lượt gửi lúc {submitted_at} vào đúng tin nhắn Muse; "
+                f"đang chờ {len(jobs)} video mới xuất hiện sau mốc này."
+            )
+            videos = self._wait_for_distinct_videos(
+                driver,
+                expected=len(jobs),
+                baseline=set(baseline_videos),
+                anchor=anchor,
+                context=primary,
+            )
+        finally:
+            self._stop_video_watch(driver, watch_token)
         results: dict[str, Path | BaseException] = {}
         for index, (job, context, video) in enumerate(zip(jobs, contexts, videos), start=1):
             fingerprint = _video_fingerprint(video)
@@ -502,7 +583,7 @@ class MuseVideoAutomation:
             driver,
             expected=expected,
             baseline=baseline,
-            prompt=jobs[0].prompt,
+            anchor=self._anchor_from_job(jobs[0]),
             context=primary,
         )
         by_fingerprint = {_video_fingerprint(video): video for video in videos}
@@ -548,7 +629,7 @@ class MuseVideoAutomation:
         *,
         expected: int,
         baseline: set[str],
-        prompt: str,
+        anchor: MuseSubmissionAnchor,
         context: MuseVideoRunContext,
     ) -> list[Any]:
         transient_retries = 0
@@ -571,10 +652,9 @@ class MuseVideoAutomation:
                 return False
             values: list[Any] = []
             seen: set[str] = set()
-            # Bind results to the exact user prompt which started this group.
-            # This prevents an older/off-screen video card which appears late
-            # in the DOM from being mistaken for the newly generated result.
-            for video in self._videos_after_prompt(driver, prompt):
+            # Bind results to the exact message created after this Send click,
+            # not merely to matching prompt text (which is often repeated).
+            for video in self._videos_after_submission(driver, anchor):
                 fingerprint = _video_fingerprint(video)
                 if fingerprint in baseline or fingerprint in seen or not self._video_ready(driver, video):
                     continue
@@ -607,6 +687,7 @@ class MuseVideoAutomation:
         if target.is_file() and _valid_mp4(target):
             return target
         baseline = set(job.baseline_videos)
+        anchor = self._anchor_from_job(job)
         context.transition(MuseVideoJobState.GENERATING, progress=25)
         transient_retries = 0
 
@@ -626,7 +707,7 @@ class MuseVideoAutomation:
                 if self._wait_stop(context, delay):
                     raise MuseVideoStopped("Đã dừng worker Muse.")
                 return False
-            videos = self._videos_after_prompt(driver, job.prompt)
+            videos = self._videos_after_submission(driver, anchor)
             if job.result_fingerprint:
                 matched = next(
                     (
@@ -905,24 +986,196 @@ class MuseVideoAutomation:
     def _all_videos(self, driver: Any) -> list[Any]:
         return self._elements(driver, self.selectors.video_results)
 
-    def _videos_after_prompt(self, driver: Any, prompt: str) -> list[Any]:
-        """Return only videos following the newest exact copy of this prompt."""
-        text = " ".join(str(prompt or "").split())
-        if not text:
-            return []
+    @staticmethod
+    def _install_video_watch(driver: Any, token: str) -> int:
+        """Start a page-local clocked watch immediately before Send is clicked."""
+        try:
+            value = driver.execute_script(
+                "/* VISUAL_LOOP_INSTALL_VIDEO_WATCH */"
+                "const token=arguments[0];"
+                "window.__visualLoopVideoWatches=window.__visualLoopVideoWatches||{};"
+                "const previous=window.__visualLoopVideoWatches[token];"
+                "if(previous){try{previous.observer.disconnect();}catch(e){}"
+                "try{document.removeEventListener('loadedmetadata',previous.onMedia,true);}catch(e){}}"
+                "const source=video=>String(video.currentSrc||video.src||"
+                "(video.querySelector&&video.querySelector('source')&&video.querySelector('source').src)||'');"
+                "const baseline=new Set(document.querySelectorAll('video'));"
+                "const baselineSources=new Map([...baseline].map(video=>[video,source(video)]));"
+                "const touched=new Map(),startedAt=Date.now();"
+                "const mark=node=>{if(!node||node.nodeType!==1)return;"
+                "const video=String(node.tagName||'').toLowerCase()==='video'?node:"
+                "(String(node.tagName||'').toLowerCase()==='source'?node.closest('video'):null);"
+                "if(video)touched.set(video,Date.now());"
+                "if(node.querySelectorAll)for(const item of node.querySelectorAll('video'))touched.set(item,Date.now());};"
+                "const observer=new MutationObserver(records=>{for(const record of records){"
+                "mark(record.target);for(const node of record.addedNodes||[])mark(node);}});"
+                "observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['src']});"
+                "const onMedia=event=>mark(event.target);document.addEventListener('loadedmetadata',onMedia,true);"
+                "window.__visualLoopVideoWatches[token]={startedAt,baseline,baselineSources,touched,observer,onMedia,source};"
+                "return startedAt;",
+                token,
+            )
+            return max(0, int(value or 0))
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _stop_video_watch(driver: Any, token: str) -> None:
+        if not token:
+            return
+        try:
+            driver.execute_script(
+                "/* VISUAL_LOOP_STOP_VIDEO_WATCH */"
+                "const root=window.__visualLoopVideoWatches||{},state=root[arguments[0]];"
+                "if(!state)return;try{state.observer.disconnect();}catch(e){}"
+                "try{document.removeEventListener('loadedmetadata',state.onMedia,true);}catch(e){}"
+                "delete root[arguments[0]];",
+                token,
+            )
+        except Exception:
+            pass
+
+    def _submission_messages(self, driver: Any) -> list[dict[str, Any]]:
+        """Read stable identities for user messages currently present in the chat DOM."""
         try:
             values = driver.execute_script(
-                "/* VISUAL_LOOP_VIDEOS_AFTER_PROMPT */"
-                "const norm=s=>(s||'').replace(/\\s+/g,' ').trim();"
-                "const wanted=norm(arguments[0]);"
-                "const nodes=[...document.querySelectorAll("
-                "'p,span,div,[role=\\\"textbox\\\"],[data-testid*=\\\"message\\\" i]')];"
-                "const exact=nodes.filter(e=>norm(e.innerText||e.textContent)===wanted);"
-                "if(!exact.length)return [];"
-                "const anchor=exact[exact.length-1];"
-                "return [...document.querySelectorAll('video')].filter(v=>"
-                "!!(anchor.compareDocumentPosition(v)&Node.DOCUMENT_POSITION_FOLLOWING));",
-                text,
+                "/* VISUAL_LOOP_USER_MESSAGE_SNAPSHOT */"
+                "const nodes=[...document.querySelectorAll('[data-message-role=\\\"user\\\"]')];"
+                "return nodes.map((element,domIndex)=>({"
+                "element,dom_index:domIndex,"
+                "message_id:element.getAttribute('data-message-id')||'',"
+                "message_group_id:element.getAttribute('data-message-group-id')||'',"
+                "text:(element.innerText||element.textContent||'').replace(/\\s+/g,' ').trim()"
+                "}));"
+            )
+        except Exception:
+            return []
+        if not isinstance(values, (list, tuple)):
+            return []
+        records: list[dict[str, Any]] = []
+        for value in values:
+            if not isinstance(value, dict) or value.get("element") is None:
+                continue
+            try:
+                dom_index = int(value.get("dom_index", -1))
+            except (TypeError, ValueError):
+                dom_index = -1
+            records.append(
+                {
+                    "element": value.get("element"),
+                    "dom_index": dom_index,
+                    "message_id": str(value.get("message_id") or ""),
+                    "message_group_id": str(value.get("message_group_id") or ""),
+                    "text": " ".join(str(value.get("text") or "").split()),
+                }
+            )
+        return records
+
+    def _wait_for_submission_message(
+        self,
+        driver: Any,
+        *,
+        prompt: str,
+        baseline_message_ids: set[str],
+        message_floor: int,
+        context: MuseVideoRunContext,
+    ) -> MuseSubmissionAnchor:
+        """Wait for the one user message created after the current Send click."""
+        wanted = " ".join(str(prompt or "").split())
+
+        def find_anchor():
+            self._check(driver, context)
+            candidates: list[dict[str, Any]] = []
+            for record in self._submission_messages(driver):
+                message_id = str(record.get("message_id") or "")
+                dom_index = int(record.get("dom_index", -1))
+                text = " ".join(str(record.get("text") or "").split())
+                if dom_index < message_floor:
+                    continue
+                if message_id and message_id in baseline_message_ids:
+                    continue
+                if wanted and wanted not in text:
+                    continue
+                candidates.append(record)
+            if not candidates:
+                return False
+            record = min(candidates, key=lambda item: int(item.get("dom_index", -1)))
+            return MuseSubmissionAnchor(
+                element=record.get("element"),
+                message_id=str(record.get("message_id") or ""),
+                message_group_id=str(record.get("message_group_id") or ""),
+                dom_index=int(record.get("dom_index", -1)),
+                prompt=wanted,
+                baseline_message_ids=tuple(sorted(baseline_message_ids)),
+                message_floor=message_floor,
+            )
+
+        return self._wait(
+            driver,
+            find_anchor,
+            min(60.0, self.upload_timeout),
+            context,
+            "Muse chưa ghi nhận đúng tin nhắn vừa gửi; tool dừng để không tải nhầm video của chat cũ.",
+        )
+
+    @staticmethod
+    def _anchor_from_job(job: MuseVideoJob) -> MuseSubmissionAnchor:
+        return MuseSubmissionAnchor(
+            message_id=job.submission_message_id,
+            message_group_id=job.submission_message_group_id,
+            dom_index=job.submission_message_index,
+            prompt=" ".join(str(job.prompt or "").split()),
+            baseline_message_ids=tuple(job.baseline_message_ids),
+            message_floor=job.submission_message_floor,
+            watch_token=job.submission_watch_token,
+            started_epoch_ms=job.submission_started_epoch_ms,
+        )
+
+    def _videos_after_submission(self, driver: Any, anchor: MuseSubmissionAnchor) -> list[Any]:
+        """Return videos observed after Send, prioritising the exact message/group."""
+        try:
+            values = driver.execute_script(
+                "/* VISUAL_LOOP_VIDEOS_AFTER_MESSAGE */"
+                "const live=arguments[0],wantedId=arguments[1],wantedGroup=arguments[2],"
+                "wantedIndex=arguments[3],wantedText=(arguments[4]||'').replace(/\\s+/g,' ').trim(),"
+                "baselineIds=new Set(arguments[5]||[]),floor=arguments[6]||0,"
+                "watchToken=arguments[7]||'',sentAt=Number(arguments[8]||0);"
+                "const users=[...document.querySelectorAll('[data-message-role=\\\"user\\\"]')];"
+                "const norm=e=>(e&&(e.innerText||e.textContent)||'').replace(/\\s+/g,' ').trim();"
+                "let message=(live&&live.isConnected)?live:null;"
+                "if(!message&&wantedId)message=users.find(e=>e.getAttribute('data-message-id')===wantedId)||null;"
+                "if(!message&&wantedGroup)message=users.find(e=>"
+                "e.getAttribute('data-message-group-id')===wantedGroup&&(!wantedText||norm(e).includes(wantedText)))||null;"
+                "if(!message&&wantedIndex>=0&&users[wantedIndex]&&(!wantedText||norm(users[wantedIndex]).includes(wantedText)))"
+                "message=users[wantedIndex];"
+                "if(!message)message=users.find((e,index)=>index>=floor&&"
+                "!baselineIds.has(e.getAttribute('data-message-id')||'')&&(!wantedText||norm(e).includes(wantedText)))||null;"
+                "if(!message)return [];"
+                "const following=(a,b)=>!!(a.compareDocumentPosition(b)&Node.DOCUMENT_POSITION_FOLLOWING);"
+                "const nextUser=users.find(e=>e!==message&&following(message,e))||null;"
+                "const all=[...document.querySelectorAll('video')];"
+                "const root=window.__visualLoopVideoWatches||{},watch=watchToken?root[watchToken]:null;"
+                "const appearedAt=video=>{if(!watch)return 0;"
+                "const touched=Number(watch.touched.get(video)||0);if(touched)return touched;"
+                "if(!watch.baseline.has(video))return Date.now();"
+                "return watch.source(video)!==watch.baselineSources.get(video)?Date.now():0;};"
+                "const videos=watch?all.filter(video=>appearedAt(video)>=Math.max(0,sentAt-1000)):all;"
+                "const group=message.getAttribute('data-message-group-id')||wantedGroup;"
+                "const grouped=group?videos.filter(video=>{const item=video.closest('[data-message-group-id]');"
+                "return item&&item.getAttribute('data-message-group-id')===group;}):[];"
+                "const bounded=videos.filter(video=>following(message,video)&&(!nextUser||following(video,nextUser)));"
+                "const scoped=videos.filter(video=>!!video.closest('[data-message-item=\\\"true\\\"],[data-message-group-id]'));"
+                "const result=[],seen=new Set();for(const video of [...grouped,...bounded,...scoped])"
+                "if(!seen.has(video)){seen.add(video);result.push(video);}return result;",
+                anchor.element,
+                anchor.message_id,
+                anchor.message_group_id,
+                anchor.dom_index,
+                anchor.prompt,
+                list(anchor.baseline_message_ids),
+                anchor.message_floor,
+                anchor.watch_token,
+                anchor.started_epoch_ms,
             )
         except Exception:
             return []
