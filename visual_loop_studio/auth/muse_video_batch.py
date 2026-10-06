@@ -823,9 +823,10 @@ class MuseVideoAutomation:
     ) -> list[Any]:
         transient_retries = 0
         session_ready = object()
+        session_seen_at: float | None = None
 
         def find_results():
-            nonlocal transient_retries
+            nonlocal transient_retries, session_seen_at
             self._check(driver, context)
             body = " ".join(_text(item) for item in _find(driver, "tag name", "body")).casefold()
             if any(marker in body for marker in QUOTA_MARKERS):
@@ -872,7 +873,11 @@ class MuseVideoAutomation:
                     session.fingerprint not in baseline_sessions
                     for session in sessions
                 ):
-                    return session_ready
+                    if session_seen_at is None:
+                        session_seen_at = time.monotonic()
+                    grace_time = min(2.0, self.timeout * 0.2)
+                    if time.monotonic() - session_seen_at >= grace_time:
+                        return session_ready
             return False
 
         result = self._wait(
