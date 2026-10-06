@@ -458,6 +458,8 @@ class AutomationDriver:
 
     def execute_script(self, script, *args):
         self.executed_scripts.append(str(script))
+        if "VISUAL_LOOP_CHECK_COMPOSER_PROMPT" in script:
+            return False
         if "VISUAL_LOOP_BROWSER_EPOCH" in script:
             return 1_700_000_000_000
         if "VISUAL_LOOP_GENERATION_IN_PROGRESS" in script:

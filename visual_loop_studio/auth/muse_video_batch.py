@@ -527,7 +527,7 @@ class MuseVideoAutomation:
                 submission_started_epoch_ms=submission_started_epoch_ms,
             )
         try:
-            self._click_generate_once(driver)
+            self._click_generate_once(driver, primary)
             submitted_at = _utc_now()
             for context in contexts:
                 context.transition(
@@ -1001,11 +1001,135 @@ class MuseVideoAutomation:
             pass
         raise MuseVideoBatchError(f"Không áp dụng được cài đặt {label} trên giao diện Muse hiện tại.")
 
-    def _click_generate_once(self, driver: Any) -> None:
-        if self._click_selector(driver, self.selectors.generate_buttons):
+    def _prompt_still_in_composer(self, driver: Any, prompt: str) -> bool:
+        """Kiểm tra xem prompt có còn nằm trong ô nhập của composer hay không."""
+        try:
+            return bool(
+                driver.execute_script(
+                    "/* VISUAL_LOOP_CHECK_COMPOSER_PROMPT */"
+                    "const prompt=(arguments[0]||'').replace(/\\s+/g,' ').trim().toLowerCase();"
+                    "if(!prompt)return false;"
+                    "const isInsideSidebar=el=>!!el.closest('aside,nav,[data-testid*=\"sidebar\" i],[data-testid*=\"timeline\" i],[data-testid*=\"history\" i]');"
+                    "const isInsideChat=el=>!!el.closest('[data-message-item=\"true\"],[data-message-role],[data-message-group-id]');"
+                    "const textareas=[...document.querySelectorAll('textarea,input[type=\"text\"],[contenteditable=\"true\"]')].filter(t=>!isInsideSidebar(t)&&!isInsideChat(t));"
+                    "for(const ta of textareas){"
+                    "const val=((ta.value||ta.innerText||ta.textContent||'')).replace(/\\s+/g,' ').trim().toLowerCase();"
+                    "if(val&&(val.includes(prompt.slice(0,15))||prompt.includes(val.slice(0,15))))return true;"
+                    "}"
+                    "return false;",
+                    prompt,
+                )
+            )
+        except Exception:
+            return False
+
+    def _click_generate_once(self, driver: Any, context: MuseVideoRunContext | None = None) -> None:
+        """Click the Send / Generate button in the composer, waiting briefly if initially disabled."""
+        def try_click():
+            if context and context.stopped():
+                raise MuseVideoStopped("Đã dừng worker Muse.")
+            # 1. Try standard generate buttons (first check clickable items)
+            for selector in self.selectors.generate_buttons:
+                for item in _find(driver, "css selector", selector):
+                    if _clickable(item):
+                        try:
+                            item.click()
+                            return True
+                        except Exception:
+                            continue
+            # 2. Try JavaScript composer send button (strictly excluding sidebar and history)
+            try:
+                clicked = bool(
+                    driver.execute_script(
+                        "/* VISUAL_LOOP_CLICK_COMPOSER_SEND */"
+                        "const isInsideSidebar=el=>!!el.closest('aside,nav,[data-testid*=\"sidebar\" i],[data-testid*=\"timeline\" i],[data-testid*=\"history\" i]');"
+                        "const isInsideChat=el=>!!el.closest('[data-message-item=\"true\"],[data-message-role],[data-message-group-id]');"
+                        "const triggerClick=el=>{"
+                        "if(!el)return false;"
+                        "try{el.focus();}catch(e){}"
+                        "const opts={bubbles:true,cancelable:true,view:window};"
+                        "try{el.dispatchEvent(new PointerEvent('pointerdown',opts));}catch(e){}"
+                        "try{el.dispatchEvent(new MouseEvent('mousedown',opts));}catch(e){}"
+                        "try{el.dispatchEvent(new PointerEvent('pointerup',opts));}catch(e){}"
+                        "try{el.dispatchEvent(new MouseEvent('mouseup',opts));}catch(e){}"
+                        "el.click();"
+                        "return true;"
+                        "};"
+                        "const selectors=["
+                        "'button[aria-label=\"Send\" i]',"
+                        "'button[aria-label*=\"send message\" i]',"
+                        "'button[aria-label*=\"send\" i]',"
+                        "'button[type=\"submit\"][aria-label*=\"send\" i]',"
+                        "'button[type=\"submit\"]',"
+                        "'button[data-testid*=\"send\" i]',"
+                        "'button[data-testid*=\"generate\" i]'"
+                        "];"
+                        "for(const sel of selectors){"
+                        "const btns=[...document.querySelectorAll(sel)].filter(b=>{"
+                        "if(isInsideSidebar(b)||isInsideChat(b))return false;"
+                        "const r=b.getBoundingClientRect();return r.width>0&&r.height>0&&!b.disabled&&b.getAttribute('aria-disabled')!=='true';"
+                        "});"
+                        "if(btns.length){return triggerClick(btns[btns.length-1]);}"
+                        "}"
+                        "const textareas=[...document.querySelectorAll('textarea,[contenteditable=\"true\"]')].filter(t=>{"
+                        "if(isInsideSidebar(t)||isInsideChat(t))return false;"
+                        "const r=t.getBoundingClientRect();return r.width>0&&r.height>0;"
+                        "});"
+                        "if(textareas.length){"
+                        "const ta=textareas[textareas.length-1];"
+                        "const container=ta.closest('form,[data-testid*=\"composer\" i],div.relative,div')||ta.parentElement;"
+                        "if(container){"
+                        "const btns=[...container.querySelectorAll('button,[role=\"button\"]')].filter(b=>{"
+                        "if(b===ta||isInsideSidebar(b)||isInsideChat(b))return false;"
+                        "const aria=(b.getAttribute('aria-label')||'').toLowerCase();"
+                        "if(/attach|upload|file|image|add|close|dismiss|preview/i.test(aria))return false;"
+                        "const r=b.getBoundingClientRect();return r.width>0&&r.height>0&&!b.disabled&&b.getAttribute('aria-disabled')!=='true';"
+                        "});"
+                        "const sendBtn=btns.find(b=>{"
+                        "const aria=(b.getAttribute('aria-label')||'').toLowerCase();"
+                        "const type=(b.getAttribute('type')||'').toLowerCase();"
+                        "return /send|submit/i.test(aria)||type==='submit'||Boolean(b.querySelector('svg path,svg'));"
+                        "})||btns.sort((a,b)=>b.getBoundingClientRect().right-a.getBoundingClientRect().right)[0];"
+                        "if(sendBtn){return triggerClick(sendBtn);}"
+                        "}"
+                        "try{"
+                        "ta.focus();"
+                        "const evt=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true});"
+                        "ta.dispatchEvent(evt);"
+                        "return true;"
+                        "}catch(e){}"
+                        "}"
+                        "return false;"
+                    )
+                )
+                if clicked:
+                    return True
+            except Exception:
+                pass
+            return False
+
+        if try_click():
             return
-        if _click_by_text(driver, ("generate", "create video", "create", "send"), reverse=True):
-            return
+
+        # If not clickable immediately (e.g. button was briefly disabled while input processed),
+        # wait up to 3 seconds with polling instead of clicking random sidebar items!
+        deadline = time.monotonic() + min(3.0, max(0.2, self.upload_timeout * 0.1))
+        while time.monotonic() < deadline:
+            time.sleep(min(0.05, self.poll_interval))
+            if try_click():
+                return
+
+        # 3. Fallback: Try pressing Enter in the prompt field directly
+        try:
+            from selenium.webdriver.common.keys import Keys
+
+            for field in reversed(self._elements(driver, self.selectors.prompt_inputs)):
+                if _clickable(field):
+                    field.send_keys(Keys.RETURN)
+                    return
+        except Exception:
+            pass
+
         raise MuseVideoBatchError("Không tìm thấy nút Generate/Send ổn định trên Muse.")
 
     def _download(self, driver: Any, video: Any, target: Path, context: MuseVideoRunContext) -> Path:
@@ -1290,23 +1414,59 @@ class MuseVideoAutomation:
         try:
             values = driver.execute_script(
                 "/* VISUAL_LOOP_SUMMARY_MP4_ARTIFACTS */"
-                "const visible=e=>{const r=e.getBoundingClientRect();const s=getComputedStyle(e);"
+                "const visible=e=>{if(!e)return false;const r=e.getBoundingClientRect();const s=getComputedStyle(e);"
                 "return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';};"
                 "const norm=s=>(s||'').replace(/\\s+/g,' ').trim();"
-                "const headings=[...document.querySelectorAll('h1,h2,h3,h4,[role=\\\"heading\\\"],div,span')]"
+                "const headings=[...document.querySelectorAll('h1,h2,h3,h4,[role=\"heading\"],div,span')]"
                 ".filter(e=>visible(e)&&norm(e.innerText||e.textContent).toLowerCase()==='summary');"
-                "if(!headings.length)return [];const heading=headings[headings.length-1];"
-                "let root=heading.closest('[role=\\\"dialog\\\"]');"
-                "if(!root){root=heading.parentElement;while(root&&root!==document.body&&"
-                "!root.querySelector('button[data-testid=\\\"sandbox-file-card-options\\\"]'))root=root.parentElement;}"
-                "if(!root)return [];"
-                "const buttons=[...root.querySelectorAll('button[data-testid=\\\"sandbox-file-card-options\\\"],"
-                "button[aria-label=\\\"More options\\\"]')].filter(visible);"
-                "return buttons.map((element,index)=>{"
-                "let card=element.closest('[data-pel-impression=\\\"sandbox_file_card_impression\\\"]');"
-                "if(!card){card=element.parentElement;while(card&&card!==root&&!/\\b(MP4|JSON)\\b/i.test(norm(card.innerText)))"
-                "card=card.parentElement;}const text=norm(card&&card.innerText||'');"
-                "return {element,index,text};}).filter(item=>/\\bMP4\\b/i.test(item.text)&&!/\\bJSON\\b/i.test(item.text));"
+                "let root=null;"
+                "if(headings.length){"
+                "const heading=headings[headings.length-1];"
+                "root=heading.closest('[role=\"dialog\"],[aria-modal=\"true\"],dialog,div[class*=\"modal\" i],div[class*=\"dialog\" i]');"
+                "if(!root){let cur=heading.parentElement;while(cur&&cur!==document.body){"
+                "const r=cur.getBoundingClientRect();if(r.width>=320&&r.height>=240){root=cur;break;}cur=cur.parentElement;}}"
+                "}"
+                "if(!root){root=document.querySelector('[role=\"dialog\"],[aria-modal=\"true\"],dialog')||document.body;}"
+                "const candidates=[];"
+                "const seenButtons=new Set();"
+                "const addCandidate=(btn,text)=>{"
+                "if(!btn||seenButtons.has(btn))return;seenButtons.add(btn);"
+                "candidates.push({element:btn,text:text||'media-generation MP4'});"
+                "};"
+                "const knownButtons=[...root.querySelectorAll("
+                "'button[data-testid=\"sandbox-file-card-options\"],button[data-testid*=\"options\" i],"
+                "'button[aria-label=\"More options\" i],button[aria-label*=\"options\" i],button[aria-label*=\"action\" i]'"
+                ")].filter(visible);"
+                "for(const btn of knownButtons){"
+                "let card=btn.closest('[data-pel-impression=\"sandbox_file_card_impression\"]');"
+                "if(!card){card=btn.parentElement;while(card&&card!==root&&!/\\b(MP4|JSON)\\b/i.test(norm(card.innerText||card.textContent)))card=card.parentElement;}"
+                "const text=norm(card&&(card.innerText||card.textContent)||'');"
+                "if(/\\bMP4\\b/i.test(text)&&!/\\bJSON\\b/i.test(text)){addCandidate(btn,text);}"
+                "}"
+                "if(!candidates.length){"
+                "const mp4Cards=[...root.querySelectorAll('div,li,[data-pel-impression]')].filter(el=>{"
+                "if(!visible(el))return false;const t=norm(el.innerText||el.textContent);"
+                "if(!/\\bMP4\\b/i.test(t)||/\\bJSON\\b/i.test(t))return false;"
+                "const r=el.getBoundingClientRect();return r.height>=20&&r.height<=250&&r.width>=100;"
+                "});"
+                "mp4Cards.sort((a,b)=>(a.getBoundingClientRect().width*a.getBoundingClientRect().height)-(b.getBoundingClientRect().width*b.getBoundingClientRect().height));"
+                "const claimedCards=new Set();"
+                "for(const card of mp4Cards){"
+                "if([...claimedCards].some(c=>c.contains(card)))continue;"
+                "const btns=[...card.querySelectorAll('button,[role=\"button\"]')].filter(visible);"
+                "if(btns.length){"
+                "const moreBtn=btns.find(b=>{"
+                "const aria=(b.getAttribute('aria-label')||'').toLowerCase();"
+                "const title=(b.getAttribute('title')||'').toLowerCase();"
+                "const t=norm(b.innerText||b.textContent);"
+                "return /option|more|menu|action/i.test(aria+' '+title)||/\\.{2,}|…|···/.test(t)||"
+                "b.getAttribute('aria-haspopup')==='menu'||Boolean(b.querySelector('svg circle,svg path,[data-testid*=\"more\" i]'));"
+                "})||btns.sort((a,b)=>b.getBoundingClientRect().right-a.getBoundingClientRect().right)[0];"
+                "if(moreBtn){claimedCards.add(card);addCandidate(moreBtn,norm(card.innerText||card.textContent)||'media-generation MP4');}"
+                "}"
+                "}"
+                "}"
+                "return candidates.map((item,index)=>({element:item.element,index:index,text:item.text}));"
             )
         except Exception:
             return []
@@ -1420,18 +1580,25 @@ class MuseVideoAutomation:
         try:
             return driver.execute_script(
                 "/* VISUAL_LOOP_SUMMARY_DOWNLOAD_ACTION */"
-                "const visible=e=>{const r=e.getBoundingClientRect();const s=getComputedStyle(e);"
+                "const visible=e=>{if(!e)return false;const r=e.getBoundingClientRect();const s=getComputedStyle(e);"
                 "return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';};"
                 "const norm=s=>(s||'').replace(/\\s+/g,' ').trim().toLowerCase();"
-                "const exact=e=>visible(e)&&(norm(e.innerText||e.textContent)==='download'||"
-                "norm(e.getAttribute('aria-label'))==='download');"
-                "const menuItems=[...document.querySelectorAll('[role=\\\"menuitem\\\"]')].filter(exact);"
+                "const isDownload=e=>{"
+                "if(!visible(e))return false;"
+                "const t=norm(e.innerText||e.textContent);"
+                "const aria=norm(e.getAttribute('aria-label')||'');"
+                "const title=norm(e.getAttribute('title')||'');"
+                "const reg=/^(download|download\\s+video|download\\s+mp4|download\\s+file|tải\\s+xuống|tải\\s+video|tải\\s+về|save\\s+video)\\b/i;"
+                "return reg.test(t)||reg.test(aria)||reg.test(title)||t==='download'||aria==='download';"
+                "};"
+                "const menuItems=[...document.querySelectorAll('[role=\"menuitem\"],[role=\"option\"]')].filter(isDownload);"
                 "if(menuItems.length)return menuItems[menuItems.length-1];"
-                "const openRoots=[...document.querySelectorAll('[role=\\\"menu\\\"],[data-state=\\\"open\\\"],"
-                "[data-testid*=\\\"menu\\\" i]')].filter(visible);"
-                "for(let i=openRoots.length-1;i>=0;i--){const found=[...openRoots[i].querySelectorAll('button,[role=\\\"button\\\"]')]"
-                ".find(exact);if(found)return found;}"
-                "const fallback=[...document.querySelectorAll('button,[role=\\\"button\\\"]')].filter(exact);"
+                "const openRoots=[...document.querySelectorAll('[role=\"menu\"],[data-state=\"open\"],[data-radix-popper-content-wrapper],[data-testid*=\"menu\" i],div[class*=\"menu\" i],div[class*=\"dropdown\" i],div[class*=\"popover\" i]')].filter(visible);"
+                "for(let i=openRoots.length-1;i>=0;i--){"
+                "const found=[...openRoots[i].querySelectorAll('button,[role=\"button\"],a')].find(isDownload);"
+                "if(found)return found;"
+                "}"
+                "const fallback=[...document.querySelectorAll('button,[role=\"button\"],a')].filter(isDownload);"
                 "return fallback.length?fallback[fallback.length-1]:null;"
             )
         except Exception:
@@ -1488,28 +1655,77 @@ class MuseVideoAutomation:
             if item.is_file()
         }
         artifact = self._fresh_summary_artifact(driver, artifact, context)
+        # Kích hoạt chuỗi sự kiện chuột đầy đủ để mở menu 3 chấm
         try:
             driver.execute_script(
-                "arguments[0].scrollIntoView({block:'center',inline:'nearest'});arguments[0].click();",
+                "const btn=arguments[0];"
+                "btn.scrollIntoView({block:'center',inline:'nearest'});"
+                "try{btn.focus();}catch(e){}"
+                "const opts={bubbles:true,cancelable:true,view:window};"
+                "try{btn.dispatchEvent(new PointerEvent('pointerdown',opts));}catch(e){}"
+                "try{btn.dispatchEvent(new MouseEvent('mousedown',opts));}catch(e){}"
+                "try{btn.dispatchEvent(new PointerEvent('pointerup',opts));}catch(e){}"
+                "try{btn.dispatchEvent(new MouseEvent('mouseup',opts));}catch(e){}"
+                "btn.click();",
                 artifact.options_button,
             )
         except Exception:
-            artifact = self._fresh_summary_artifact(driver, artifact, context)
             try:
                 driver.execute_script("arguments[0].click();", artifact.options_button)
             except Exception:
                 artifact.options_button.click()
-        action = self._wait(
-            driver,
-            lambda: self._summary_download_action(driver),
-            min(30.0, self.download_timeout),
-            context,
-            "Đã mở dấu ba chấm của MP4 nhưng Muse chưa hiện nút Download.",
-        )
+
+        action = None
         try:
-            action.click()
-        except Exception as exc:
-            raise MuseVideoDownloadError("Không click được Download của card MP4 trong Summary.") from exc
+            action = self._wait(
+                driver,
+                lambda: self._summary_download_action(driver),
+                min(20.0, self.download_timeout * 0.25),
+                context,
+                "Đã mở dấu ba chấm của MP4 nhưng Muse chưa hiện nút Download.",
+            )
+        except Exception:
+            action = None
+
+        if action is not None:
+            try:
+                action.click()
+            except Exception:
+                try:
+                    driver.execute_script(
+                        "const el=arguments[0];"
+                        "try{el.focus();}catch(e){}"
+                        "const opts={bubbles:true,cancelable:true,view:window};"
+                        "try{el.dispatchEvent(new MouseEvent('mousedown',opts));}catch(e){}"
+                        "try{el.dispatchEvent(new MouseEvent('mouseup',opts));}catch(e){}"
+                        "el.click();",
+                        action,
+                    )
+                except Exception as exc:
+                    raise MuseVideoDownloadError("Không click được Download của card MP4 trong Summary.") from exc
+        else:
+            # Fallback: Kiểm tra xem thẻ <video> preview ngay trong modal Summary có src video để tải không
+            context.log("Không thấy menu Download từ nút 3 chấm; đang thử tải trực tiếp từ thẻ video trong Summary…")
+            downloaded_direct = False
+            try:
+                downloaded_direct = bool(
+                    driver.execute_script(
+                        "const headings=[...document.querySelectorAll('h1,h2,h3,h4,[role=\"heading\"],div,span')]"
+                        ".filter(e=>(e.innerText||e.textContent||'').trim().toLowerCase()==='summary');"
+                        "let root=headings.length?headings[headings.length-1].closest('[role=\"dialog\"],[aria-modal=\"true\"],dialog'):null;"
+                        "if(!root)root=document.querySelector('[role=\"dialog\"],[aria-modal=\"true\"],dialog')||document.body;"
+                        "const video=root.querySelector('video');"
+                        "if(!video)return false;"
+                        "const src=String(video.currentSrc||video.src||(video.querySelector('source')&&video.querySelector('source').src)||'').trim();"
+                        "if(!src||!/^(blob:|https?:)/i.test(src)||/^data:image/i.test(src))return false;"
+                        "const a=document.createElement('a');a.href=src;a.download='muse-video.mp4';"
+                        "a.style.display='none';document.body.appendChild(a);a.click();a.remove();return true;"
+                    )
+                )
+            except Exception:
+                downloaded_direct = False
+            if not downloaded_direct:
+                raise MuseVideoDownloadError("Không click được nút Download và không lấy được video preview trong modal Summary.")
 
         previous: tuple[Path, int] | None = None
         stable = 0
@@ -1714,12 +1930,42 @@ class MuseVideoAutomation:
                 message_floor=message_floor,
             )
 
-        for _ in range(3):
+        deadline = time.monotonic() + min(20.0, self.upload_timeout * 0.3)
+        retries = 0
+        while time.monotonic() < deadline:
             anchor = find_anchor()
             if anchor:
                 return anchor
-            if self._wait_stop(context, min(0.05, self.poll_interval)):
+            if self._wait_stop(context, min(0.1, self.poll_interval)):
                 raise MuseVideoStopped("Đã dừng worker Muse.")
+            if self._prompt_still_in_composer(driver, wanted):
+                retries += 1
+                if retries <= 5:
+                    context.log(f"Prompt vẫn còn trong ô nhập (lần {retries}); đang thử ấn lại nút Send/Enter…")
+                    try:
+                        self._click_generate_once(driver, context)
+                    except Exception:
+                        pass
+                    if self._wait_stop(context, min(0.4, self.poll_interval * 2)):
+                        raise MuseVideoStopped("Đã dừng worker Muse.")
+            elif retries > 0:
+                for _ in range(5):
+                    anchor = find_anchor()
+                    if anchor:
+                        return anchor
+                    if self._wait_stop(context, min(0.1, self.poll_interval)):
+                        raise MuseVideoStopped("Đã dừng worker Muse.")
+                break
+            else:
+                if time.monotonic() - (deadline - min(20.0, self.upload_timeout * 0.3)) > 0.4:
+                    break
+
+        if self._prompt_still_in_composer(driver, wanted):
+            raise MuseVideoBatchError(
+                "Muse chưa gửi được prompt; nội dung vẫn còn nằm trong ô nhập sau nhiều lần bấm Send. "
+                "Tool đã dừng lại để tránh gửi nhầm hoặc tải nhầm video cũ."
+            )
+
         context.log(
             "Muse không công khai ID tin nhắn mới trong DOM; "
             "đang nhận video bằng mốc theo dõi được cài ngay trước lúc Send."
