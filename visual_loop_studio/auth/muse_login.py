@@ -82,7 +82,12 @@ MUSE_APP_SELECTORS = (
     "[contenteditable='true'][role='textbox']",
 )
 MUSE_LOGIN_TEXT = ("log in", "sign in")
-MUSE_GOOGLE_TEXT = ("sign in with google", "continue with google", "log in with google")
+MUSE_GOOGLE_TEXT = (
+    "sign in with google",
+    "continue with google",
+    "log in with google",
+    "continue as",
+)
 MUSE_CONTINUE_TEXT = ("continue",)
 GOOGLE_CONTINUE_TEXT = ("continue", "allow")
 EMAIL_PATTERN = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
@@ -778,6 +783,8 @@ def create_muse_chrome_driver(profile: Path, download_dir: Path | None = None):
     options.add_argument("--no-default-browser-check")
     options.add_argument("--start-maximized")
     options.add_argument("--disable-session-crashed-bubble")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-features=SigninPromo,ChromeSigninIntercept")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
@@ -817,6 +824,8 @@ def muse_native_browser_command(executable: str | Path, profile: Path, start_url
         "--no-first-run",
         "--no-default-browser-check",
         "--start-maximized",
+        "--disable-sync",
+        "--disable-features=SigninPromo,ChromeSigninIntercept",
         "--disable-blink-features=AutomationControlled",
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",

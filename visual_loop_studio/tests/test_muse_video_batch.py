@@ -830,7 +830,9 @@ class MuseVideoBatchManagerTests(unittest.TestCase):
         self.assertEqual(sum(recovered_automation.generate_calls.values()), 0)
         self.assertEqual(sum(recovered_automation.recover_calls.values()), 0)
         self.assertEqual(completed.state, MuseVideoJobState.COMPLETED)
-        self.assertEqual(Path(completed.output_path).parent, new_output)
+        # Windows runners may spell the same temp directory as either
+        # RUNNER~1 (8.3 path) or runneradmin (long path).
+        self.assertEqual(Path(completed.output_path).parent.resolve(), new_output.resolve())
         self.assertTrue(Path(completed.output_path).is_file())
 
     def test_worker_never_marks_success_without_valid_mp4(self):

@@ -105,6 +105,7 @@ class FakeDriver:
         muse_page_load_timeout: bool = False,
         google_two_factor: bool = False,
         transient_window_handle_errors: int = 0,
+        youtube_channel_picker: bool = False,
     ) -> None:
         self.profile = Path(profile)
         self.response = response
@@ -120,6 +121,7 @@ class FakeDriver:
         self.google_two_factor = google_two_factor
         self.transient_window_handle_errors = max(0, int(transient_window_handle_errors))
         self.window_handle_reads = 0
+        self.youtube_channel_picker = youtube_channel_picker
         self.google_authenticated = not login_required
         self.google_email = ""
         self.muse_stage = ""
@@ -316,7 +318,11 @@ class FakeDriver:
                     self._current_url = "https://accounts.google.com/signin/challenge/totp"
                 else:
                     self.google_authenticated = True
-                    self._current_url = "https://studio.youtube.com/"
+                    self._current_url = (
+                        "https://www.youtube.com/signin_prompt?app=desktop&next=https://studio.youtube.com/"
+                        if self.youtube_channel_picker
+                        else "https://studio.youtube.com/"
+                    )
             else:
                 self.complete_login()
 
@@ -333,7 +339,11 @@ class FakeDriver:
         if self._current_url.startswith("https://accounts.google.com/"):
             self.google_authenticated = True
             self.google_two_factor = False
-            self._current_url = "https://studio.youtube.com/"
+            self._current_url = (
+                "https://www.youtube.com/signin_prompt?app=desktop&next=https://studio.youtube.com/"
+                if self.youtube_channel_picker
+                else "https://studio.youtube.com/"
+            )
         else:
             self.logged_in = True
             self.muse_stage = ""
@@ -556,6 +566,29 @@ class MuseSessionManagerTests(unittest.TestCase):
 
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
         self.assertEqual(driver.current_url, "https://muse.ai/chat")
+
+    def test_two_factor_youtube_channel_picker_is_bypassed_then_muse_opens(self):
+        self.driver_options[1] = {
+            "login_required": True,
+            "google_two_factor": True,
+            "youtube_channel_picker": True,
+        }
+
+        future = self.manager.open_session(
+            1,
+            "owner@example.com",
+            password="temporary-secret",
+            manual_browser=True,
+        )
+        self._wait_state(1, MuseSessionState.LOGIN_REQUIRED)
+        driver = self.drivers[1]
+        driver.complete_login()
+        future.result(timeout=3)
+
+        self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
+        self.assertEqual(driver.current_url, "https://muse.ai/chat")
+        self.assertTrue(any("AccountChooser" in value for value in driver.requested_urls))
+        self.assertTrue(any(value.startswith("https://muse.ai/") for value in driver.requested_urls))
 
     def test_discovers_and_binds_one_ready_muse_tab_per_profile(self):
         self._open_three()
