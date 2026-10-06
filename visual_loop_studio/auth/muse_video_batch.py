@@ -20,6 +20,8 @@ from auth.muse_sessions import (
     MUSE_SESSION_COUNT,
     MUSE_SESSION_DOWNLOADS_DIR,
     MuseSession,
+    MuseSessionAuthenticationError,
+    MuseSessionError,
     MuseSessionManager,
     MuseSessionState,
     get_muse_session_manager,
@@ -2658,8 +2660,36 @@ class MuseVideoBatchManager:
                         )
                         self._persist_locked()
                     break
+                except MuseSessionAuthenticationError as exc:
+                    message = str(exc)
+                    with self._state_lock:
+                        for job in jobs:
+                            job.state = MuseVideoJobState.LOGIN_REQUIRED
+                            job.error = message
+                        worker.state = MuseVideoWorkerState.LOGIN_REQUIRED
+                        worker.error = message
+                        self.session_manager._set_state(
+                            session,
+                            MuseSessionState.LOGIN_REQUIRED,
+                            progress=0,
+                            status_message=message,
+                            error=message,
+                        )
+                        self._log_locked(worker, f"Yêu cầu phiên/đăng nhập: {message}")
+                        self._persist_locked()
+                    break
+                except MuseSessionError as exc:
+                    message = str(exc)
+                    with self._state_lock:
+                        for job in jobs:
+                            job.state = MuseVideoJobState.FAILED
+                            job.error = message
+                        worker.error = message
+                        self._log_locked(worker, f"Lỗi phiên Muse: {message}")
+                        self._persist_locked()
+                    continue
                 except Exception as exc:
-                    message = str(exc) if isinstance(exc, MuseVideoBatchError) else (
+                    message = str(exc) if str(exc).strip() else (
                         "Muse/Chrome không phản hồi; không có cookie hoặc token nào được ghi log."
                     )
                     with self._state_lock:
@@ -2819,6 +2849,25 @@ class MuseVideoBatchManager:
                     # selected folder, but it must never change account/worker.
                     if not _valid_mp4(current_output):
                         job.output_path = str(output)
+                    if job.state in {
+                        MuseVideoJobState.FAILED,
+                        MuseVideoJobState.PAUSED,
+                        MuseVideoJobState.STOPPED,
+                        MuseVideoJobState.LOGIN_REQUIRED,
+                    }:
+                        job.state = MuseVideoJobState.DOWNLOADING
+                        job.error = ""
+                else:
+                    if not _valid_mp4(current_output):
+                        job.output_path = str(output)
+                    if job.state in {
+                        MuseVideoJobState.FAILED,
+                        MuseVideoJobState.PAUSED,
+                        MuseVideoJobState.STOPPED,
+                        MuseVideoJobState.LOGIN_REQUIRED,
+                    }:
+                        job.state = MuseVideoJobState.PENDING
+                        job.error = ""
 
                 if (
                     not job.submitted

@@ -1371,14 +1371,31 @@ class MuseSessionManager:
             raise MuseSessionError(
                 f"Tài khoản {session_id}: không thể chuyển về tab Muse đã chọn."
             ) from None
-        if _hostname(_safe_url(driver)) != "muse.ai":
+        url = _safe_url(driver)
+        host = _hostname(url)
+        if host != "muse.ai":
+            if not host or host in {"about:blank", "data", "localhost", "127.0.0.1"} or "google.com" not in host:
+                try:
+                    driver.get(self.start_url)
+                    time.sleep(1.5)
+                    url = _safe_url(driver)
+                    host = _hostname(url)
+                except Exception:
+                    pass
+        if host != "muse.ai":
             raise MuseSessionAuthenticationError(
-                f"Tài khoản {session_id}: tab đã chọn không còn ở muse.ai; tool không dùng tab của tài khoản khác."
+                f"Tài khoản {session_id}: tab đã chọn không ở muse.ai (hiện tại: {host or url}); hãy mở và giữ tab muse.ai."
             )
         helper = MuseLoginService(start_url=self.start_url, store=self.account_store)
-        if not helper._is_muse_logged_in(driver):
+        logged_in = False
+        for _ in range(3):
+            if helper._is_muse_logged_in(driver):
+                logged_in = True
+                break
+            time.sleep(0.8)
+        if not logged_in:
             raise MuseSessionAuthenticationError(
-                f"Tài khoản {session_id}: tab Muse đã chọn không còn READY."
+                f"Tài khoản {session_id}: tab Muse đã chọn chưa đăng nhập hoặc chưa tải xong giao diện."
             )
         session.selected_handle = handle
 
