@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,10 +24,12 @@ GOOGLE_MUSE_LOGIN_URL = (
     "continue=https%3A%2F%2Faccounts.google.com%2FManageAccount&hl=en"
 )
 YOUTUBE_AUTH_HOSTS = frozenset({"youtube.com", "www.youtube.com", "studio.youtube.com"})
-MUSE_ALLOWED_HOSTS = frozenset({"muse.ai", "auth.muse.ai", "accounts.google.com"})
+GOOGLE_AUTH_HOSTS = frozenset({"accounts.google.com", "myaccount.google.com"})
+MUSE_ALLOWED_HOSTS = frozenset({"muse.ai", "auth.muse.ai", *GOOGLE_AUTH_HOSTS})
 MUSE_PROFILES_DIR = USER_DATA_ROOT / "MuseChromeProfiles"
 MUSE_ACCOUNTS_FILE = DATA_DIR / "muse_accounts.json"
 _MUSE_DRIVER_START_LOCK = threading.Lock()
+_CHROME_PROFILE_UI_LOCK = threading.Lock()
 
 CLICKABLE_SELECTOR = "button, [role='button'], a[role='button'], a"
 ACCOUNT_SELECTOR = "[data-identifier], [data-email], [role='link'], [role='button']"
@@ -414,6 +417,7 @@ class MuseLoginService:
                     continue
         priority = {
             "accounts.google.com": 0,
+            "myaccount.google.com": 0,
             "youtube.com": 1,
             "www.youtube.com": 1,
             "studio.youtube.com": 1,
@@ -458,7 +462,7 @@ class MuseLoginService:
 
     def _google_page_has_email(self, driver: Any, email: str) -> bool:
         """Check the visible Google page for the configured account without logging it."""
-        if _hostname(_safe_url(driver)) != "accounts.google.com":
+        if _hostname(_safe_url(driver)) not in GOOGLE_AUTH_HOSTS:
             return False
         target = _normalize_email(email)
         if not target:
@@ -783,8 +787,7 @@ def create_muse_chrome_driver(profile: Path, download_dir: Path | None = None):
     options.add_argument("--no-default-browser-check")
     options.add_argument("--start-maximized")
     options.add_argument("--disable-session-crashed-bubble")
-    options.add_argument("--disable-sync")
-    options.add_argument("--disable-features=SigninPromo,ChromeSigninIntercept")
+    options.add_argument("--force-renderer-accessibility")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
@@ -824,13 +827,78 @@ def muse_native_browser_command(executable: str | Path, profile: Path, start_url
         "--no-first-run",
         "--no-default-browser-check",
         "--start-maximized",
-        "--disable-sync",
-        "--disable-features=SigninPromo,ChromeSigninIntercept",
+        "--force-renderer-accessibility",
         "--disable-blink-features=AutomationControlled",
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
         safe_url,
     ]
+
+
+def click_chrome_profile_continue(
+    driver: Any,
+    *,
+    timeout: float = 10.0,
+    poll_interval: float = 0.25,
+    stopped: Callable[[], bool] | None = None,
+) -> bool:
+    """Click Chrome's native Continue-as profile bubble for the active tab.
+
+    The control is part of the browser frame, outside the web page DOM. A
+    temporary unique page title binds the UI Automation search to the exact
+    Chrome window owned by this driver, so concurrent Muse accounts cannot
+    click one another's profile prompt.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        from pywinauto import Desktop
+    except (ImportError, OSError):
+        return False
+
+    marker = f"Visual Loop Studio Muse Login {uuid.uuid4().hex}"
+    try:
+        original_title = str(driver.execute_script("return document.title||'';") or "")
+        driver.execute_script("document.title=arguments[0];", marker)
+    except Exception:
+        return False
+
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    interval = max(0.05, float(poll_interval))
+    prefixes = ("continue as ", "tiếp tục với tư cách ")
+    try:
+        while time.monotonic() < deadline:
+            if stopped is not None and stopped():
+                return False
+            try:
+                with _CHROME_PROFILE_UI_LOCK:
+                    windows = Desktop(backend="uia").windows(visible_only=True)
+                    for window in windows:
+                        title = str(window.window_text() or getattr(window.element_info, "name", "") or "")
+                        if marker.casefold() not in title.casefold():
+                            continue
+                        for control in window.descendants(control_type="Button"):
+                            label = str(
+                                control.window_text()
+                                or getattr(control.element_info, "name", "")
+                                or ""
+                            ).strip().casefold()
+                            if not any(prefix in label for prefix in prefixes):
+                                continue
+                            try:
+                                control.invoke()
+                            except Exception:
+                                control.click_input()
+                            return True
+            except Exception:
+                pass
+            time.sleep(interval)
+        return False
+    finally:
+        try:
+            driver.execute_script("document.title=arguments[0];", original_title)
+        except Exception:
+            pass
 
 
 def launch_muse_native_browser(profile: Path, start_url: str = MUSE_START_URL) -> subprocess.Popen:

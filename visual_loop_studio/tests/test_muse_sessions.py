@@ -106,6 +106,7 @@ class FakeDriver:
         google_two_factor: bool = False,
         transient_window_handle_errors: int = 0,
         youtube_channel_picker: bool = False,
+        google_myaccount_redirect: bool = False,
     ) -> None:
         self.profile = Path(profile)
         self.response = response
@@ -122,6 +123,7 @@ class FakeDriver:
         self.transient_window_handle_errors = max(0, int(transient_window_handle_errors))
         self.window_handle_reads = 0
         self.youtube_channel_picker = youtube_channel_picker
+        self.google_myaccount_redirect = google_myaccount_redirect
         self.google_authenticated = not login_required
         self.google_email = ""
         self.muse_stage = ""
@@ -207,7 +209,9 @@ class FakeDriver:
                 self._current_url = "https://studio.youtube.com/"
             else:
                 self._current_url = (
-                    "https://accounts.google.com/ManageAccount"
+                    "https://myaccount.google.com/?pli=1"
+                    if self.google_authenticated and self.google_myaccount_redirect
+                    else "https://accounts.google.com/ManageAccount"
                     if self.google_authenticated
                     else "https://accounts.google.com/signin/v2/challenge/pwd"
                 )
@@ -247,7 +251,7 @@ class FakeDriver:
                     return [self.continue_button]
             return []
         if by == "css selector" and selector == ACCOUNT_SELECTOR:
-            if self._current_url.startswith("https://accounts.google.com/") and self.google_email:
+            if self._current_url.startswith(("https://accounts.google.com/", "https://myaccount.google.com/")) and self.google_email:
                 if self.unverified_manage_account:
                     return [FakeElement("other@example.com", attrs={"data-email": "other@example.com"})]
                 return [FakeElement(self.google_email, attrs={"data-email": self.google_email})]
@@ -286,7 +290,7 @@ class FakeDriver:
         if by == "css selector" and selector in GENERATION_SELECTORS:
             return []
         if by == "tag name" and selector == "body":
-            if self._current_url.startswith("https://accounts.google.com/"):
+            if self._current_url.startswith(("https://accounts.google.com/", "https://myaccount.google.com/")):
                 if self.google_two_factor and "/challenge/totp" in self._current_url:
                     self.body.text = "2-Step Verification"
                 else:
@@ -382,6 +386,7 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.driver_options: dict[int, dict] = {}
         self.native_browser_launches: list[tuple[Path, str]] = []
         self.attached_profiles: list[Path] = []
+        self.chrome_profile_confirmations: list[int] = []
         self.manager = self._manager()
 
     def tearDown(self):
@@ -411,6 +416,10 @@ class MuseSessionManagerTests(unittest.TestCase):
             self.attached_profiles.append(Path(profile))
             return factory(profile)
 
+        def confirm_chrome_profile(_driver, **kwargs):
+            self.chrome_profile_confirmations.append(len(self.chrome_profile_confirmations) + 1)
+            return True
+
         values = {
             "profile_root": profiles,
             "checkpoint_path": self.root / "data" / "muse_sessions.json",
@@ -418,6 +427,7 @@ class MuseSessionManagerTests(unittest.TestCase):
             "driver_factory": factory,
             "native_browser_factory": native_factory,
             "attached_driver_factory": attached_factory,
+            "chrome_profile_confirmer": confirm_chrome_profile,
             "poll_interval": 0.01,
             "stable_seconds": 0,
             "generation_timeout": 0.35,
@@ -526,6 +536,27 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertEqual(snapshot.state, MuseSessionState.READY)
         self.assertTrue(snapshot.driver_open)
 
+    def test_manual_browser_myaccount_page_continues_to_muse_without_closing_chrome(self):
+        self.driver_options[1] = {"login_required": True}
+
+        future = self.manager.open_session(
+            1,
+            "owner@example.com",
+            password="",
+            manual_browser=True,
+        )
+        self._wait_state(1, MuseSessionState.LOGIN_REQUIRED)
+        driver = self.drivers[1]
+        driver.google_email = "owner@example.com"
+        driver.google_authenticated = True
+        driver._current_url = "https://myaccount.google.com/?pli=1"
+
+        future.result(timeout=2)
+
+        self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
+        self.assertEqual(driver.current_url, "https://muse.ai/chat")
+        self.assertFalse(driver.quit_called)
+
     def test_assisted_login_uses_its_own_webdriver_profile_and_opens_muse(self):
         self.driver_options[1] = {"login_required": True}
 
@@ -547,6 +578,7 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertIn("temporary-secret", driver.password.value)
         self.assertEqual(self.native_browser_launches, [])
         self.assertEqual(self.attached_profiles, [])
+        self.assertEqual(len(self.chrome_profile_confirmations), 1)
 
     def test_assisted_login_waits_for_manual_two_factor_then_continues(self):
         self.driver_options[1] = {"login_required": True, "google_two_factor": True}
@@ -598,6 +630,28 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertEqual(driver.current_url, "https://muse.ai/chat")
         self.assertTrue(any("AccountChooser" in value for value in driver.requested_urls))
         self.assertTrue(any(value.startswith("https://muse.ai/") for value in driver.requested_urls))
+
+    def test_google_myaccount_redirect_is_verified_then_muse_opens(self):
+        self.driver_options[1] = {
+            "login_required": True,
+            "google_two_factor": True,
+            "google_myaccount_redirect": True,
+        }
+
+        future = self.manager.open_session(
+            1,
+            "owner@example.com",
+            password="temporary-secret",
+            manual_browser=True,
+        )
+        self._wait_state(1, MuseSessionState.LOGIN_REQUIRED)
+        driver = self.drivers[1]
+        driver.complete_login()
+        future.result(timeout=3)
+
+        self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
+        self.assertEqual(driver.current_url, "https://muse.ai/chat")
+        self.assertTrue(any("AccountChooser" in value for value in driver.requested_urls))
 
     def test_discovers_and_binds_one_ready_muse_tab_per_profile(self):
         self._open_three()

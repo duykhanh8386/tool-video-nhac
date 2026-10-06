@@ -13,6 +13,7 @@ from typing import Any, Callable
 from auth.muse_login import (
     GOOGLE_CONTINUE_TEXT,
     MUSE_ALLOWED_HOSTS,
+    GOOGLE_AUTH_HOSTS,
     MUSE_CONTINUE_TEXT,
     MUSE_GOOGLE_TEXT,
     MUSE_LOGIN_TEXT,
@@ -31,6 +32,7 @@ from auth.muse_login import (
     _utc_now,
     create_muse_attached_driver,
     create_muse_chrome_driver,
+    click_chrome_profile_continue,
     google_muse_login_url,
     google_youtube_login_url,
     launch_muse_native_browser,
@@ -214,6 +216,7 @@ class MuseSession:
 DriverFactory = Callable[[Path], Any]
 NativeBrowserFactory = Callable[[Path, str], Any]
 AttachedDriverFactory = Callable[[Path, Path], Any]
+ChromeProfileConfirmer = Callable[..., bool]
 _UNSET = object()
 
 
@@ -230,6 +233,7 @@ class MuseSessionManager:
         driver_factory: DriverFactory | None = None,
         native_browser_factory: NativeBrowserFactory | None = None,
         attached_driver_factory: AttachedDriverFactory | None = None,
+        chrome_profile_confirmer: ChromeProfileConfirmer | None = None,
         login_timeout: float = 15 * 60,
         generation_timeout: float = 10 * 60,
         poll_interval: float = 0.35,
@@ -245,6 +249,7 @@ class MuseSessionManager:
         self._driver_factory = driver_factory or _create_session_chrome_driver
         self._native_browser_factory = native_browser_factory or launch_muse_native_browser
         self._attached_driver_factory = attached_driver_factory or create_muse_attached_driver
+        self._chrome_profile_confirmer = chrome_profile_confirmer or click_chrome_profile_continue
         self.login_timeout = max(1.0, float(login_timeout))
         self.generation_timeout = max(0.05, float(generation_timeout))
         self.poll_interval = max(0.02, float(poll_interval))
@@ -920,6 +925,7 @@ class MuseSessionManager:
                     status_message=f"Đã đăng nhập Muse: {session.email}",
                     error="",
                 )
+                session.selected_handle = handle
                 self._set_account_status(session, "connected")
                 return True
             if host == "muse.ai":
@@ -1008,21 +1014,44 @@ class MuseSessionManager:
             elif host in YOUTUBE_AUTH_HOSTS:
                 verification_key = (session.email, "youtube_google_verified")
                 if verification_key not in actions:
-                    actions.add(verification_key)
                     manual_mode = False
                     idle_polls = 0
+                    profile_checked_key = (session.email, "chrome_profile_checked")
+                    profile_clicked_key = (session.email, "chrome_profile_clicked")
+                    profile_confirmed = profile_clicked_key in actions
+                    if profile_checked_key not in actions:
+                        self._set_state(
+                            session,
+                            MuseSessionState.OPENING,
+                            progress=40,
+                            status_message="Google đã đăng nhập; đang xác nhận hồ sơ Chrome bằng Continue as…",
+                        )
+                        profile_confirmed = self._chrome_profile_confirmer(
+                            driver,
+                            timeout=10.0,
+                            poll_interval=self.poll_interval,
+                            stopped=session.stop_event.is_set,
+                        )
+                        actions.add(profile_checked_key)
+                        if profile_confirmed:
+                            actions.add(profile_clicked_key)
+                        if profile_confirmed and session.stop_event.wait(0.75):
+                            raise MuseSessionStopped("Đã dừng tác vụ Muse.")
                     self._set_state(
                         session,
                         MuseSessionState.OPENING,
                         progress=42,
                         status_message=(
-                            "Google đã hoàn tất đăng nhập qua YouTube; đang kiểm tra đúng email trước khi mở Muse…"
+                            "Đã bấm Continue as; đang kiểm tra đúng email trước khi mở Muse…"
+                            if profile_confirmed
+                            else "Chrome không hiện Continue as hoặc hồ sơ đã được xác nhận; đang kiểm tra email trước khi mở Muse…"
                         ),
                     )
                     self._navigate_with_retry(session, google_verification_url)
+                    actions.add(verification_key)
                 return False
-            elif host == "accounts.google.com":
-                if "/manageaccount" in url.casefold():
+            elif host in GOOGLE_AUTH_HOSTS:
+                if host == "myaccount.google.com" or "/manageaccount" in url.casefold():
                     if helper._google_page_has_email(driver, session.email):
                         session.google_verified_email = session.email
                         manual_mode = False
@@ -1202,6 +1231,20 @@ class MuseSessionManager:
             handle, _url, host = helper._switch_to_relevant_window(driver, session.owned_handles)
             if not handle:
                 raise MuseSessionError("Không còn tab đăng nhập Muse trong Chrome profile này.")
+            if host in YOUTUBE_AUTH_HOSTS:
+                self._navigate_with_retry(session, google_muse_login_url(session.email))
+                continue
+            if host in GOOGLE_AUTH_HOSTS and helper._google_page_has_email(driver, session.email):
+                session.google_verified_email = session.email
+                self._set_state(
+                    session,
+                    MuseSessionState.OPENING,
+                    progress=55,
+                    status_message=f"Đã xác minh đúng Google {session.email}; đang chuyển sang Muse…",
+                    error="",
+                )
+                self._navigate_with_retry(session, self.start_url)
+                continue
             if host == "muse.ai" and helper._is_muse_waitlist(driver):
                 raise MuseSessionError(
                     "Tài khoản này đang ở waitlist hoặc Muse chưa hỗ trợ khu vực của tài khoản."
@@ -1297,6 +1340,49 @@ class MuseSessionManager:
         session.selected_handle = handle
         session.known_handles.update(handles)
         session.owned_handles.add(handle)
+
+    def activate_selected_muse_tab(self, session_id: int) -> None:
+        """Pin a batch worker to the Muse tab selected for its own profile."""
+        session = self._require_session(session_id)
+        driver = session.driver
+        if driver is None or not session.driver_open:
+            raise MuseSessionAuthenticationError(
+                f"Tài khoản {session_id}: Chrome/driver Muse đã đóng; hãy đăng nhập lại riêng phiên này."
+            )
+        try:
+            handles = {str(value) for value in driver.window_handles}
+        except Exception:
+            raise MuseSessionError(
+                f"Tài khoản {session_id}: không đọc được các tab trong Chrome profile riêng."
+            ) from None
+        handle = str(session.selected_handle or "")
+        if not handle:
+            try:
+                current = str(driver.current_window_handle or "")
+            except Exception:
+                current = ""
+            if current in handles:
+                handle = current
+        if not handle or handle not in handles:
+            raise MuseSessionError(
+                f"Tài khoản {session_id}: tab Muse đã chọn không còn tồn tại; hãy quét và chọn lại tab."
+            )
+        try:
+            driver.switch_to.window(handle)
+        except Exception:
+            raise MuseSessionError(
+                f"Tài khoản {session_id}: không thể chuyển về tab Muse đã chọn."
+            ) from None
+        if _hostname(_safe_url(driver)) != "muse.ai":
+            raise MuseSessionAuthenticationError(
+                f"Tài khoản {session_id}: tab đã chọn không còn ở muse.ai; tool không dùng tab của tài khoản khác."
+            )
+        helper = MuseLoginService(start_url=self.start_url, store=self.account_store)
+        if not helper._is_muse_logged_in(driver):
+            raise MuseSessionAuthenticationError(
+                f"Tài khoản {session_id}: tab Muse đã chọn không còn READY."
+            )
+        session.selected_handle = handle
 
     def _run_native_browser_login(self, session: MuseSession, *, assisted: bool = False) -> None:
         if assisted:
@@ -1563,7 +1649,7 @@ class MuseSessionManager:
         requested_host = _hostname(requested_url)
         current_host = _hostname(_safe_url(driver))
         if requested_host == "accounts.google.com":
-            return current_host == "accounts.google.com"
+            return current_host in GOOGLE_AUTH_HOSTS
         if requested_host == "muse.ai":
             return current_host in MUSE_ALLOWED_HOSTS
         return bool(requested_host and current_host == requested_host)

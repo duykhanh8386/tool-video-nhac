@@ -144,7 +144,7 @@ class MuseAccountsPage(QWidget):
         notice = QLabel(
             "Mỗi tài khoản dùng một Chrome profile/driver riêng. Nếu bạn nhập mật khẩu, tool chỉ điền trên "
             "accounts.google.com, không lưu mật khẩu và không giả User-Agent; CAPTCHA/2FA làm thủ công. "
-            "mỗi worker gửi tối đa 3 ảnh với một prompt rồi tải lần lượt đủ 3 video trước lượt tiếp theo; "
+            "mỗi worker gửi đúng 1 ảnh với 1 prompt, tải đúng video mới của ảnh đó rồi mới sang ảnh tiếp theo; "
             "tool không lưu bí mật và không vượt CAPTCHA, "
             "mã xác minh, 2FA, quota hoặc rate limit."
         )
@@ -312,8 +312,8 @@ class MuseAccountsPage(QWidget):
         login_help = QLabel(
             "Phương án 1: tài khoản có mật khẩu được mở bằng driver/profile riêng biệt; tool chỉ điền "
             "email/mật khẩu trên accounts.google.com. Nếu để trống thì bạn tự đăng nhập trong Chrome thường. "
-            "CAPTCHA, passkey và 2FA luôn làm thủ công. "
-            "Sau khi Google xác minh, tool tự mở Muse và tiếp tục batch; mật khẩu bị xóa khỏi UI ngay khi bàn giao. "
+            "CAPTCHA, passkey và 2FA luôn làm thủ công. Sau khi Google xác minh, tool bấm nút Continue as "
+            "của đúng cửa sổ Chrome, xác nhận email rồi tự mở Muse; mật khẩu bị xóa khỏi UI ngay khi bàn giao. "
             "Phương án 2: bấm Mở Chrome/Muse đã tick, mở sẵn Muse trong từng cửa sổ, bấm Quét tab Muse, "
             "rồi chọn một dòng READY cho mỗi tài khoản. Dòng ĐÃ CHỌN TAB màu xanh là đã chọn xong. "
             "Waitlist vẫn do người dùng xử lý."

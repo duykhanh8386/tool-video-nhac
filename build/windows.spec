@@ -22,21 +22,23 @@ for executable in ("ffmpeg.exe", "ffprobe.exe"):
 
 playwright_datas, playwright_binaries, playwright_hiddenimports = collect_all("playwright")
 selenium_datas, selenium_binaries, selenium_hiddenimports = collect_all("selenium")
+pywinauto_datas, pywinauto_binaries, pywinauto_hiddenimports = collect_all("pywinauto")
 binaries += playwright_binaries
 binaries += selenium_binaries
+binaries += pywinauto_binaries
 
 a = Analysis(
     [str(app_dir / "main.py")],
     pathex=[str(app_dir)],
     binaries=binaries,
-    datas=[*playwright_datas, *selenium_datas, (str(icon_png), "assets")],
+    datas=[*playwright_datas, *selenium_datas, *pywinauto_datas, (str(icon_png), "assets")],
     hiddenimports=[
         "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "cv2", "numpy",
         "ai.providers.byteplus_seedance", "ai.providers.comfyui_provider", "ai.providers.veo_provider",
         "auth.google_youtube", "auth.youtube_studio", "ui.youtube_accounts",
         "auth.muse_login", "auth.muse_generation", "auth.muse_sessions", "auth.muse_video_batch",
         "ai.providers.muse_web_provider", "ui.muse_accounts",
-        *playwright_hiddenimports, *selenium_hiddenimports,
+        *playwright_hiddenimports, *selenium_hiddenimports, *pywinauto_hiddenimports,
     ],
     hookspath=[],
     hooksconfig={},

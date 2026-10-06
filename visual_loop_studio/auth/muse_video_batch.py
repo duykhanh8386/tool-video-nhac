@@ -29,6 +29,7 @@ from utils.paths import DATA_DIR
 
 MUSE_VIDEO_BATCH_CHECKPOINT = DATA_DIR / "muse_video_batch.json"
 MUSE_IMAGES_PER_REQUEST = 3
+MUSE_JOB_PROTOCOL = "single-image-exact-video-v2"
 SUPPORTED_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 TRANSIENT_NETWORK_MARKERS = (
     "network error",
@@ -769,40 +770,30 @@ class MuseVideoAutomation:
             for item in context.download_dir.iterdir()
             if item.is_file()
         }
+        # Download only the media URL owned by the exact <video> returned for
+        # this prompt.  A Muse result card can also contain the uploaded image;
+        # clicking the card's generic Download button can therefore save the
+        # image instead of the generated video.
         clicked = False
         try:
             clicked = bool(
                 driver.execute_script(
-                    "const v=arguments[0],sel=\"button[aria-label*='download' i],"
-                    "[data-testid*='download' i],[role='button'][aria-label*='download' i],a[download]\";"
-                    "const visible=e=>!!(e&&e.offsetParent!==null);"
-                    "const center=e=>{const r=e.getBoundingClientRect();return [(r.left+r.right)/2,(r.top+r.bottom)/2]};"
-                    "const dist=(a,b)=>Math.abs(a[0]-b[0])+Math.abs(a[1]-b[1]);"
-                    "const vc=center(v),buttons=[...document.querySelectorAll(sel)].filter(visible);"
-                    "const valid=buttons.filter(b=>{let n=b.parentElement,depth=0;"
-                    "while(n&&n!==document.body&&depth++<10){const videos=[...n.querySelectorAll('video')].filter(visible);"
-                    "if(videos.includes(v)){return videos.sort((a,c)=>dist(center(a),center(b))-dist(center(c),center(b)))[0]===v;}"
-                    "n=n.parentElement;}return false;});"
-                    "if(!valid.length)return false;valid.sort((a,b)=>dist(center(a),vc)-dist(center(b),vc));"
-                    "valid[0].click();return true;",
+                    "const v=arguments[0];"
+                    "if(!v || String(v.tagName||'').toLowerCase()!=='video')return false;"
+                    "const src=String(v.currentSrc||v.src||'').trim();"
+                    "if(!src || /^data:image[/]/i.test(src) || /^https?:.*\\.(png|jpe?g|webp|gif)(?:[?#]|$)/i.test(src))return false;"
+                    "if(!/^(blob:|https?:)/i.test(src))return false;"
+                    "const a=document.createElement('a');a.href=src;a.download='muse-video.mp4';"
+                    "a.style.display='none';document.body.appendChild(a);a.click();a.remove();return true;",
                     video,
                 )
             )
         except Exception:
             clicked = False
         if not clicked:
-            try:
-                clicked = bool(driver.execute_script(
-                    "const v=arguments[0],a=document.createElement('a');"
-                    "const src=v.currentSrc||v.src;if(!src)return false;"
-                    "a.href=src;a.download='muse-video.mp4';"
-                    "document.body.appendChild(a);a.click();a.remove();return true;",
-                    video,
-                ))
-            except Exception:
-                pass
-        if not clicked:
-            raise MuseVideoDownloadError("Không kích hoạt được Download cho đúng video mới.")
+            raise MuseVideoDownloadError(
+                "Không lấy được URL video MP4/blob của đúng kết quả mới; tool đã từ chối bấm nút tải ảnh/card."
+            )
 
         previous: tuple[Path, int] | None = None
         stable = 0
@@ -1416,7 +1407,10 @@ class MuseVideoBatchManager:
                             if candidate.state == MuseVideoJobState.LOGIN_REQUIRED:
                                 candidate.state = MuseVideoJobState.PAUSED
                             jobs.append(candidate)
-                            if len(jobs) >= MUSE_IMAGES_PER_REQUEST:
+                            # One image owns one prompt/result.  Keeping a
+                            # request to one job also lets each worker continue
+                            # immediately with the next image after download.
+                            if len(jobs) >= 1:
                                 break
                     worker.current_job_id = jobs[0].job_id
                     worker.progress = 0
@@ -1443,6 +1437,7 @@ class MuseVideoBatchManager:
                 ]
 
                 def run_group() -> dict[str, Path | BaseException]:
+                    self.session_manager.activate_selected_muse_tab(session.session_id)
                     if jobs[0].submitted or jobs[0].submission_attempted:
                         recover_batch = getattr(self.automation, "recover_batch", None)
                         if jobs[0].submission_group_id and callable(recover_batch):
@@ -1705,6 +1700,33 @@ class MuseVideoBatchManager:
         emails = [item.email.casefold() for item in snapshots if item.session_id in ready]
         if len(set(emails)) != len(emails):
             raise MuseVideoBatchError("Các worker READY phải dùng các tài khoản khác nhau.")
+        driver_keys: list[tuple[str, object]] = []
+        for session_id in ready:
+            session = self.session_manager.sessions[session_id]
+            driver = session.driver
+            capabilities = getattr(driver, "capabilities", {}) or {}
+            browser_options: dict[str, object] = {}
+            if isinstance(capabilities, dict):
+                for options_name in ("goog:chromeOptions", "ms:edgeOptions"):
+                    value = capabilities.get(options_name, {})
+                    if isinstance(value, dict) and value.get("debuggerAddress"):
+                        browser_options = value
+                        break
+            debugger_address = str(browser_options.get("debuggerAddress", "")).strip().casefold()
+            if not debugger_address:
+                try:
+                    port = int((session.profile_dir / "DevToolsActivePort").read_text(encoding="utf-8").splitlines()[0])
+                except (OSError, ValueError, IndexError):
+                    port = 0
+                if 1 <= port <= 65535:
+                    debugger_address = f"127.0.0.1:{port}"
+            driver_keys.append(
+                ("debugger", debugger_address) if debugger_address else ("driver", id(driver))
+            )
+        if len(set(driver_keys)) != len(driver_keys):
+            raise MuseVideoBatchError(
+                "Hai tài khoản đang trỏ vào cùng một Chrome/profile. Hãy mở lại từng profile, quét tab và chọn lại."
+            )
         return ready
 
     def _normalize_worker_ids(self, worker_ids: Iterable[int] | None) -> tuple[int, ...]:
@@ -1884,6 +1906,10 @@ def create_muse_video_job_id(source: str | Path, prompt: str, settings: MuseVide
         while chunk := stream.read(1024 * 1024):
             file_hash.update(chunk)
     payload = {
+        # This version deliberately invalidates checkpoints made by the old
+        # multi-image/card-download flow.  From this protocol onward, reruns
+        # with identical input reuse the verified MP4 and never submit again.
+        "protocol": MUSE_JOB_PROTOCOL,
         "path": str(path).casefold(),
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,

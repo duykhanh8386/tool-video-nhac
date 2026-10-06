@@ -6,3 +6,6 @@ numpy==1.26.4
 opencv-python-headless==4.11.0.86
 playwright>=1.52,<2
 selenium>=4.25,<5
+# Click Chrome's native "Continue as ..." profile confirmation. This control
+# lives in the browser chrome and is not exposed to Selenium's page DOM.
+pywinauto>=0.6.9,<1

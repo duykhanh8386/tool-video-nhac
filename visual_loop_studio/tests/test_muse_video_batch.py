@@ -255,6 +255,7 @@ class AutomationDriver:
         self.downloaded_video_id = ""
         self.downloaded_video_ids = []
         self.get_calls = 0
+        self.executed_scripts = []
         self.body = AutomationElement("body")
         self.upload = AutomationElement(
             "upload",
@@ -314,9 +315,13 @@ class AutomationDriver:
         return []
 
     def execute_script(self, script, video):
+        self.executed_scripts.append(str(script))
         if "VISUAL_LOOP_VIDEOS_AFTER_PROMPT" in script:
             return list(self.new_videos)
         if "document.querySelectorAll(sel)" in script or "a.download='muse-video.mp4'" in script:
+            source = str(video.get_attribute("src") or "").casefold()
+            if source.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")) or source.startswith("data:image/"):
+                return False
             self.downloaded_video_id = video.id
             self.downloaded_video_ids.append(video.id)
             self.download_dir.mkdir(parents=True, exist_ok=True)
@@ -341,6 +346,32 @@ class MuseVideoAutomationTests(unittest.TestCase):
         )
 
         self.assertEqual(_video_fingerprint(first), _video_fingerprint(rerendered))
+
+    def test_download_rejects_image_source_and_never_clicks_generic_card_button(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            driver = AutomationDriver(root / "downloads")
+            automation = MuseVideoAutomation(download_timeout=0.1, poll_interval=0.01)
+            image_disguised_as_result = AutomationElement(
+                "wrong-image",
+                tag_name="video",
+                attrs={"src": "https://example/result.jpg"},
+            )
+            context = MuseVideoRunContext(
+                worker_id=1,
+                download_dir=root / "downloads",
+                stopped=lambda: False,
+                transition=lambda *_args, **_kwargs: None,
+                log=lambda _message: None,
+                retry_limit=0,
+                backoff_base=0.01,
+            )
+
+            with self.assertRaisesRegex(MuseVideoDownloadError, "từ chối bấm nút tải ảnh/card"):
+                automation._download(driver, image_disguised_as_result, root / "out.mp4", context)
+
+            self.assertEqual(list((root / "downloads").glob("*")), [])
+            self.assertTrue(all("querySelectorAll(sel)" not in script for script in driver.executed_scripts))
 
     def test_uploads_one_image_submits_once_and_downloads_only_new_video(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -448,6 +479,7 @@ class MuseVideoAutomationTests(unittest.TestCase):
 
             self.assertEqual(result, target)
             self.assertEqual(driver.downloaded_video_id, "new-video-1")
+            self.assertTrue(all("querySelectorAll(sel)" not in script for script in driver.executed_scripts))
             self.assertNotIn("unrelated-video", driver.downloaded_video_ids)
 
     def test_submits_three_images_once_and_downloads_three_distinct_videos_in_order(self):
@@ -655,6 +687,22 @@ class MuseVideoBatchManagerTests(unittest.TestCase):
         self.assertTrue(all(job.state == MuseVideoJobState.COMPLETED for job in snapshot.jobs))
         self.assertEqual(set(self.automation.drivers), {1, 2})
 
+    def test_two_workers_cannot_share_the_same_driver_or_browser_tab(self):
+        images = self._images(2)
+        self.batch.allocate_images(images, worker_ids=(1, 2))
+        original = self.sessions.sessions[2].driver
+        self.sessions.sessions[2].driver = self.sessions.sessions[1].driver
+        try:
+            with self.assertRaisesRegex(MuseVideoBatchError, "cùng một Chrome/profile"):
+                self.batch.start_all(
+                    "selected prompt",
+                    MuseVideoSettings(),
+                    self.output,
+                    worker_ids=(1, 2),
+                )
+        finally:
+            self.sessions.sessions[2].driver = original
+
     def test_scan_normalizes_deduplicates_sorts_and_supports_recursive(self):
         folder = self.root / "scan"
         nested = folder / "nested"
@@ -694,15 +742,15 @@ class MuseVideoBatchManagerTests(unittest.TestCase):
         self.assertEqual(len(list(self.output.glob("*.mp4"))), 10)
         self.assertEqual(sum(job.state == MuseVideoJobState.COMPLETED for job in self.batch.snapshot().jobs), 10)
 
-    def test_manager_groups_three_images_per_prompt_without_reloading_between_jobs(self):
+    def test_manager_sends_one_image_per_prompt_and_continues_until_queue_is_empty(self):
         self.batch.shutdown(timeout=2)
         grouped = GroupedFakeVideoAutomation()
         self.batch = self._batch(grouped)
 
         self._start(self._images(12)).result(timeout=3)
 
-        self.assertEqual(grouped.group_sizes, {1: [3, 1], 2: [3, 1], 3: [3, 1]})
-        self.assertEqual(sum(grouped.generate_calls.values()), 6)
+        self.assertEqual(grouped.group_sizes, {1: [1, 1, 1, 1], 2: [1, 1, 1, 1], 3: [1, 1, 1, 1]})
+        self.assertEqual(sum(grouped.generate_calls.values()), 12)
         self.assertEqual(len(list(self.output.glob("*.mp4"))), 12)
 
     def test_one_worker_failure_does_not_stop_other_workers(self):

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from auth.muse_login import (
     CLICKABLE_SELECTOR,
@@ -17,6 +20,7 @@ from auth.muse_login import (
     MuseLoginService,
     MuseLoginTimeout,
     MuseUnsafeNavigationError,
+    click_chrome_profile_continue,
     google_youtube_login_url,
     muse_native_browser_command,
 )
@@ -162,6 +166,57 @@ class MuseLoginServiceTests(unittest.TestCase):
         self.assertIn("--remote-debugging-port=0", command)
         self.assertFalse(any("user-agent" in value.casefold() for value in command))
         self.assertIn("--disable-blink-features=AutomationControlled", command)
+        self.assertIn("--force-renderer-accessibility", command)
+        self.assertFalse(any("SigninPromo" in value for value in command))
+        self.assertNotIn("--disable-sync", command)
+
+    def test_clicks_native_chrome_continue_as_in_the_exact_marked_window(self):
+        class Driver:
+            title = "YouTube"
+
+            def execute_script(self, script, *args):
+                if "return document.title" in script:
+                    return self.title
+                if args:
+                    self.title = str(args[0])
+                return None
+
+        class Button:
+            element_info = SimpleNamespace(name="Continue as Duy Khánh")
+            invoked = False
+
+            def window_text(self):
+                return "Continue as Duy Khánh"
+
+            def invoke(self):
+                self.invoked = True
+
+            def click_input(self):
+                raise AssertionError("invoke should be used")
+
+        driver = Driver()
+        button = Button()
+
+        class Window:
+            element_info = SimpleNamespace(name="")
+
+            def window_text(self):
+                return driver.title + " - Google Chrome"
+
+            def descendants(self, **_kwargs):
+                return [button]
+
+        fake_module = SimpleNamespace(
+            Desktop=lambda **_kwargs: SimpleNamespace(windows=lambda **_options: [Window()])
+        )
+        with patch.dict(sys.modules, {"pywinauto": fake_module}), patch(
+            "auth.muse_login.os.name", "nt"
+        ):
+            clicked = click_chrome_profile_continue(driver, timeout=0.2, poll_interval=0.01)
+
+        self.assertTrue(clicked)
+        self.assertTrue(button.invoked)
+        self.assertEqual(driver.title, "YouTube")
 
     def test_native_browser_accepts_google_youtube_login_but_rejects_other_hosts(self):
         executable = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")
