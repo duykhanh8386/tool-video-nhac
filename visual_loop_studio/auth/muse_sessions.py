@@ -668,7 +668,15 @@ class MuseSessionManager:
                 self._set_account_status(session, "manual_required")
                 raise
             except Exception as exc:
-                await self._loop.run_in_executor(session.executor, self._quit_driver, session)
+                keep_open = False
+                if open_mode == MuseSessionOpenMode.MANUAL_BROWSER:
+                    keep_open = await self._loop.run_in_executor(
+                        session.executor,
+                        self._preserve_driver_if_open,
+                        session,
+                    )
+                if not keep_open:
+                    await self._loop.run_in_executor(session.executor, self._quit_driver, session)
                 message = str(exc) if isinstance(exc, MuseSessionError) else (
                     "Chrome/driver của phiên Muse đã dừng hoặc không phản hồi; có thể khởi động lại riêng phiên này."
                 )
@@ -799,8 +807,16 @@ class MuseSessionManager:
         self._check_stopped(session)
         if force_relogin and session.driver is not None:
             self._quit_driver(session)
-        if open_mode == MuseSessionOpenMode.MANUAL_BROWSER and session.driver is None:
-            self._run_native_browser_login(session, assisted=bool(password))
+        # Credential-assisted login starts in this session's own WebDriver and
+        # profile. Attaching two drivers to native browsers opened at the same
+        # time can cross-bind on some Windows Chrome installations.
+        # Passwordless login remains a fully manual normal-browser flow.
+        if (
+            open_mode == MuseSessionOpenMode.MANUAL_BROWSER
+            and session.driver is None
+            and not password
+        ):
+            self._run_native_browser_login(session, assisted=False)
         if session.driver is None:
             session.profile_dir.mkdir(parents=True, exist_ok=True)
             profile_key = str(session.profile_dir.resolve()).casefold()
@@ -1557,6 +1573,23 @@ class MuseSessionManager:
 
     def _driver_looks_open(self, session: MuseSession) -> bool:
         return bool(session.driver_open and session.driver is not None)
+
+    @staticmethod
+    def _preserve_driver_if_open(session: MuseSession) -> bool:
+        """Keep an interactive login window open after a local login error."""
+        driver = session.driver
+        if driver is None:
+            return False
+        try:
+            handles = {str(handle) for handle in driver.window_handles}
+        except Exception:
+            return False
+        if not handles:
+            return False
+        session.driver_open = True
+        session.known_handles.update(handles)
+        session.owned_handles.update(handles)
+        return True
 
     def _quit_driver(self, session: MuseSession) -> None:
         process = session.native_browser_process

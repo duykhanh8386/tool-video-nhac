@@ -363,6 +363,8 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.barrier: threading.Barrier | None = None
         self.login_barrier: threading.Barrier | None = None
         self.driver_options: dict[int, dict] = {}
+        self.native_browser_launches: list[tuple[Path, str]] = []
+        self.attached_profiles: list[Path] = []
         self.manager = self._manager()
 
     def tearDown(self):
@@ -384,13 +386,21 @@ class MuseSessionManagerTests(unittest.TestCase):
             self.drivers[session_id] = driver
             return driver
 
+        def native_factory(profile: Path, url: str):
+            self.native_browser_launches.append((Path(profile), str(url)))
+            return FakeNativeBrowserProcess()
+
+        def attached_factory(profile: Path, _download: Path):
+            self.attached_profiles.append(Path(profile))
+            return factory(profile)
+
         values = {
             "profile_root": profiles,
             "checkpoint_path": self.root / "data" / "muse_sessions.json",
             "account_store": MuseAccountStore(self.root / "data" / "muse_accounts.json"),
             "driver_factory": factory,
-            "native_browser_factory": lambda _profile, _url: FakeNativeBrowserProcess(),
-            "attached_driver_factory": lambda profile, _download: factory(profile),
+            "native_browser_factory": native_factory,
+            "attached_driver_factory": attached_factory,
             "poll_interval": 0.01,
             "stable_seconds": 0,
             "generation_timeout": 0.35,
@@ -479,6 +489,8 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertEqual(driver.password.value, "")
         self.assertEqual(driver.google_email, "")
         self.assertEqual(driver.requested_urls, [])
+        self.assertEqual([item[0].name for item in self.native_browser_launches], ["account_1"])
+        self.assertEqual([item.name for item in self.attached_profiles], ["account_1"])
 
         driver._current_url = "https://muse.ai/chat"
         driver.logged_in = True
@@ -488,7 +500,7 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertEqual(snapshot.state, MuseSessionState.READY)
         self.assertTrue(snapshot.driver_open)
 
-    def test_native_browser_assisted_login_types_password_and_opens_muse(self):
+    def test_assisted_login_uses_its_own_webdriver_profile_and_opens_muse(self):
         self.driver_options[1] = {"login_required": True}
 
         future = self.manager.open_session(
@@ -507,8 +519,10 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertTrue(driver.google_authenticated)
         self.assertEqual(driver.current_url, "https://muse.ai/chat")
         self.assertIn("temporary-secret", driver.password.value)
+        self.assertEqual(self.native_browser_launches, [])
+        self.assertEqual(self.attached_profiles, [])
 
-    def test_native_browser_assisted_login_waits_for_manual_two_factor_then_continues(self):
+    def test_assisted_login_waits_for_manual_two_factor_then_continues(self):
         self.driver_options[1] = {"login_required": True, "google_two_factor": True}
 
         future = self.manager.open_session(
@@ -663,6 +677,26 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertEqual(set(self.drivers), {1, 2})
         self.assertEqual(self.manager.snapshot(3).state, MuseSessionState.IDLE)
 
+    def test_two_assisted_accounts_use_two_direct_isolated_profiles(self):
+        self.driver_options[1] = {"login_required": True}
+        self.driver_options[2] = {"login_required": True}
+        credentials = {
+            1: ("owner1@example.com", "secret-one"),
+            2: ("owner2@example.com", "secret-two"),
+        }
+
+        results = self.manager.open_all_sessions(
+            credentials,
+            manual_browser=True,
+        ).result(timeout=3)
+
+        self.assertEqual(set(results), {1, 2})
+        self.assertEqual({driver.profile.name for driver in self.drivers.values()}, {"account_1", "account_2"})
+        self.assertIsNot(self.drivers[1], self.drivers[2])
+        self.assertEqual(self.native_browser_launches, [])
+        self.assertEqual(self.attached_profiles, [])
+        self.assertTrue(all(self.manager.snapshot(index).driver_open for index in (1, 2)))
+
     def test_muse_security_code_stays_manual_after_google_login(self):
         self.driver_options[1] = {
             "login_required": True,
@@ -698,6 +732,22 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertEqual(self.drivers[1].cookies_cleared, 1)
         self.assertEqual(self.drivers[1].site_storage_cleared, 1)
         self.assertTrue(self.drivers[1].quit_called)
+
+    def test_assisted_login_error_keeps_usable_browser_open(self):
+        self.driver_options[1] = {"login_required": True, "waitlist": True}
+
+        with self.assertRaises(MuseSessionError):
+            self.manager.open_session(
+                1,
+                "owner@example.com",
+                password="google-secret",
+                manual_browser=True,
+            ).result(timeout=2)
+
+        snapshot = self.manager.snapshot(1)
+        self.assertEqual(snapshot.state, MuseSessionState.FAILED)
+        self.assertTrue(snapshot.driver_open)
+        self.assertFalse(self.drivers[1].quit_called)
 
     def test_generation_timeout_is_local_to_one_session(self):
         self.driver_options[1] = {"never_respond": True}

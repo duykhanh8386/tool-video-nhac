@@ -156,7 +156,7 @@ class MuseAccountsPage(QWidget):
         connection_row = QHBoxLayout(connection_group)
         self.connection_mode = QComboBox()
         self.connection_mode.addItem(
-            "Phương án 1 — Chrome thường: tự điền Google hoặc đăng nhập tay",
+            "Phương án 1 — Profile riêng: tự điền Google hoặc đăng nhập tay",
             MuseSessionOpenMode.MANUAL_BROWSER.value,
         )
         self.connection_mode.addItem(
@@ -310,8 +310,9 @@ class MuseAccountsPage(QWidget):
         profile.setObjectName("muted")
         profile.setWordWrap(True)
         login_help = QLabel(
-            "Phương án 1: nếu nhập mật khẩu, tool chỉ điền email/mật khẩu trên accounts.google.com; "
-            "nếu để trống thì bạn tự đăng nhập. CAPTCHA, passkey và 2FA luôn làm thủ công. "
+            "Phương án 1: tài khoản có mật khẩu được mở bằng driver/profile riêng biệt; tool chỉ điền "
+            "email/mật khẩu trên accounts.google.com. Nếu để trống thì bạn tự đăng nhập trong Chrome thường. "
+            "CAPTCHA, passkey và 2FA luôn làm thủ công. "
             "Sau khi Google xác minh, tool tự mở Muse và tiếp tục batch; mật khẩu bị xóa khỏi UI ngay khi bàn giao. "
             "Phương án 2: bấm Mở Chrome/Muse đã tick, mở sẵn Muse trong từng cửa sổ, bấm Quét tab Muse, "
             "rồi chọn một dòng READY cho mỗi tài khoản. Dòng ĐÃ CHỌN TAB màu xanh là đã chọn xong. "
@@ -504,7 +505,7 @@ class MuseAccountsPage(QWidget):
             )
             self._clear_password_inputs(selected_ids)
             self.global_status.setText(
-                f"Đang mở {len(selected_ids)} Chrome/Edge thường cho tài khoản đã tick. "
+                f"Đang mở {len(selected_ids)} Chrome profile riêng cho tài khoản đã tick. "
                 "Tool sẽ điền tài khoản nào có mật khẩu; "
                 "CAPTCHA/2FA làm thủ công. Giữ nguyên cửa sổ để tool tự nhận READY."
             )
@@ -632,7 +633,7 @@ class MuseAccountsPage(QWidget):
                 )
                 self._clear_password_inputs(selected_ids)
                 opening_message = (
-                    f"Đang mở {len(selected_ids)} Chrome/Edge thường cho tài khoản đã tick. "
+                    f"Đang mở {len(selected_ids)} Chrome profile riêng cho tài khoản đã tick. "
                     "CAPTCHA/2FA làm thủ công; tool sẽ chờ đủ profile READY rồi gửi đồng thời."
                 )
             self._pending_started_workers.clear()
