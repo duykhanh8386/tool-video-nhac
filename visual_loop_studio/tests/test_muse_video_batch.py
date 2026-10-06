@@ -260,6 +260,10 @@ class AutomationDriver:
             },
         )
         self.new_user_message = None
+        self.expose_new_user_message = True
+        self.expose_new_videos = True
+        self.prompt_missing_after_upload_polls = 0
+        self.prompt_lookup_count = 0
         self.video_poll_delay = 0
         self.video_poll_count = 0
         self.session_poll_delay = 0
@@ -439,6 +443,9 @@ class AutomationDriver:
         if selector in self.selectors.previews:
             return list(self.previews)
         if selector in self.selectors.prompt_inputs:
+            if self.uploaded and self.prompt_lookup_count < self.prompt_missing_after_upload_polls:
+                self.prompt_lookup_count += 1
+                return []
             return [self.prompt]
         if selector in self.selectors.generate_buttons:
             return [self.generate]
@@ -521,7 +528,7 @@ class AutomationDriver:
             return True
         if "VISUAL_LOOP_USER_MESSAGE_SNAPSHOT" in script:
             messages = [self.old_user_message]
-            if self.new_user_message is not None:
+            if self.new_user_message is not None and self.expose_new_user_message:
                 messages.append(self.new_user_message)
             return [
                 {
@@ -536,6 +543,8 @@ class AutomationDriver:
         if "VISUAL_LOOP_VIDEOS_AFTER_MESSAGE" in script:
             self.video_poll_count += 1
             if self.video_poll_count <= self.video_poll_delay:
+                return []
+            if not self.expose_new_videos:
                 return []
             message_id = str(args[1] if len(args) > 1 else "")
             if message_id and message_id != self.new_user_message.get_attribute("data-message-id"):
@@ -732,11 +741,169 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertNotIn("unrelated-video", driver.downloaded_video_ids)
             self.assertEqual(driver.downloaded_json_ids, [])
 
+    def test_downloads_new_video_when_muse_hides_user_message_metadata(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.png"
+            source.write_bytes(b"image")
+            target = root / "output" / "result.mp4"
+            driver = AutomationDriver(root / "downloads")
+            driver.expose_new_user_message = False
+            logs = []
+            job = MuseVideoJob(
+                job_id="job-no-message-metadata",
+                source_path=str(source),
+                worker_id=1,
+                account_id="account-1",
+                email="owner@example.com",
+                prompt="animate this image",
+                settings=MuseVideoSettings(),
+                output_path=str(target),
+            )
+
+            def transition(state, **changes):
+                job.state = state
+                for key, value in changes.items():
+                    if hasattr(job, key):
+                        setattr(job, key, value)
+
+            context = MuseVideoRunContext(
+                worker_id=1,
+                download_dir=driver.download_dir,
+                stopped=lambda: False,
+                transition=transition,
+                log=logs.append,
+                retry_limit=1,
+                backoff_base=0,
+            )
+            started = time.monotonic()
+
+            result = MuseVideoAutomation(
+                poll_interval=0.01,
+                timeout=1,
+                upload_timeout=1,
+                download_timeout=1,
+            ).process(driver, job, context)
+
+            self.assertLess(time.monotonic() - started, 0.8)
+            self.assertEqual(result, target)
+            self.assertEqual(driver.downloaded_video_ids, ["new-video-1"])
+            self.assertEqual(driver.session_clicks, [])
+            self.assertEqual(job.submission_message_id, "")
+            self.assertTrue(any("mốc theo dõi" in message for message in logs))
+            self.assertTrue(
+                any(
+                    "if(!message)return watch?videos:[]" in script
+                    for script in driver.executed_scripts
+                )
+            )
+
+    def test_waits_for_prompt_to_reappear_after_upload(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.png"
+            source.write_bytes(b"image")
+            target = root / "output" / "result.mp4"
+            driver = AutomationDriver(root / "downloads")
+            driver.prompt_missing_after_upload_polls = 3
+            job = MuseVideoJob(
+                job_id="job-delayed-prompt",
+                source_path=str(source),
+                worker_id=1,
+                account_id="account-1",
+                email="owner@example.com",
+                prompt="prompt appears after upload settles",
+                settings=MuseVideoSettings(),
+                output_path=str(target),
+            )
+
+            def transition(state, **changes):
+                job.state = state
+                for key, value in changes.items():
+                    if hasattr(job, key):
+                        setattr(job, key, value)
+
+            context = MuseVideoRunContext(
+                worker_id=1,
+                download_dir=driver.download_dir,
+                stopped=lambda: False,
+                transition=transition,
+                log=lambda _message: None,
+                retry_limit=1,
+                backoff_base=0,
+            )
+
+            result = MuseVideoAutomation(
+                poll_interval=0.01,
+                timeout=1,
+                upload_timeout=1,
+                download_timeout=1,
+            ).process(driver, job, context)
+
+            self.assertEqual(result, target)
+            self.assertEqual(driver.prompt.value, "prompt appears after upload settles")
+            self.assertEqual(driver.prompt_lookup_count, 3)
+            self.assertEqual(driver.generate_clicks, 1)
+
+    def test_waits_for_new_complete_session_when_video_dom_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source.png"
+            source.write_bytes(b"image")
+            target = root / "output" / "result.mp4"
+            driver = AutomationDriver(root / "downloads")
+            driver.expose_new_user_message = False
+            driver.expose_new_videos = False
+            driver.session_poll_delay = 2
+            logs = []
+            job = MuseVideoJob(
+                job_id="job-session-after-send",
+                source_path=str(source),
+                worker_id=1,
+                account_id="account-1",
+                email="owner@example.com",
+                prompt="wait for the new completed session",
+                settings=MuseVideoSettings(),
+                output_path=str(target),
+            )
+
+            def transition(state, **changes):
+                job.state = state
+                for key, value in changes.items():
+                    if hasattr(job, key):
+                        setattr(job, key, value)
+
+            context = MuseVideoRunContext(
+                worker_id=1,
+                download_dir=driver.download_dir,
+                stopped=lambda: False,
+                transition=transition,
+                log=logs.append,
+                retry_limit=1,
+                backoff_base=0,
+            )
+
+            result = MuseVideoAutomation(
+                poll_interval=0.01,
+                timeout=1,
+                upload_timeout=1,
+                download_timeout=1,
+            ).process(driver, job, context)
+
+            self.assertEqual(result, target)
+            self.assertEqual(driver.session_clicks, ["new-session-1"])
+            self.assertNotIn("old-session", driver.session_clicks)
+            self.assertEqual(driver.downloaded_video_ids, ["summary-mp4-1"])
+            self.assertTrue(
+                any("tick Complete sau thời điểm Send" in message for message in logs)
+            )
+
     def test_submits_three_images_once_and_downloads_three_distinct_videos_in_order(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             download_dir = root / "downloads"
             driver = AutomationDriver(download_dir)
+            driver.expose_new_user_message = False
             jobs = []
             contexts = []
             for index in range(1, MUSE_IMAGES_PER_REQUEST + 1):
@@ -972,6 +1139,7 @@ class MuseVideoAutomationTests(unittest.TestCase):
                 source = worker_root / "source.png"
                 source.write_bytes(f"image-{worker_id}".encode())
                 driver = AutomationDriver(worker_root / "downloads")
+                driver.expose_new_user_message = False
                 driver.direct_download_barrier = barrier
                 job = MuseVideoJob(
                     job_id=f"concurrent-job-{worker_id}",

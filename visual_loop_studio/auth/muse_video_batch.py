@@ -484,7 +484,7 @@ class MuseVideoAutomation:
                 f"Muse chưa hiển thị đủ preview cho ảnh thứ {index}.",
             )
         primary.log(f"Muse đã nhận đủ {len(jobs)} ảnh; đang điền một prompt chung…")
-        self._fill_prompt(driver, prompt)
+        self._fill_prompt(driver, prompt, primary)
         self._apply_settings(driver, settings)
         baseline_videos = sorted(self._video_fingerprints(driver))
         message_snapshot = self._submission_messages(driver)
@@ -570,11 +570,19 @@ class MuseVideoAutomation:
                 baseline=set(baseline_videos),
                 anchor=anchor,
                 context=primary,
+                baseline_sessions=set(baseline_session_fingerprints),
             )
             for context in contexts:
                 context.transition(MuseVideoJobState.GENERATING, progress=78)
         finally:
             self._stop_video_watch(driver, watch_token)
+
+        if not videos:
+            primary.log(
+                "Đã thấy Chat Session mới có tick Complete sau thời điểm Send; "
+                "đang mở đúng session đó để tải toàn bộ MP4."
+            )
+            return self.recover_batch(driver, jobs, contexts)
 
         primary.log(
             "Video đã xuất hiện dưới đúng prompt; đang tải trực tiếp toàn bộ MP4 trong đoạn chat."
@@ -665,6 +673,7 @@ class MuseVideoAutomation:
                 baseline=set(jobs[0].baseline_videos),
                 anchor=self._anchor_from_job(jobs[0]),
                 context=primary,
+                baseline_sessions=set(jobs[0].baseline_session_fingerprints),
             )
             video_by_job_id = {
                 job.job_id: video for job, video in zip(jobs, videos)
@@ -803,8 +812,10 @@ class MuseVideoAutomation:
         baseline: set[str],
         anchor: MuseSubmissionAnchor,
         context: MuseVideoRunContext,
+        baseline_sessions: set[str] | None = None,
     ) -> list[Any]:
         transient_retries = 0
+        session_ready = object()
 
         def find_results():
             nonlocal transient_retries
@@ -832,17 +843,39 @@ class MuseVideoAutomation:
                     continue
                 seen.add(fingerprint)
                 values.append(video)
-            return values[:expected] if len(values) >= expected else False
+            # Muse can lazily mount old cards while a new generation is running.
+            # Keep the newest ready results from this Send-time watch instead of
+            # taking older nodes that happen to occur first in DOM order.
+            if len(values) >= expected:
+                return values[-expected:]
+            if baseline_sessions is not None:
+                sessions = self._completed_sessions(driver)
+                if anchor.started_epoch_ms > 0:
+                    cutoff = (
+                        anchor.started_epoch_ms
+                        - (anchor.started_epoch_ms % 60_000)
+                        + 60_000
+                    )
+                    sessions = [
+                        session
+                        for session in sessions
+                        if session.completed_epoch_ms >= cutoff
+                    ]
+                if any(
+                    session.fingerprint not in baseline_sessions
+                    for session in sessions
+                ):
+                    return session_ready
+            return False
 
-        return list(
-            self._wait(
-                driver,
-                find_results,
-                self.timeout,
-                context,
-                f"Muse chưa trả về đủ {expected} video mới; lượt đã gửi sẽ không tự gửi lại.",
-            )
+        result = self._wait(
+            driver,
+            find_results,
+            self.timeout,
+            context,
+            f"Muse chưa trả về đủ {expected} video mới; lượt đã gửi sẽ không tự gửi lại.",
         )
+        return [] if result is session_ready else list(result)
 
     def retry_download(self, driver: Any, job: MuseVideoJob, context: MuseVideoRunContext) -> Path:
         if not (job.submitted or job.submission_attempted):
@@ -904,22 +937,37 @@ class MuseVideoAutomation:
                 continue
         raise MuseVideoBatchError("Không tìm thấy input upload ảnh ổn định trên Muse.")
 
-    def _fill_prompt(self, driver: Any, prompt: str) -> None:
-        for field in reversed(self._elements(driver, self.selectors.prompt_inputs)):
-            if not _clickable(field):
-                continue
-            try:
-                field.click()
-                tag = str(getattr(field, "tag_name", "") or "").casefold()
-                if tag in {"textarea", "input"}:
-                    field.clear()
-                else:
-                    field.send_keys("\ue009", "a")
-                field.send_keys(prompt)
-                return
-            except Exception:
-                continue
-        raise MuseVideoBatchError("Không tìm thấy ô prompt ổn định trên Muse.")
+    def _fill_prompt(
+        self,
+        driver: Any,
+        prompt: str,
+        context: MuseVideoRunContext,
+    ) -> None:
+        def fill_when_ready():
+            self._check(driver, context)
+            for field in reversed(self._elements(driver, self.selectors.prompt_inputs)):
+                if not _clickable(field):
+                    continue
+                try:
+                    field.click()
+                    tag = str(getattr(field, "tag_name", "") or "").casefold()
+                    if tag in {"textarea", "input"}:
+                        field.clear()
+                    else:
+                        field.send_keys("\ue009", "a")
+                    field.send_keys(prompt)
+                    return True
+                except Exception:
+                    continue
+            return False
+
+        self._wait(
+            driver,
+            fill_when_ready,
+            self.upload_timeout,
+            context,
+            "Muse chưa hiển thị lại ô prompt ổn định sau khi upload ảnh.",
+        )
 
     def _apply_settings(self, driver: Any, settings: MuseVideoSettings) -> None:
         for selectors, value, label in (
@@ -1593,7 +1641,9 @@ class MuseVideoAutomation:
         try:
             values = driver.execute_script(
                 "/* VISUAL_LOOP_USER_MESSAGE_SNAPSHOT */"
-                "const nodes=[...document.querySelectorAll('[data-message-role=\\\"user\\\"]')];"
+                "const nodes=[...document.querySelectorAll("
+                "'[data-message-role=\\\"user\\\"],[data-role=\\\"user\\\"],"
+                "[data-author=\\\"user\\\"],[data-testid*=\\\"user-message\\\" i]')];"
                 "return nodes.map((element,domIndex)=>({"
                 "element,dom_index:domIndex,"
                 "message_id:element.getAttribute('data-message-id')||'',"
@@ -1663,12 +1713,17 @@ class MuseVideoAutomation:
                 message_floor=message_floor,
             )
 
-        return self._wait(
-            driver,
-            find_anchor,
-            min(60.0, self.upload_timeout),
-            context,
-            "Muse chưa ghi nhận đúng tin nhắn vừa gửi; tool dừng để không tải nhầm video của chat cũ.",
+        anchor = find_anchor()
+        if anchor:
+            return anchor
+        context.log(
+            "Muse không công khai ID tin nhắn mới trong DOM; "
+            "đang nhận video bằng mốc theo dõi được cài ngay trước lúc Send."
+        )
+        return MuseSubmissionAnchor(
+            prompt=wanted,
+            baseline_message_ids=tuple(sorted(baseline_message_ids)),
+            message_floor=message_floor,
         )
 
     @staticmethod
@@ -1693,8 +1748,17 @@ class MuseVideoAutomation:
                 "wantedIndex=arguments[3],wantedText=(arguments[4]||'').replace(/\\s+/g,' ').trim(),"
                 "baselineIds=new Set(arguments[5]||[]),floor=arguments[6]||0,"
                 "watchToken=arguments[7]||'',sentAt=Number(arguments[8]||0);"
-                "const users=[...document.querySelectorAll('[data-message-role=\\\"user\\\"]')];"
+                "const users=[...document.querySelectorAll("
+                "'[data-message-role=\\\"user\\\"],[data-role=\\\"user\\\"],"
+                "[data-author=\\\"user\\\"],[data-testid*=\\\"user-message\\\" i]')];"
                 "const norm=e=>(e&&(e.innerText||e.textContent)||'').replace(/\\s+/g,' ').trim();"
+                "const all=[...document.querySelectorAll('video')];"
+                "const root=window.__visualLoopVideoWatches||{},watch=watchToken?root[watchToken]:null;"
+                "const appearedAt=video=>{if(!watch)return 0;"
+                "const touched=Number(watch.touched.get(video)||0);if(touched)return touched;"
+                "if(!watch.baseline.has(video))return Date.now();"
+                "return watch.source(video)!==watch.baselineSources.get(video)?Date.now():0;};"
+                "const videos=watch?all.filter(video=>appearedAt(video)>=Math.max(0,sentAt-1000)):all;"
                 "let message=(live&&live.isConnected)?live:null;"
                 "if(!message&&wantedId)message=users.find(e=>e.getAttribute('data-message-id')===wantedId)||null;"
                 "if(!message&&wantedGroup)message=users.find(e=>"
@@ -1703,16 +1767,9 @@ class MuseVideoAutomation:
                 "message=users[wantedIndex];"
                 "if(!message)message=users.find((e,index)=>index>=floor&&"
                 "!baselineIds.has(e.getAttribute('data-message-id')||'')&&(!wantedText||norm(e).includes(wantedText)))||null;"
-                "if(!message)return [];"
+                "if(!message)return watch?videos:[];"
                 "const following=(a,b)=>!!(a.compareDocumentPosition(b)&Node.DOCUMENT_POSITION_FOLLOWING);"
                 "const nextUser=users.find(e=>e!==message&&following(message,e))||null;"
-                "const all=[...document.querySelectorAll('video')];"
-                "const root=window.__visualLoopVideoWatches||{},watch=watchToken?root[watchToken]:null;"
-                "const appearedAt=video=>{if(!watch)return 0;"
-                "const touched=Number(watch.touched.get(video)||0);if(touched)return touched;"
-                "if(!watch.baseline.has(video))return Date.now();"
-                "return watch.source(video)!==watch.baselineSources.get(video)?Date.now():0;};"
-                "const videos=watch?all.filter(video=>appearedAt(video)>=Math.max(0,sentAt-1000)):all;"
                 "const group=message.getAttribute('data-message-group-id')||wantedGroup;"
                 "const grouped=group?videos.filter(video=>{const item=video.closest('[data-message-group-id]');"
                 "return item&&item.getAttribute('data-message-group-id')===group;}):[];"
