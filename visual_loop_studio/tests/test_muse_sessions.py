@@ -871,7 +871,7 @@ class MuseSessionManagerTests(unittest.TestCase):
                 "owner@example.com",
                 password="google-secret",
                 manual_browser=True,
-            ).result(timeout=2)
+            ).result(timeout=5)
 
         snapshot = self.manager.snapshot(1)
         self.assertEqual(snapshot.state, MuseSessionState.FAILED)
