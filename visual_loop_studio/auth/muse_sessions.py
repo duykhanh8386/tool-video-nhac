@@ -1035,8 +1035,6 @@ class MuseSessionManager:
                         actions.add(profile_checked_key)
                         if profile_confirmed:
                             actions.add(profile_clicked_key)
-                        if profile_confirmed and session.stop_event.wait(0.75):
-                            raise MuseSessionStopped("Đã dừng tác vụ Muse.")
                     self._set_state(
                         session,
                         MuseSessionState.OPENING,

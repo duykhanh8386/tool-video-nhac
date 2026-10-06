@@ -840,6 +840,7 @@ def click_chrome_profile_continue(
     *,
     timeout: float = 10.0,
     poll_interval: float = 0.25,
+    settle_seconds: float = 0.75,
     stopped: Callable[[], bool] | None = None,
 ) -> bool:
     """Click Chrome's native Continue-as profile bubble for the active tab.
@@ -889,6 +890,14 @@ def click_chrome_profile_continue(
                                 control.invoke()
                             except Exception:
                                 control.click_input()
+                            settle_deadline = time.monotonic() + max(0.0, float(settle_seconds))
+                            while time.monotonic() < settle_deadline:
+                                if stopped is not None and stopped():
+                                    return False
+                                remaining = max(0.0, settle_deadline - time.monotonic())
+                                if remaining <= 0:
+                                    break
+                                time.sleep(min(interval, remaining))
                             return True
             except Exception:
                 pass

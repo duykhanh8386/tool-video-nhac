@@ -212,7 +212,12 @@ class MuseLoginServiceTests(unittest.TestCase):
         with patch.dict(sys.modules, {"pywinauto": fake_module}), patch(
             "auth.muse_login.os.name", "nt"
         ):
-            clicked = click_chrome_profile_continue(driver, timeout=0.2, poll_interval=0.01)
+            clicked = click_chrome_profile_continue(
+                driver,
+                timeout=0.2,
+                poll_interval=0.01,
+                settle_seconds=0,
+            )
 
         self.assertTrue(clicked)
         self.assertTrue(button.invoked)
