@@ -1150,9 +1150,17 @@ class MuseVideoAutomation:
                 driver.execute_script(
                     "const v=arguments[0];"
                     "if(!v || String(v.tagName||'').toLowerCase()!=='video')return false;"
-                    "const src=String(v.currentSrc||v.src||'').trim();"
+                    "const mediaSrc=v=>String(v.currentSrc||v.src||(v.querySelector&&v.querySelector('source')&&v.querySelector('source').src)||'').trim();"
+                    "const src=mediaSrc(v);"
                     "if(!src || /^data:image[/]/i.test(src) || /^https?:.*\\.(png|jpe?g|webp|gif)(?:[?#]|$)/i.test(src))return false;"
                     "if(!/^(blob:|https?:)/i.test(src))return false;"
+                    "const s=src.toLowerCase();"
+                    "if(/(avatar|mascot|muse[-_]?bot|icon|reaction|subagent|status[-_]?anim|thinking|loading[-_]anim|placeholders?|animations?|assets?\\/static)/i.test(s))return false;"
+                    "const bad='header,nav,aside,[data-testid*=\"avatar\" i],[class*=\"avatar\" i],[data-testid*=\"mascot\" i],[class*=\"mascot\" i],[data-testid*=\"loading\" i],[class*=\"loading\" i],[class*=\"thinking\" i],[class*=\"reaction\" i],[class*=\"badge\" i],[class*=\"status\" i],[class*=\"indicator\" i],[data-testid*=\"subagent\" i],[class*=\"subagent\" i],[data-testid*=\"placeholder\" i],[class*=\"placeholder\" i]';"
+                    "if(v.matches&&v.matches(bad))return false;"
+                    "if(v.closest&&v.closest(bad))return false;"
+                    "const r=v.getBoundingClientRect?v.getBoundingClientRect():null;"
+                    "if(r&&r.width>0&&r.height>0&&(r.width<160||r.height<160))return false;"
                     "const a=document.createElement('a');a.href=src;a.download='muse-video.mp4';"
                     "a.style.display='none';document.body.appendChild(a);a.click();a.remove();return true;",
                     video,
@@ -2000,8 +2008,20 @@ class MuseVideoAutomation:
                 "watchToken=arguments[7]||'',sentAt=Number(arguments[8]||0);"
                 "const isImageSrc=s=>!s||/^data:image[/]/i.test(s)||/^https?:.*\\.(png|jpe?g|webp|gif)(?:[?#]|$)/i.test(s);"
                 "const mediaSrc=v=>String(v.currentSrc||v.src||(v.querySelector&&v.querySelector('source')&&v.querySelector('source').src)||'').trim();"
+                "const isBotOrAvatar=v=>{"
+                "if(!v)return true;"
+                "const s=mediaSrc(v).toLowerCase();"
+                "if(/(avatar|mascot|muse[-_]?bot|icon|reaction|subagent|status[-_]?anim|thinking|loading[-_]anim|placeholders?|animations?|assets?\\/static)/i.test(s))return true;"
+                "const bad='header,nav,aside,[data-testid*=\"avatar\" i],[class*=\"avatar\" i],[data-testid*=\"mascot\" i],[class*=\"mascot\" i],[data-testid*=\"loading\" i],[class*=\"loading\" i],[class*=\"thinking\" i],[class*=\"reaction\" i],[class*=\"badge\" i],[class*=\"status\" i],[class*=\"indicator\" i],[data-testid*=\"subagent\" i],[class*=\"subagent\" i],[data-testid*=\"placeholder\" i],[class*=\"placeholder\" i]';"
+                "if(v.matches&&v.matches(bad))return true;"
+                "if(v.closest&&v.closest(bad))return true;"
+                "const r=v.getBoundingClientRect?v.getBoundingClientRect():null;"
+                "if(r&&r.width>0&&r.height>0&&(r.width<160||r.height<160))return true;"
+                "if(v.videoWidth>0&&v.videoHeight>0&&(v.videoWidth<280&&v.videoHeight<280))return true;"
+                "if(v.loop&&v.duration>0&&v.duration<3.8&&!v.controls)return true;"
+                "return false;};"
                 "const isMediaVideo=v=>{"
-                "const s=mediaSrc(v);return Boolean(s&&!isImageSrc(s)&&/^(blob:|https?:)/i.test(s));};"
+                "const s=mediaSrc(v);return Boolean(s&&!isImageSrc(s)&&/^(blob:|https?:)/i.test(s)&&!isBotOrAvatar(v));};"
                 "const users=[...document.querySelectorAll("
                 "'[data-message-role=\\\"user\\\"],[data-role=\\\"user\\\"],"
                 "[data-author=\\\"user\\\"],[data-message-author=\\\"user\\\"],[data-testid*=\\\"user-message\\\" i]')];"
@@ -2052,9 +2072,19 @@ class MuseVideoAutomation:
             return bool(
                 driver.execute_script(
                     "const v=arguments[0];if(!v)return false;"
-                    "const src=String(v.currentSrc||v.src||(v.querySelector&&v.querySelector('source')&&v.querySelector('source').src)||'').trim();"
+                    "const mediaSrc=v=>String(v.currentSrc||v.src||(v.querySelector&&v.querySelector('source')&&v.querySelector('source').src)||'').trim();"
+                    "const src=mediaSrc(v);"
                     "if(!src||/^data:image[/]/i.test(src)||/^https?:.*\\.(png|jpe?g|webp|gif)(?:[?#]|$)/i.test(src))return false;"
                     "if(!/^(blob:|https?:)/i.test(src))return false;"
+                    "const s=src.toLowerCase();"
+                    "if(/(avatar|mascot|muse[-_]?bot|icon|reaction|subagent|status[-_]?anim|thinking|loading[-_]anim|placeholders?|animations?|assets?\\/static)/i.test(s))return false;"
+                    "const bad='header,nav,aside,[data-testid*=\"avatar\" i],[class*=\"avatar\" i],[data-testid*=\"mascot\" i],[class*=\"mascot\" i],[data-testid*=\"loading\" i],[class*=\"loading\" i],[class*=\"thinking\" i],[class*=\"reaction\" i],[class*=\"badge\" i],[class*=\"status\" i],[class*=\"indicator\" i],[data-testid*=\"subagent\" i],[class*=\"subagent\" i],[data-testid*=\"placeholder\" i],[class*=\"placeholder\" i]';"
+                    "if(v.matches&&v.matches(bad))return false;"
+                    "if(v.closest&&v.closest(bad))return false;"
+                    "const r=v.getBoundingClientRect?v.getBoundingClientRect():null;"
+                    "if(r&&r.width>0&&r.height>0&&(r.width<160||r.height<160))return false;"
+                    "if(v.videoWidth>0&&v.videoHeight>0&&(v.videoWidth<280&&v.videoHeight<280))return false;"
+                    "if(v.loop&&v.duration>0&&v.duration<3.8&&!v.controls)return false;"
                     "return (v.readyState>=2)||(v.duration>0)||Boolean(src);",
                     video,
                 )
@@ -2527,10 +2557,8 @@ class MuseVideoBatchManager:
                             if candidate.state == MuseVideoJobState.LOGIN_REQUIRED:
                                 candidate.state = MuseVideoJobState.PAUSED
                             jobs.append(candidate)
-                            # One image owns one prompt/result.  Keeping a
-                            # request to one job also lets each worker continue
-                            # immediately with the next image after download.
-                            if len(jobs) >= 1:
+                            # Gom tối đa MUSE_IMAGES_PER_REQUEST (3 ảnh) cho mỗi lượt prompt trên Muse
+                            if len(jobs) >= MUSE_IMAGES_PER_REQUEST:
                                 break
                     worker.current_job_id = jobs[0].job_id
                     worker.progress = 0

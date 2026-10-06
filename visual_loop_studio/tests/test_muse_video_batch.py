@@ -1380,15 +1380,15 @@ class MuseVideoBatchManagerTests(unittest.TestCase):
         self.assertEqual(len(list(self.output.glob("*.mp4"))), 10)
         self.assertEqual(sum(job.state == MuseVideoJobState.COMPLETED for job in self.batch.snapshot().jobs), 10)
 
-    def test_manager_sends_one_image_per_prompt_and_continues_until_queue_is_empty(self):
+    def test_manager_batches_up_to_three_images_per_prompt_and_continues_until_queue_is_empty(self):
         self.batch.shutdown(timeout=2)
         grouped = GroupedFakeVideoAutomation()
         self.batch = self._batch(grouped)
 
         self._start(self._images(12)).result(timeout=3)
 
-        self.assertEqual(grouped.group_sizes, {1: [1, 1, 1, 1], 2: [1, 1, 1, 1], 3: [1, 1, 1, 1]})
-        self.assertEqual(sum(grouped.generate_calls.values()), 12)
+        self.assertEqual(grouped.group_sizes, {1: [3, 1], 2: [3, 1], 3: [3, 1]})
+        self.assertEqual(sum(grouped.generate_calls.values()), 6)
         self.assertEqual(len(list(self.output.glob("*.mp4"))), 12)
 
     def test_one_worker_failure_does_not_stop_other_workers(self):
