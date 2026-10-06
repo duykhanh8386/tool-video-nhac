@@ -500,7 +500,16 @@ class MuseSessionManagerTests(unittest.TestCase):
             password="",
             manual_browser=True,
         )
-        self._wait_state(1, MuseSessionState.LOGIN_REQUIRED)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if (
+                self.manager.snapshot(1).state == MuseSessionState.LOGIN_REQUIRED
+                and 1 in self.drivers
+            ):
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("Manual browser did not attach its profile driver")
         driver = self.drivers[1]
 
         self.assertEqual(driver.password.value, "")
