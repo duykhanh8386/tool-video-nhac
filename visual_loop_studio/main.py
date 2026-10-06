@@ -31,6 +31,7 @@ from ui.batch_render import BatchRenderPage
 from ui.common import WheelValueGuard
 from ui.home import HomePage
 from ui.loop_music import LoopMusicPage
+from ui.muse_batch import MuseBatchPage
 from ui.settings import SettingsDialog
 from ui.updater import UpdateController
 from ui.visual_creator import VisualCreatorPage
@@ -80,7 +81,7 @@ class MainWindow(QMainWindow):
         brand.setObjectName("brand")
         side.addWidget(brand)
         self.navigation = QListWidget()
-        self.navigation.addItems(["Trang chủ", "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh", "Render hàng loạt"])
+        self.navigation.addItems(["Trang chủ", "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh", "Render hàng loạt", "Muse Batch — 3 tài khoản"])
         self.navigation.setCurrentRow(0)
         self.navigation.currentRowChanged.connect(self._navigate)
         side.addWidget(self.navigation, 1)
@@ -97,7 +98,8 @@ class MainWindow(QMainWindow):
         self.loop = LoopMusicPage(self.settings)
         self.audio = AudioMixerPage(self.settings)
         self.batch = BatchRenderPage(self.settings)
-        for page in (self.home, self.visual, self.loop, self.audio, self.batch):
+        self.muse_batch = MuseBatchPage(self.settings)
+        for page in (self.home, self.visual, self.loop, self.audio, self.batch, self.muse_batch):
             self.pages.addWidget(page)
         self.home.navigate.connect(self.navigation.setCurrentRow)
         self.visual.settings_changed.connect(self._save_settings)
@@ -121,7 +123,7 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         tools = self.menuBar().addMenu("Công cụ")
-        for index, text in enumerate(("Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh", "Render hàng loạt"), start=1):
+        for index, text in enumerate(("Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh", "Render hàng loạt", "Muse Batch — 3 tài khoản"), start=1):
             action = QAction(text, self)
             action.triggered.connect(lambda _checked=False, index=index: self.navigation.setCurrentRow(index))
             tools.addAction(action)
@@ -201,6 +203,7 @@ class MainWindow(QMainWindow):
         if (
             any(worker.running for worker in workers)
             or self.batch.running
+            or self.muse_batch.running
             or self.visual.ai_worker.running
             or self.visual.local_ai_worker.running
             or self.visual.local_ai_worker.checking
@@ -214,6 +217,7 @@ class MainWindow(QMainWindow):
             for worker in workers:
                 worker.cancel()
             self.batch.cancel_all()
+            self.muse_batch.cancel_all()
             self.visual.ai_worker.cancel()
             self.visual.local_ai_worker.cancel()
             self.visual.local_setup_worker.cancel()
