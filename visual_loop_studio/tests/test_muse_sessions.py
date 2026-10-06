@@ -104,6 +104,7 @@ class FakeDriver:
         unverified_manage_account: bool = False,
         muse_page_load_timeout: bool = False,
         google_two_factor: bool = False,
+        transient_window_handle_errors: int = 0,
     ) -> None:
         self.profile = Path(profile)
         self.response = response
@@ -117,6 +118,8 @@ class FakeDriver:
         self.unverified_manage_account = unverified_manage_account
         self.muse_page_load_timeout = muse_page_load_timeout
         self.google_two_factor = google_two_factor
+        self.transient_window_handle_errors = max(0, int(transient_window_handle_errors))
+        self.window_handle_reads = 0
         self.google_authenticated = not login_required
         self.google_email = ""
         self.muse_stage = ""
@@ -166,8 +169,12 @@ class FakeDriver:
     @property
     def window_handles(self):
         self._record_thread()
+        self.window_handle_reads += 1
         if self.closed:
             raise RuntimeError("driver died")
+        if self.window_handle_reads > 1 and self.transient_window_handle_errors:
+            self.transient_window_handle_errors -= 1
+            raise RuntimeError("temporary redirect")
         return ["main"]
 
     @property
@@ -696,6 +703,23 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertEqual(self.native_browser_launches, [])
         self.assertEqual(self.attached_profiles, [])
         self.assertTrue(all(self.manager.snapshot(index).driver_open for index in (1, 2)))
+
+    def test_assisted_login_retries_transient_driver_error_without_closing_window(self):
+        self.driver_options[1] = {
+            "login_required": True,
+            "transient_window_handle_errors": 1,
+        }
+
+        self.manager.open_session(
+            1,
+            "owner@example.com",
+            password="google-secret",
+            manual_browser=True,
+        ).result(timeout=3)
+
+        self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
+        self.assertTrue(self.manager.snapshot(1).driver_open)
+        self.assertFalse(self.drivers[1].quit_called)
 
     def test_muse_security_code_stays_manual_after_google_login(self):
         self.driver_options[1] = {

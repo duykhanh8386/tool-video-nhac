@@ -163,6 +163,8 @@ class FakeVideoAutomation:
         if scenario == "download_fail" and self.download_calls[job.job_id] == 1:
             raise MuseVideoDownloadError("download failed")
         target = Path(job.output_path)
+        if scenario == "missing_output":
+            return target
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"\x00\x00\x00\x18ftypmp42fake-video")
         return target
@@ -726,6 +728,62 @@ class MuseVideoBatchManagerTests(unittest.TestCase):
         self.assertEqual(self.automation.generate_calls[job.job_id], 1)
         self.assertEqual(self.automation.recover_calls[job.job_id], 1)
         self.assertEqual(self.batch.snapshot().jobs[0].state, MuseVideoJobState.COMPLETED)
+
+    def test_completed_checkpoint_with_missing_mp4_recovers_download_without_resubmit(self):
+        image = self._images(1)[0]
+        self._start([image]).result(timeout=3)
+        completed = self.batch.snapshot().jobs[0]
+        Path(completed.output_path).unlink()
+        checkpoint = self.batch.checkpoint_path
+        self.batch.shutdown(timeout=2)
+
+        recovered_automation = FakeVideoAutomation()
+        self.batch = self._batch(recovered_automation, checkpoint)
+        self.batch.allocate_images([image])
+        self.batch.start_all(
+            "shared prompt",
+            MuseVideoSettings(aspect_ratio="16:9"),
+            self.output,
+        ).result(timeout=3)
+
+        recovered = self.batch.snapshot().jobs[0]
+        self.assertEqual(recovered_automation.generate_calls[recovered.job_id], 0)
+        self.assertEqual(recovered_automation.recover_calls[recovered.job_id], 1)
+        self.assertEqual(recovered.state, MuseVideoJobState.COMPLETED)
+        self.assertTrue(Path(recovered.output_path).is_file())
+
+    def test_completed_checkpoint_is_copied_to_new_output_without_resubmit(self):
+        image = self._images(1)[0]
+        self._start([image]).result(timeout=3)
+        checkpoint = self.batch.checkpoint_path
+        self.batch.shutdown(timeout=2)
+
+        new_output = self.root / "new-output"
+        recovered_automation = FakeVideoAutomation()
+        self.batch = self._batch(recovered_automation, checkpoint)
+        self.batch.allocate_images([image])
+        self.batch.start_all(
+            "shared prompt",
+            MuseVideoSettings(aspect_ratio="16:9"),
+            new_output,
+        ).result(timeout=3)
+
+        completed = self.batch.snapshot().jobs[0]
+        self.assertEqual(sum(recovered_automation.generate_calls.values()), 0)
+        self.assertEqual(sum(recovered_automation.recover_calls.values()), 0)
+        self.assertEqual(completed.state, MuseVideoJobState.COMPLETED)
+        self.assertEqual(Path(completed.output_path).parent, new_output)
+        self.assertTrue(Path(completed.output_path).is_file())
+
+    def test_worker_never_marks_success_without_valid_mp4(self):
+        self.automation.scenarios[1] = "missing_output"
+
+        self._start(self._images(1)).result(timeout=3)
+
+        snapshot = self.batch.snapshot()
+        self.assertEqual(snapshot.jobs[0].state, MuseVideoJobState.FAILED)
+        self.assertEqual(snapshot.workers[0].completed, 0)
+        self.assertIn("MP4 hợp lệ", snapshot.jobs[0].error)
 
     def test_redistribute_never_moves_submitted_job(self):
         self.automation.scenarios[1] = "stop_after_submit"

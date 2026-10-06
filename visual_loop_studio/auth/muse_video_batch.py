@@ -1503,7 +1503,21 @@ class MuseVideoBatchManager:
                                 worker.error = message
                                 self._log_locked(worker, f"Lỗi {Path(job.source_path).name}: {message}")
                                 continue
-                            job.output_path = str(result)
+                            try:
+                                result_path = Path(result)
+                            except (TypeError, ValueError):
+                                result_path = Path()
+                            if not _valid_mp4(result_path):
+                                message = (
+                                    "Muse đã trả kết quả nhưng chưa có file MP4 hợp lệ; "
+                                    "job chỉ được phép chạy lại bước download."
+                                )
+                                job.state = MuseVideoJobState.FAILED
+                                job.error = message
+                                worker.error = message
+                                self._log_locked(worker, f"Chưa tải xong {Path(job.source_path).name}: {message}")
+                                continue
+                            job.output_path = str(result_path)
                             job.state = MuseVideoJobState.COMPLETED
                             job.completed_at = _utc_now()
                             job.error = ""
@@ -1564,6 +1578,8 @@ class MuseVideoBatchManager:
             session = self.session_manager.sessions[worker_id]
             job_id = create_muse_video_job_id(source, self.prompt, self.settings)
             output = Path(self.output_dir) / _output_filename(source, session.account_id, job_id)
+            if output.exists() and not _valid_mp4(output):
+                output = _available_output_path(output)
             job = self.jobs.get(job_id)
             if job is None:
                 job = MuseVideoJob(
@@ -1577,11 +1593,62 @@ class MuseVideoBatchManager:
                     output_path=str(output),
                 )
                 self.jobs[job_id] = job
-            elif not job.submitted and not job.submission_attempted and job.state != MuseVideoJobState.COMPLETED:
-                job.worker_id = worker_id
-                job.account_id = session.account_id
-                job.email = session.email
-                job.output_path = str(output)
+            else:
+                current_output = Path(job.output_path)
+                if job.state == MuseVideoJobState.COMPLETED:
+                    if _valid_mp4(output):
+                        # The requested output folder already contains the
+                        # exact completed file, so keep the job terminal.
+                        job.output_path = str(output)
+                    elif _valid_mp4(current_output):
+                        # A checkpoint can point at an older output folder.
+                        # Copy the verified MP4 to the folder selected now;
+                        # never submit the image to Muse a second time.
+                        if _path_key(current_output) != _path_key(output):
+                            try:
+                                if output.exists():
+                                    raise OSError("target exists")
+                                output.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.copy2(current_output, output)
+                            except OSError:
+                                job.state = MuseVideoJobState.FAILED
+                                job.error = (
+                                    "Không thể chép MP4 đã hoàn tất sang thư mục output hiện tại; "
+                                    "tool không ghi đè file có sẵn."
+                                )
+                            else:
+                                if _valid_mp4(output):
+                                    job.output_path = str(output)
+                                else:
+                                    job.state = MuseVideoJobState.FAILED
+                                    job.error = "Bản sao MP4 trong thư mục output hiện tại không hợp lệ."
+                    else:
+                        # Do not trust a terminal checkpoint when its artifact
+                        # has disappeared. A submitted job stays bound to its
+                        # original account and resumes download only.
+                        job.output_path = str(output)
+                        job.state = (
+                            MuseVideoJobState.DOWNLOADING
+                            if job.submitted or job.submission_attempted
+                            else MuseVideoJobState.PENDING
+                        )
+                        job.completed_at = ""
+                        job.error = "File MP4 không còn tồn tại; đang khôi phục bước download."
+                elif job.submitted or job.submission_attempted:
+                    # A submitted result may safely be downloaded into a newly
+                    # selected folder, but it must never change account/worker.
+                    if not _valid_mp4(current_output):
+                        job.output_path = str(output)
+
+                if (
+                    not job.submitted
+                    and not job.submission_attempted
+                    and job.state != MuseVideoJobState.COMPLETED
+                ):
+                    job.worker_id = worker_id
+                    job.account_id = session.account_id
+                    job.email = session.email
+                    job.output_path = str(output)
             self.current_job_ids.append(job_id)
             assigned_worker = self.workers[job.worker_id]
             assigned_worker.queue.append(job_id)
@@ -1808,6 +1875,23 @@ def _valid_mp4(path: Path) -> bool:
         return b"ftyp" in header
     except OSError:
         return False
+
+
+def _path_key(path: Path) -> str:
+    try:
+        return str(path.expanduser().resolve()).casefold()
+    except OSError:
+        return str(path).casefold()
+
+
+def _available_output_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for index in range(2, 10_000):
+        candidate = path.with_name(f"{path.stem}__retry_{index}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise MuseVideoBatchError("Không tạo được tên file MP4 khôi phục không trùng trong thư mục output.")
 
 
 def _clickable(element: Any) -> bool:

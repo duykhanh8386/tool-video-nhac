@@ -26,6 +26,7 @@ YOUTUBE_AUTH_HOSTS = frozenset({"youtube.com", "www.youtube.com", "studio.youtub
 MUSE_ALLOWED_HOSTS = frozenset({"muse.ai", "auth.muse.ai", "accounts.google.com"})
 MUSE_PROFILES_DIR = USER_DATA_ROOT / "MuseChromeProfiles"
 MUSE_ACCOUNTS_FILE = DATA_DIR / "muse_accounts.json"
+_MUSE_DRIVER_START_LOCK = threading.Lock()
 
 CLICKABLE_SELECTOR = "button, [role='button'], a[role='button'], a"
 ACCOUNT_SELECTOR = "[data-identifier], [data-email], [role='link'], [role='button']"
@@ -792,7 +793,13 @@ def create_muse_chrome_driver(profile: Path, download_dir: Path | None = None):
             },
         )
     options.page_load_strategy = "eager"
-    return webdriver.Chrome(options=options)
+    # Selenium Manager/ChromeDriver uses a shared cache under the Windows user
+    # profile. Starting two instances at the exact same time can race in that
+    # cache and leave one or both sessions with a dead driver even though the
+    # Chrome windows appeared briefly. Only driver creation is serialized;
+    # the three browser sessions still log in and run jobs concurrently.
+    with _MUSE_DRIVER_START_LOCK:
+        return webdriver.Chrome(options=options)
 
 
 def muse_native_browser_command(executable: str | Path, profile: Path, start_url: str) -> list[str]:

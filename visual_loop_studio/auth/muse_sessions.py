@@ -675,7 +675,12 @@ class MuseSessionManager:
                         self._preserve_driver_if_open,
                         session,
                     )
-                if not keep_open:
+                    # Never let a temporary Selenium/navigation error close an
+                    # interactive login window. If the driver is truly dead,
+                    # mark it closed and let a later relogin replace it.
+                    if not keep_open:
+                        session.driver_open = False
+                else:
                     await self._loop.run_in_executor(session.executor, self._quit_driver, session)
                 message = str(exc) if isinstance(exc, MuseSessionError) else (
                     "Chrome/driver của phiên Muse đã dừng hoặc không phản hồi; có thể khởi động lại riêng phiên này."
@@ -857,6 +862,7 @@ class MuseSessionManager:
         actions: set[tuple[str, str]] = set()
         manual_mode = False
         idle_polls = 0
+        driver_error_polls = 0
         started = self._clock()
 
         def inspect_login() -> bool:
@@ -866,7 +872,9 @@ class MuseSessionManager:
             try:
                 handles = {str(handle) for handle in driver.window_handles}
             except Exception:
-                raise MuseSessionError("Chrome/driver của phiên Muse đã đóng bất ngờ.") from None
+                raise MuseSessionTransientError(
+                    "Chrome/driver tạm thời không phản hồi trong lúc chuyển trang đăng nhập."
+                ) from None
             new_handles = handles - session.known_handles
             session.known_handles.update(new_handles)
             session.owned_handles.update(new_handles)
@@ -1114,16 +1122,59 @@ class MuseSessionManager:
                                     )
             return False
 
+        def inspect_login_resilient() -> bool:
+            nonlocal driver_error_polls
+            try:
+                result = inspect_login()
+            except MuseSessionTransientError:
+                if driver_error_polls < 8 and self._preserve_driver_if_open(session):
+                    driver_error_polls += 1
+                    self._set_state(
+                        session,
+                        MuseSessionState.OPENING,
+                        status_message="Chrome đang chuyển trang đăng nhập; tool đang kết nối lại…",
+                    )
+                    return False
+                raise MuseSessionError(
+                    "Chrome/driver của phiên Muse không còn phản hồi; cửa sổ sẽ không bị tool tự đóng. "
+                    "Hãy bấm đăng nhập lại riêng tài khoản này."
+                ) from None
+            except MuseSessionError:
+                raise
+            except Exception:
+                # Chrome can briefly reject commands while Google swaps the
+                # sign-in document or redirects from YouTube to ManageAccount.
+                # Keep the owned window alive and retry instead of tearing down
+                # all profile sessions after one transient command failure.
+                if driver_error_polls < 8 and self._preserve_driver_if_open(session):
+                    driver_error_polls += 1
+                    self._set_state(
+                        session,
+                        MuseSessionState.OPENING,
+                        status_message="Chrome đang chuyển trang đăng nhập; tool đang kết nối lại…",
+                    )
+                    return False
+                raise MuseSessionError(
+                    "Chrome/driver của phiên Muse không còn phản hồi; cửa sổ sẽ không bị tool tự đóng. "
+                    "Hãy bấm đăng nhập lại riêng tài khoản này."
+                ) from None
+            driver_error_polls = 0
+            return result
+
         while True:
             self._check_stopped(session)
-            if inspect_login():
+            if inspect_login_resilient():
                 return
             elapsed = self._clock() - started
             # Security steps remain open until the user completes them or presses Stop.
             if not manual_mode and elapsed >= self.login_timeout:
                 raise MuseSessionTimeout("Đăng nhập Muse đã hết thời gian chờ.")
             try:
-                self._wait_until(session.driver, inspect_login, min(5.0, max(0.1, self.login_timeout)))
+                self._wait_until(
+                    session.driver,
+                    inspect_login_resilient,
+                    min(5.0, max(0.1, self.login_timeout)),
+                )
                 return
             except MuseSessionTimeout:
                 # Poll in bounded WebDriverWait chunks so Stop stays responsive;
