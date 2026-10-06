@@ -666,10 +666,11 @@ class MuseVideoAutomation:
         if not pending:
             return results
 
-        if any(not job.result_session_fingerprint for job, _context in pending):
-            primary.log(
-                f"Đang tìm đủ {expected} video nằm dưới đúng prompt để tải trực tiếp trước."
-            )
+        primary.log(
+            f"Đang tìm đủ {expected} video nằm dưới đúng prompt để tải trực tiếp trước."
+        )
+        videos = []
+        try:
             videos = self._wait_for_distinct_videos(
                 driver,
                 expected=expected,
@@ -678,13 +679,16 @@ class MuseVideoAutomation:
                 context=primary,
                 baseline_sessions=set(jobs[0].baseline_session_fingerprints),
             )
+        except Exception:
+            videos = []
+        if isinstance(videos, list) and videos:
             video_by_job_id = {
                 job.job_id: video for job, video in zip(jobs, videos)
             }
             direct_pairs = [
                 (job, context, video_by_job_id[job.job_id])
                 for job, context in pending
-                if job.job_id in video_by_job_id and not job.result_session_fingerprint
+                if job.job_id in video_by_job_id
             ]
             if direct_pairs:
                 direct_results = self._download_chat_videos(
@@ -1371,7 +1375,28 @@ class MuseVideoAutomation:
                 if matched is not None:
                     return matched
                 if wanted_text:
-                    return next((session for session in sessions if session.text == wanted_text), False)
+                    matched = next((session for session in sessions if session.text == wanted_text), None)
+                    if matched is not None:
+                        return matched
+                    clock_match = re.search(r"\b\d{1,2}:\d{2}(?:\s*[ap]m)?\b", wanted_text, re.IGNORECASE)
+                    if clock_match:
+                        time_str = clock_match.group(0).lower()
+                        matched = next((s for s in sessions if time_str in s.text.lower()), None)
+                        if matched is not None:
+                            return matched
+                unclaimed = [
+                    s for s in sessions
+                    if s.fingerprint not in baseline
+                    and s.fingerprint not in claimed_fingerprints
+                ]
+                if unclaimed:
+                    unclaimed.sort(
+                        key=lambda s: (
+                            s.completed_epoch_ms or (2 ** 63 - 1),
+                            -s.visual_index,
+                        )
+                    )
+                    return unclaimed[0]
                 return False
             sessions = [
                 session
@@ -1595,6 +1620,7 @@ class MuseVideoAutomation:
                 "const visible=e=>{if(!e)return false;const r=e.getBoundingClientRect();const s=getComputedStyle(e);"
                 "return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';};"
                 "const norm=s=>(s||'').replace(/\\s+/g,' ').trim().toLowerCase();"
+                "const reg=/download|tải\\s*xuống|save/i;"
                 "const isDownload=e=>{"
                 "if(!visible(e))return false;"
                 "const t=norm(e.innerText||e.textContent);"
@@ -1715,20 +1741,34 @@ class MuseVideoAutomation:
                 except Exception as exc:
                     raise MuseVideoDownloadError("Không click được Download của card MP4 trong Summary.") from exc
         else:
-            # Fallback: Kiểm tra xem thẻ <video> preview ngay trong modal Summary có src video để tải không
-            context.log("Không thấy menu Download từ nút 3 chấm; đang thử tải trực tiếp từ thẻ video trong Summary…")
+            # Fallback: Kiểm tra xem thẻ <video> preview ngay trong modal Summary hoặc trên trang có src video để tải không
+            context.log("Không thấy menu Download từ nút 3 chấm; đang thử tải trực tiếp từ thẻ video…")
             downloaded_direct = False
             try:
                 downloaded_direct = bool(
                     driver.execute_script(
-                        "const headings=[...document.querySelectorAll('h1,h2,h3,h4,[role=\"heading\"],div,span')]"
-                        ".filter(e=>(e.innerText||e.textContent||'').trim().toLowerCase()==='summary');"
-                        "let root=headings.length?headings[headings.length-1].closest('[role=\"dialog\"],[aria-modal=\"true\"],dialog'):null;"
-                        "if(!root)root=document.querySelector('[role=\"dialog\"],[aria-modal=\"true\"],dialog')||document.body;"
-                        "const video=root.querySelector('video');"
-                        "if(!video)return false;"
-                        "const src=String(video.currentSrc||video.src||(video.querySelector('source')&&video.querySelector('source').src)||'').trim();"
-                        "if(!src||!/^(blob:|https?:)/i.test(src)||/^data:image/i.test(src))return false;"
+                        "const mediaSrc=v=>String(v.currentSrc||v.src||(v.querySelector&&v.querySelector('source')&&v.querySelector('source').src)||'').trim();"
+                        "const isImageSrc=s=>!s||/^data:image[/]/i.test(s)||/^https?:.*\\.(png|jpe?g|webp|gif)(?:[?#]|$)/i.test(s);"
+                        "const isBotOrAvatar=v=>{"
+                        "if(!v)return true;"
+                        "const s=mediaSrc(v).toLowerCase();"
+                        "if(/(avatar|mascot|muse[-_]?bot|icon|reaction|subagent|status[-_]?anim|thinking|loading[-_]anim|placeholders?|animations?|assets?\\/static)/i.test(s))return true;"
+                        "const bad='header,nav,aside,[data-testid*=\"avatar\" i],[class*=\"avatar\" i],[data-testid*=\"mascot\" i],[class*=\"mascot\" i],[data-testid*=\"loading\" i],[class*=\"loading\" i],[class*=\"thinking\" i],[class*=\"reaction\" i],[class*=\"badge\" i],[class*=\"status\" i],[class*=\"indicator\" i],[data-testid*=\"subagent\" i],[class*=\"subagent\" i],[data-testid*=\"placeholder\" i],[class*=\"placeholder\" i]';"
+                        "if(v.matches&&v.matches(bad))return true;"
+                        "if(v.closest&&v.closest(bad))return true;"
+                        "const r=v.getBoundingClientRect?v.getBoundingClientRect():null;"
+                        "if(r&&r.width>0&&r.height>0&&(r.width<160||r.height<160))return true;"
+                        "if(v.videoWidth>0&&v.videoHeight>0&&(v.videoWidth<280&&v.videoHeight<280))return true;"
+                        "if(v.videoWidth>0&&v.videoHeight>0&&v.videoWidth===v.videoHeight&&v.duration>0&&v.duration<6.5)return true;"
+                        "if(v.duration>0&&Math.abs(v.duration-5.04)<0.25)return true;"
+                        "if(v.loop&&!v.controls)return true;"
+                        "if(v.autoplay&&v.muted&&!v.controls)return true;"
+                        "return false;};"
+                        "const isMediaVideo=v=>Boolean(mediaSrc(v)&&!isImageSrc(mediaSrc(v))&&/^(blob:|https?:)/i.test(mediaSrc(v))&&!isBotOrAvatar(v));"
+                        "const videos=[...document.querySelectorAll('video')].filter(isMediaVideo);"
+                        "if(!videos.length)return false;"
+                        "const v=videos[videos.length-1];"
+                        "const src=mediaSrc(v);"
                         "const a=document.createElement('a');a.href=src;a.download='muse-video.mp4';"
                         "a.style.display='none';document.body.appendChild(a);a.click();a.remove();return true;"
                     )
@@ -1736,7 +1776,7 @@ class MuseVideoAutomation:
             except Exception:
                 downloaded_direct = False
             if not downloaded_direct:
-                raise MuseVideoDownloadError("Không click được nút Download và không lấy được video preview trong modal Summary.")
+                raise MuseVideoDownloadError("Không click được nút Download và không lấy được video preview để tải.")
 
         previous: tuple[Path, int] | None = None
         stable = 0
