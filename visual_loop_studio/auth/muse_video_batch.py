@@ -739,7 +739,6 @@ class MuseVideoAutomation:
                     context=primary,
                     claimed=claimed_sess,
                 )
-                claimed_sess.add(session.fingerprint)
                 artifacts = self._open_summary_and_wait_for_all_mp4(
                     driver,
                     session=session,
@@ -818,6 +817,7 @@ class MuseVideoAutomation:
                     primary.log(
                         f"Session {session.text[:40]} không có MP4 mới chưa tải; bỏ qua để kiểm tra session khác."
                     )
+                    claimed_sess.add(session.fingerprint)
                     continue
                 if all(
                     item.fingerprint in claimed_artifacts or item.fingerprint in claimed_fps
@@ -1609,18 +1609,20 @@ class MuseVideoAutomation:
         context: MuseVideoRunContext,
     ) -> list[MuseSummaryArtifact]:
         """Open one tick-complete session and wait until its MP4 card list is stable."""
-        try:
-            driver.execute_script(
-                "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
-                session.element,
-            )
-        except Exception:
+        current_artifacts = self._summary_mp4_artifacts(driver)
+        if not current_artifacts:
             try:
-                session.element.click()
-            except Exception as exc:
-                raise MuseVideoDownloadError(
-                    "Không mở được Chat Session có dấu tick Complete để đọc Summary."
-                ) from exc
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});arguments[0].click();",
+                    session.element,
+                )
+            except Exception:
+                try:
+                    session.element.click()
+                except Exception as exc:
+                    raise MuseVideoDownloadError(
+                        "Không mở được Chat Session có dấu tick Complete để đọc Summary."
+                    ) from exc
 
         previous: tuple[str, ...] = ()
         stable_reads = 0
@@ -1865,17 +1867,35 @@ class MuseVideoAutomation:
         try:
             driver.execute_script(
                 "/* VISUAL_LOOP_CLOSE_SUMMARY */"
-                "const visible=e=>{const r=e.getBoundingClientRect();const s=getComputedStyle(e);"
+                "const visible=e=>{if(!e)return false;const r=e.getBoundingClientRect();const s=getComputedStyle(e);"
                 "return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';};"
                 "const norm=s=>(s||'').replace(/\\s+/g,' ').trim().toLowerCase();"
                 "const heading=[...document.querySelectorAll('h1,h2,h3,h4,[role=\\\"heading\\\"],div,span')]"
-                ".find(e=>visible(e)&&norm(e.innerText||e.textContent)==='summary');if(!heading)return false;"
-                "let root=heading.closest('[role=\\\"dialog\\\"]');if(!root){root=heading.parentElement;"
+                ".find(e=>visible(e)&&norm(e.innerText||e.textContent)==='summary');"
+                "if(heading){"
+                "let root=heading.closest('[role=\\\"dialog\\\"],[aria-modal=\\\"true\\\"],dialog');"
+                "if(!root){root=heading.parentElement;"
                 "while(root&&root!==document.body&&!root.querySelector('button[data-testid*=\"sandbox-file-card-options\" i],button[data-testid*=\"options\" i],button[aria-label*=\"options\" i]'))"
-                "root=root.parentElement;}if(!root)return false;"
-                "const close=[...root.querySelectorAll('button')].find(e=>visible(e)&&"
-                "/close|dismiss/i.test((e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||'')));"
-                "if(close){close.click();return true;}return false;"
+                "root=root.parentElement;}"
+                "if(root){"
+                "const buttons=[...root.querySelectorAll('button,[role=\"button\"]')].filter(visible);"
+                "const close=buttons.find(e=>{"
+                "const aria=(e.getAttribute('aria-label')||'').toLowerCase();"
+                "const title=(e.getAttribute('title')||'').toLowerCase();"
+                "const cls=(e.className||'').toString().toLowerCase();"
+                "if(/close|dismiss|cancel|exit|đóng|x/i.test(aria+' '+title+' '+cls))return true;"
+                "const svg=e.querySelector('svg');"
+                "if(svg){const d=(svg.querySelector('path')?.getAttribute('d')||'').toLowerCase();"
+                "if(/close|cross|x/i.test(svg.getAttribute('class')||'')||d.includes('m18 6')||d.includes('m6 18'))return true;}"
+                "return false;"
+                "});"
+                "if(close){close.click();}"
+                "}"
+                "}"
+                "try{document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true}));}catch(e){}"
+                "try{document.dispatchEvent(new KeyboardEvent('keyup',{key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true}));}catch(e){}"
+                "const backdrop=document.querySelector('[data-radix-portal] > [data-state=\"open\"],div[class*=\"backdrop\" i],div[class*=\"overlay\" i]');"
+                "if(backdrop&&visible(backdrop)){try{backdrop.click();}catch(e){}}"
             )
         except Exception:
             pass
@@ -2680,18 +2700,12 @@ class MuseVideoBatchManager:
                                 if j.result_fingerprint and j.job_id not in current_ids
                                 and (j.state == MuseVideoJobState.COMPLETED or (Path(j.output_path).is_file() and _valid_mp4(Path(j.output_path))))
                             }
-                            other_sessions = {
-                                j.result_session_fingerprint for j in self.jobs.values()
-                                if j.result_session_fingerprint and j.job_id not in current_ids and j.submission_size <= 1
-                                and (j.state == MuseVideoJobState.COMPLETED or (Path(j.output_path).is_file() and _valid_mp4(Path(job.output_path))))
-                            }
                             try:
                                 return recover_batch(
                                     session.driver,
                                     jobs,
                                     contexts,
                                     claimed_fingerprints=other_fps,
-                                    claimed_sessions=other_sessions,
                                 )
                             except TypeError:
                                 return recover_batch(session.driver, jobs, contexts)

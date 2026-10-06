@@ -1062,6 +1062,108 @@ class MuseVideoAutomationTests(unittest.TestCase):
             )
             self.assertTrue(all(Path(result).is_file() for result in recovered.values()))
 
+    def test_recover_multi_video_in_same_session_across_separate_calls(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            download_dir = root / "downloads"
+            driver = AutomationDriver(download_dir)
+            driver.split_summary_sessions = False
+            driver.fail_direct_download = True
+            automation = MuseVideoAutomation(poll_interval=0.01)
+
+            source1 = root / "source-1.png"
+            source1.write_bytes(b"image-1")
+            source2 = root / "source-2.png"
+            source2.write_bytes(b"image-2")
+
+            driver.previews = [
+                AutomationElement("preview-1", tag_name="img", attrs={"src": "blob:p1"}),
+                AutomationElement("preview-2", tag_name="img", attrs={"src": "blob:p2"}),
+            ]
+            driver._generated()
+
+            def transition1(state, **changes):
+                job1.state = state
+                for k, v in changes.items():
+                    if hasattr(job1, k):
+                        setattr(job1, k, v)
+
+            def transition2(state, **changes):
+                job2.state = state
+                for k, v in changes.items():
+                    if hasattr(job2, k):
+                        setattr(job2, k, v)
+
+            job1 = MuseVideoJob(
+                job_id="multi-job-1",
+                source_path=str(source1),
+                worker_id=1,
+                account_id="account-1",
+                email="owner@example.com",
+                prompt="prompt 1",
+                settings=MuseVideoSettings(),
+                output_path=str(root / "out-1.mp4"),
+                submission_group_id="group-1",
+                submission_index=0,
+                submission_size=1,
+                submitted=True,
+                submission_attempted=True,
+                submission_started_epoch_ms=10_000,
+            )
+            job2 = MuseVideoJob(
+                job_id="multi-job-2",
+                source_path=str(source2),
+                worker_id=1,
+                account_id="account-1",
+                email="owner@example.com",
+                prompt="prompt 2",
+                settings=MuseVideoSettings(),
+                output_path=str(root / "out-2.mp4"),
+                submission_group_id="group-2",
+                submission_index=0,
+                submission_size=1,
+                submitted=True,
+                submission_attempted=True,
+                submission_started_epoch_ms=10_000,
+            )
+            ctx1 = MuseVideoRunContext(
+                worker_id=1,
+                download_dir=download_dir,
+                stopped=lambda: False,
+                transition=transition1,
+                log=lambda _msg: None,
+                retry_limit=1,
+                backoff_base=0,
+            )
+            ctx2 = MuseVideoRunContext(
+                worker_id=1,
+                download_dir=download_dir,
+                stopped=lambda: False,
+                transition=transition2,
+                log=lambda _msg: None,
+                retry_limit=1,
+                backoff_base=0,
+            )
+
+            res1 = automation.recover_batch(driver, [job1], [ctx1])
+            self.assertTrue(Path(res1[job1.job_id]).is_file())
+            job1_fp = job1.result_fingerprint
+            self.assertTrue(job1_fp)
+
+            res2 = automation.recover_batch(
+                driver,
+                [job2],
+                [ctx2],
+                claimed_fingerprints={job1_fp},
+            )
+            self.assertTrue(Path(res2[job2.job_id]).is_file())
+            self.assertTrue(job2.result_fingerprint)
+            self.assertNotEqual(job1.result_fingerprint, job2.result_fingerprint)
+            self.assertNotEqual(
+                Path(res1[job1.job_id]).read_bytes(),
+                Path(res2[job2.job_id]).read_bytes(),
+            )
+
     def test_different_tabs_do_not_share_summary_download_lock(self):
         with tempfile.TemporaryDirectory() as folder:
             automation = MuseVideoAutomation(poll_interval=0.01)
