@@ -2021,7 +2021,10 @@ class MuseVideoAutomation:
                 "const r=v.getBoundingClientRect?v.getBoundingClientRect():null;"
                 "if(r&&r.width>0&&r.height>0&&(r.width<160||r.height<160))return true;"
                 "if(v.videoWidth>0&&v.videoHeight>0&&(v.videoWidth<280&&v.videoHeight<280))return true;"
-                "if(v.loop&&v.duration>0&&v.duration<3.8&&!v.controls)return true;"
+                "if(v.videoWidth>0&&v.videoHeight>0&&v.videoWidth===v.videoHeight&&v.duration>0&&v.duration<6.5)return true;"
+                "if(v.duration>0&&Math.abs(v.duration-5.04)<0.25)return true;"
+                "if(v.loop&&!v.controls)return true;"
+                "if(v.autoplay&&v.muted&&!v.controls)return true;"
                 "return false;};"
                 "const isMediaVideo=v=>{"
                 "const s=mediaSrc(v);return Boolean(s&&!isImageSrc(s)&&/^(blob:|https?:)/i.test(s)&&!isBotOrAvatar(v));};"
@@ -2087,7 +2090,10 @@ class MuseVideoAutomation:
                     "const r=v.getBoundingClientRect?v.getBoundingClientRect():null;"
                     "if(r&&r.width>0&&r.height>0&&(r.width<160||r.height<160))return false;"
                     "if(v.videoWidth>0&&v.videoHeight>0&&(v.videoWidth<280&&v.videoHeight<280))return false;"
-                    "if(v.loop&&v.duration>0&&v.duration<3.8&&!v.controls)return false;"
+                    "if(v.videoWidth>0&&v.videoHeight>0&&v.videoWidth===v.videoHeight&&v.duration>0&&v.duration<6.5)return false;"
+                    "if(v.duration>0&&Math.abs(v.duration-5.04)<0.25)return false;"
+                    "if(v.loop&&!v.controls)return false;"
+                    "if(v.autoplay&&v.muted&&!v.controls)return false;"
                     "return (v.readyState>=2)||(v.duration>0)||Boolean(src);",
                     video,
                 )
