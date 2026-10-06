@@ -647,6 +647,9 @@ class MuseVideoAutomation:
         driver: Any,
         jobs: list[MuseVideoJob],
         contexts: list[MuseVideoRunContext],
+        *,
+        claimed_fingerprints: set[str] | None = None,
+        claimed_sessions: set[str] | None = None,
     ) -> dict[str, Path | BaseException]:
         """Recover a submitted group without sending the prompt again."""
         if not jobs or len(jobs) != len(contexts):
@@ -666,6 +669,9 @@ class MuseVideoAutomation:
         if not pending:
             return results
 
+        claimed_fps = set(claimed_fingerprints or set())
+        claimed_sess = set(claimed_sessions or set())
+
         primary.log(
             f"Đang tìm đủ {expected} video nằm dưới đúng prompt để tải trực tiếp trước."
         )
@@ -678,13 +684,18 @@ class MuseVideoAutomation:
                 anchor=self._anchor_from_job(jobs[0]),
                 context=primary,
                 baseline_sessions=set(jobs[0].baseline_session_fingerprints),
+                claimed_fingerprints=claimed_fps,
             )
         except Exception:
             videos = []
         if isinstance(videos, list) and videos:
-            video_by_job_id = {
-                job.job_id: video for job, video in zip(jobs, videos)
-            }
+            if len(jobs) == 1 and len(videos) > 1:
+                target_idx = min(max(0, jobs[0].submission_index), len(videos) - 1)
+                video_by_job_id = {jobs[0].job_id: videos[target_idx]}
+            else:
+                video_by_job_id = {
+                    job.job_id: video for job, video in zip(jobs, videos)
+                }
             direct_pairs = [
                 (job, context, video_by_job_id[job.job_id])
                 for job, context in pending
@@ -712,7 +723,6 @@ class MuseVideoAutomation:
         )
 
         baseline = set(jobs[0].baseline_session_fingerprints)
-        claimed_sessions: set[str] = set()
         summary_lock = self._summary_lock_for(driver)
         summary_lock.acquire()
         try:
@@ -727,9 +737,9 @@ class MuseVideoAutomation:
                     wanted_text=wanted_text,
                     started_epoch_ms=first_job.submission_started_epoch_ms,
                     context=primary,
-                    claimed=claimed_sessions,
+                    claimed=claimed_sess,
                 )
-                claimed_sessions.add(session.fingerprint)
+                claimed_sess.add(session.fingerprint)
                 artifacts = self._open_summary_and_wait_for_all_mp4(
                     driver,
                     session=session,
@@ -753,18 +763,21 @@ class MuseVideoAutomation:
                                 for item in artifacts
                                 if item.fingerprint == job.result_fingerprint
                                 and item.fingerprint not in claimed_artifacts
+                                and item.fingerprint not in claimed_fps
                             ),
                             None,
                         )
                         if artifact is None:
-                            artifact = next(
-                                (
-                                    item
-                                    for item in artifacts
-                                    if item.fingerprint not in claimed_artifacts
-                                ),
-                                None,
-                            )
+                            unclaimed = [
+                                item for item in artifacts
+                                if item.fingerprint not in claimed_artifacts
+                                and item.fingerprint not in claimed_fps
+                            ]
+                            if unclaimed:
+                                if 0 <= job.submission_index < len(unclaimed):
+                                    artifact = unclaimed[job.submission_index]
+                                else:
+                                    artifact = unclaimed[0]
                         if artifact is None:
                             if wanted_fingerprint or wanted_text:
                                 results[job.job_id] = MuseVideoDownloadError(
@@ -773,6 +786,7 @@ class MuseVideoAutomation:
                                 processed.append((job, context))
                             break
                         claimed_artifacts.add(artifact.fingerprint)
+                        claimed_fps.add(artifact.fingerprint)
                         context.transition(
                             MuseVideoJobState.DOWNLOADING,
                             progress=90,
@@ -801,9 +815,15 @@ class MuseVideoAutomation:
                 finally:
                     self._close_summary(driver)
                 if not processed:
-                    raise MuseVideoDownloadError(
-                        "Chat Session Complete không có MP4 chưa tải phù hợp với lượt đang khôi phục."
+                    primary.log(
+                        f"Session {session.text[:40]} không có MP4 mới chưa tải; bỏ qua để kiểm tra session khác."
                     )
+                    continue
+                if all(
+                    item.fingerprint in claimed_artifacts or item.fingerprint in claimed_fps
+                    for item in artifacts
+                ):
+                    claimed_sess.add(session.fingerprint)
                 processed_ids = {job.job_id for job, _context in processed}
                 pending = [pair for pair in pending if pair[0].job_id not in processed_ids]
             primary.log("Đã khôi phục và tải đủ MP4 theo từng Chat Session Complete.")
@@ -820,10 +840,12 @@ class MuseVideoAutomation:
         anchor: MuseSubmissionAnchor,
         context: MuseVideoRunContext,
         baseline_sessions: set[str] | None = None,
+        claimed_fingerprints: set[str] | None = None,
     ) -> list[Any]:
         transient_retries = 0
         session_ready = object()
         session_seen_at: float | None = None
+        claimed = set(claimed_fingerprints or set())
 
         def find_results():
             nonlocal transient_retries, session_seen_at
@@ -847,15 +869,17 @@ class MuseVideoAutomation:
             # not merely to matching prompt text (which is often repeated).
             for video in self._videos_after_submission(driver, anchor):
                 fingerprint = _video_fingerprint(video)
-                if fingerprint in baseline or fingerprint in seen or not self._video_ready(driver, video):
+                if (
+                    fingerprint in baseline
+                    or fingerprint in seen
+                    or fingerprint in claimed
+                    or not self._video_ready(driver, video)
+                ):
                     continue
                 seen.add(fingerprint)
                 values.append(video)
-            # Muse can lazily mount old cards while a new generation is running.
-            # Keep the newest ready results from this Send-time watch instead of
-            # taking older nodes that happen to occur first in DOM order.
             if len(values) >= expected:
-                return values[-expected:]
+                return values
             if baseline_sessions is not None:
                 sessions = self._completed_sessions(driver)
                 if anchor.started_epoch_ms > 0:
@@ -1357,7 +1381,7 @@ class MuseVideoAutomation:
     ) -> MuseCompletedSession:
         """Wait for the earliest unclaimed tick-complete session after Send."""
 
-        claimed_fingerprints = claimed if claimed is not None else set()
+        claimed_fingerprints = set(claimed) if claimed is not None else set()
 
         def find_session():
             self._check(driver, context)
@@ -1386,7 +1410,14 @@ class MuseVideoAutomation:
                     clock_match = re.search(r"\b\d{1,2}:\d{2}(?:\s*[ap]m)?\b", wanted_text, re.IGNORECASE)
                     if clock_match:
                         time_str = clock_match.group(0).lower()
-                        matched = next((s for s in sessions if time_str in s.text.lower()), None)
+                        matched = next(
+                            (
+                                s for s in sessions
+                                if time_str in s.text.lower()
+                                and s.fingerprint not in claimed_fingerprints
+                            ),
+                            None,
+                        )
                         if matched is not None:
                             return matched
                 unclaimed = [
@@ -2642,8 +2673,28 @@ class MuseVideoBatchManager:
                     self.session_manager.activate_selected_muse_tab(session.session_id)
                     if jobs[0].submitted or jobs[0].submission_attempted:
                         recover_batch = getattr(self.automation, "recover_batch", None)
-                        if jobs[0].submission_group_id and callable(recover_batch):
-                            return recover_batch(session.driver, jobs, contexts)
+                        if callable(recover_batch):
+                            current_ids = {j.job_id for j in jobs}
+                            other_fps = {
+                                j.result_fingerprint for j in self.jobs.values()
+                                if j.result_fingerprint and j.job_id not in current_ids
+                                and (j.state == MuseVideoJobState.COMPLETED or (Path(j.output_path).is_file() and _valid_mp4(Path(j.output_path))))
+                            }
+                            other_sessions = {
+                                j.result_session_fingerprint for j in self.jobs.values()
+                                if j.result_session_fingerprint and j.job_id not in current_ids and j.submission_size <= 1
+                                and (j.state == MuseVideoJobState.COMPLETED or (Path(j.output_path).is_file() and _valid_mp4(Path(job.output_path))))
+                            }
+                            try:
+                                return recover_batch(
+                                    session.driver,
+                                    jobs,
+                                    contexts,
+                                    claimed_fingerprints=other_fps,
+                                    claimed_sessions=other_sessions,
+                                )
+                            except TypeError:
+                                return recover_batch(session.driver, jobs, contexts)
                         values: dict[str, Path | BaseException] = {}
                         for job, context in zip(jobs, contexts):
                             values[job.job_id] = self.automation.process(session.driver, job, context)
@@ -3119,7 +3170,39 @@ class MuseVideoBatchManager:
                 elif worker.queue:
                     worker.state = MuseVideoWorkerState.PAUSED
             self._sync_assigned_from_queues_locked()
+            self._sanitize_and_seed_claimed_artifacts_locked()
             self._persist_locked()
+
+    def _sanitize_and_seed_claimed_artifacts_locked(self) -> None:
+        """Sanitize any duplicate video assignments across completed jobs."""
+        seen_fps: dict[str, MuseVideoJob] = {}
+        for job in list(self.jobs.values()):
+            if not job.result_fingerprint:
+                continue
+            has_valid_output = Path(job.output_path).is_file() and _valid_mp4(Path(job.output_path))
+            if job.state != MuseVideoJobState.COMPLETED and not has_valid_output:
+                continue
+            fp = job.result_fingerprint
+            if fp in seen_fps:
+                out = Path(job.output_path)
+                if out.is_file():
+                    try:
+                        out.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                job.result_fingerprint = ""
+                job.result_session_fingerprint = ""
+                job.result_session_text = ""
+                job.state = MuseVideoJobState.SUBMITTED if job.submitted else MuseVideoJobState.PENDING
+                job.completed_at = ""
+                job.error = ""
+                worker = self.workers.get(job.worker_id)
+                if worker and job.job_id not in worker.queue:
+                    worker.queue.append(job.job_id)
+                    if worker.state == MuseVideoWorkerState.COMPLETED:
+                        worker.state = MuseVideoWorkerState.PAUSED
+            else:
+                seen_fps[fp] = job
 
     def _persist_locked(self) -> None:
         write_json(
