@@ -260,6 +260,19 @@ class AutomationDriver:
         self.new_user_message = None
         self.video_poll_delay = 0
         self.video_poll_count = 0
+        self.session_poll_delay = 0
+        self.session_poll_count = 0
+        self.session_clicks = []
+        self.old_session = AutomationElement(
+            "old-session",
+            text="Rendered old video 8:44 am",
+            attrs={"data-testid": "timeline-session-old"},
+            click=lambda: self._open_session("old-session"),
+        )
+        self.new_session = None
+        self.summary_open = False
+        self.summary_artifacts = []
+        self.active_summary_artifact = None
         self.watch_started = []
         self.watch_stopped = []
         self.uploaded = ""
@@ -267,6 +280,7 @@ class AutomationDriver:
         self.generate_clicks = 0
         self.downloaded_video_id = ""
         self.downloaded_video_ids = []
+        self.downloaded_json_ids = []
         self.get_calls = 0
         self.executed_scripts = []
         self.body = AutomationElement("body")
@@ -278,6 +292,10 @@ class AutomationDriver:
         )
         self.prompt = AutomationElement("prompt", tag_name="textarea")
         self.generate = AutomationElement("generate", text="Generate", tag_name="button", click=self._generated)
+
+    def _open_session(self, session_id):
+        self.session_clicks.append(str(session_id))
+        self.summary_open = True
 
     def get(self, _url):
         self.get_calls += 1
@@ -314,6 +332,51 @@ class AutomationDriver:
             )
             for index in range(1, len(self.previews) + 1)
         ]
+        self.summary_artifacts = []
+        for index in range(1, len(self.previews) + 1):
+            artifact = AutomationElement(
+                f"summary-mp4-{index}",
+                text=f"media-generation-{index}.mp4 MP4",
+                tag_name="button",
+                attrs={
+                    "aria-label": "More options",
+                    "data-testid": "sandbox-file-card-options",
+                },
+                click=lambda _index=index: setattr(self, "active_summary_artifact", _index),
+            )
+            self.summary_artifacts.append(artifact)
+            if index == 1:
+                self.summary_artifacts.append(
+                    AutomationElement(
+                        "summary-json-1",
+                        text="media-generation-1.json JSON",
+                        tag_name="button",
+                        attrs={
+                            "aria-label": "More options",
+                            "data-testid": "sandbox-file-card-options",
+                        },
+                        click=lambda: self.downloaded_json_ids.append("summary-json-1"),
+                    )
+                )
+        self.new_session = AutomationElement(
+            f"new-session-{self.generate_clicks}",
+            text=f"Generated {len(self.previews)} gentle motion videos 10:49 am",
+            attrs={"data-testid": f"timeline-session-{self.generate_clicks}"},
+            click=lambda: self._open_session(f"new-session-{self.generate_clicks}"),
+        )
+
+    def _download_active_summary_artifact(self):
+        index = int(self.active_summary_artifact or 0)
+        if index <= 0:
+            return
+        artifact_id = f"summary-mp4-{index}"
+        self.downloaded_video_id = artifact_id
+        self.downloaded_video_ids.append(artifact_id)
+        self.download_dir.mkdir(parents=True, exist_ok=True)
+        (self.download_dir / f"download-{artifact_id}.mp4").write_bytes(
+            b"\x00\x00\x00\x18ftypmp42" + artifact_id.encode()
+        )
+        self.active_summary_artifact = None
 
     def find_elements(self, by, selector):
         if by == "tag name" and selector == "body":
@@ -337,6 +400,59 @@ class AutomationDriver:
 
     def execute_script(self, script, *args):
         self.executed_scripts.append(str(script))
+        if "VISUAL_LOOP_BROWSER_EPOCH" in script:
+            return 1_700_000_000_000
+        if "VISUAL_LOOP_GENERATION_IN_PROGRESS" in script:
+            if self.new_session is not None and self.session_poll_count < self.session_poll_delay:
+                self.session_poll_count += 1
+                return True
+            return False
+        if "VISUAL_LOOP_COMPLETED_SESSION_SNAPSHOT" in script:
+            sessions = [self.old_session]
+            if self.new_session is not None:
+                self.session_poll_count += 1
+                if self.session_poll_count > self.session_poll_delay:
+                    sessions.insert(0, self.new_session)
+            return [
+                {
+                    "element": item,
+                    "index": index,
+                    "top": index * 80,
+                    "text": item.text,
+                    "key": item.get_attribute("data-testid"),
+                    "epoch_ms": 1_700_000_060_000 if item is self.new_session else 1_699_999_000_000,
+                }
+                for index, item in enumerate(sessions)
+            ]
+        if "VISUAL_LOOP_SUMMARY_MP4_ARTIFACTS" in script:
+            if not self.summary_open:
+                return []
+            return [
+                {
+                    "element": item,
+                    "index": index,
+                    "text": item.text,
+                }
+                for index, item in enumerate(self.summary_artifacts)
+            ]
+        if "VISUAL_LOOP_SUMMARY_DOWNLOAD_ACTION" in script:
+            if self.active_summary_artifact is None:
+                return None
+            return AutomationElement(
+                "summary-download",
+                text="Download",
+                tag_name="button",
+                click=self._download_active_summary_artifact,
+            )
+        if "VISUAL_LOOP_CLOSE_SUMMARY" in script:
+            self.summary_open = False
+            return True
+        if "scrollIntoView" in script and args:
+            args[0].click()
+            return True
+        if script.strip() == "arguments[0].click();" and args:
+            args[0].click()
+            return True
         if "VISUAL_LOOP_INSTALL_VIDEO_WATCH" in script:
             self.watch_started.append(str(args[0]))
             return 1_700_000_000_000
@@ -429,7 +545,7 @@ class MuseVideoAutomationTests(unittest.TestCase):
             download_dir = root / "downloads"
             target = root / "output" / "result.mp4"
             driver = AutomationDriver(download_dir)
-            driver.video_poll_delay = 2
+            driver.session_poll_delay = 2
             job = MuseVideoJob(
                 job_id="job-1",
                 source_path=str(source),
@@ -470,14 +586,18 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertEqual(driver.uploaded, str(source.resolve()))
             self.assertEqual(driver.prompt.value, "make a cinematic video")
             self.assertEqual(driver.generate_clicks, 1)
-            self.assertGreaterEqual(driver.video_poll_count, 3)
-            self.assertEqual(driver.downloaded_video_id, "new-video-1")
+            self.assertGreaterEqual(driver.session_poll_count, 3)
+            self.assertEqual(driver.downloaded_video_id, "summary-mp4-1")
+            self.assertEqual(driver.downloaded_json_ids, [])
+            self.assertEqual(driver.session_clicks, ["new-session-1"])
             self.assertEqual(job.submission_message_id, "new-message-id-1")
             self.assertEqual(job.submission_message_group_id, "new-message-group-1")
             self.assertEqual(job.submission_message_index, 1)
             self.assertEqual(job.baseline_message_ids, ["old-message-id"])
             self.assertEqual(job.submission_started_epoch_ms, 1_700_000_000_000)
-            self.assertEqual(driver.watch_started, driver.watch_stopped)
+            self.assertTrue(job.baseline_session_fingerprints)
+            self.assertTrue(job.result_session_fingerprint)
+            self.assertIn("Generated 1", job.result_session_text)
             self.assertEqual(result, target)
             self.assertTrue(target.is_file())
             self.assertIn(MuseVideoJobState.SUBMITTED, transitions)
@@ -535,9 +655,10 @@ class MuseVideoAutomationTests(unittest.TestCase):
             ).process(driver, job, context)
 
             self.assertEqual(result, target)
-            self.assertEqual(driver.downloaded_video_id, "new-video-1")
+            self.assertEqual(driver.downloaded_video_id, "summary-mp4-1")
             self.assertTrue(all("querySelectorAll(sel)" not in script for script in driver.executed_scripts))
             self.assertNotIn("unrelated-video", driver.downloaded_video_ids)
+            self.assertEqual(driver.downloaded_json_ids, [])
 
     def test_submits_three_images_once_and_downloads_three_distinct_videos_in_order(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -592,8 +713,9 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertEqual(driver.uploaded_paths, [str(Path(job.source_path).resolve()) for job in jobs])
             self.assertEqual(
                 driver.downloaded_video_ids,
-                ["new-video-1", "new-video-2", "new-video-3"],
+                ["summary-mp4-1", "summary-mp4-2", "summary-mp4-3"],
             )
+            self.assertEqual(driver.downloaded_json_ids, [])
             self.assertEqual(set(results), {job.job_id for job in jobs})
             self.assertTrue(all(Path(result).is_file() for result in results.values()))
             self.assertEqual(len({Path(result).read_bytes() for result in results.values()}), 3)
@@ -609,7 +731,7 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertEqual(driver.generate_clicks, 1)
             self.assertEqual(
                 driver.downloaded_video_ids,
-                ["new-video-1", "new-video-2", "new-video-3"],
+                ["summary-mp4-1", "summary-mp4-2", "summary-mp4-3"],
             )
             self.assertTrue(all(Path(result).is_file() for result in recovered.values()))
             self.assertEqual(len({Path(result).read_bytes() for result in recovered.values()}), 3)
