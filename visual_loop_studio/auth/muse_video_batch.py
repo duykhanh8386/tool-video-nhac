@@ -430,10 +430,8 @@ class MuseVideoAutomation:
         self.upload_timeout = max(0.1, float(upload_timeout))
         self.download_timeout = max(0.1, float(download_timeout))
         self.poll_interval = max(0.02, float(poll_interval))
-        # Rendering may run concurrently in isolated profiles, but Summary UI
-        # interaction is intentionally serialized so one tab is fully drained
-        # before automation starts clicking a different tab.
-        self._summary_download_lock = threading.Lock()
+        self._summary_locks_guard = threading.Lock()
+        self._summary_locks: dict[int, threading.Lock] = {}
 
     def process(self, driver: Any, job: MuseVideoJob, context: MuseVideoRunContext) -> Path:
         existing = Path(job.output_path)
@@ -566,7 +564,7 @@ class MuseVideoAutomation:
             primary.log(
                 f"Đã gửi lúc {submitted_at}; đang chờ đủ {len(jobs)} video của đúng tin nhắn render xong."
             )
-            self._wait_for_distinct_videos(
+            videos = self._wait_for_distinct_videos(
                 driver,
                 expected=len(jobs),
                 baseline=set(baseline_videos),
@@ -579,105 +577,59 @@ class MuseVideoAutomation:
             self._stop_video_watch(driver, watch_token)
 
         primary.log(
-            "Video đã render đủ; đang chờ Chat Session có dấu tick Complete, "
-            "theo thứ tự gần thời điểm Send nhất."
+            "Video đã xuất hiện dưới đúng prompt; đang tải trực tiếp toàn bộ MP4 trong đoạn chat."
         )
-        return self._download_new_completed_sessions(
-            driver,
-            jobs=jobs,
-            contexts=contexts,
-            baseline=set(baseline_session_fingerprints),
-            started_epoch_ms=submission_started_epoch_ms,
+        direct_results = self._download_chat_videos(driver, jobs, contexts, videos)
+        if all(not isinstance(result, BaseException) for result in direct_results.values()):
+            primary.log("Đã tải đủ toàn bộ video nằm dưới prompt; không cần mở Chat Session.")
+            return direct_results
+        primary.log(
+            "Muse không cho tải trực tiếp ít nhất một video; chỉ lúc này mới dùng Chat Session "
+            "Complete có thời gian thuộc phút sau thời điểm Send."
         )
+        return self.recover_batch(driver, jobs, contexts)
 
-    def _acquire_summary_download_turn(self, driver: Any, context: MuseVideoRunContext) -> None:
-        waiting_logged = False
-        while not self._summary_download_lock.acquire(timeout=self.poll_interval):
-            self._check(driver, context)
-            if not waiting_logged:
-                context.log("Đang chờ tab trước tải hết MP4 rồi mới chuyển sang tab này…")
-                waiting_logged = True
-
-    def _download_new_completed_sessions(
+    def _download_chat_videos(
         self,
         driver: Any,
-        *,
         jobs: list[MuseVideoJob],
         contexts: list[MuseVideoRunContext],
-        baseline: set[str],
-        started_epoch_ms: int,
+        videos: list[Any],
     ) -> dict[str, Path | BaseException]:
-        """Drain tick-complete sessions chronologically, one browser tab at a time."""
-        primary = contexts[0]
-        claimed_sessions: set[str] = set()
+        """Download only videos found below the exact user message created by Send."""
         results: dict[str, Path | BaseException] = {}
-        output_index = 0
-        self._acquire_summary_download_turn(driver, primary)
-        try:
-            while output_index < len(jobs):
-                session = self._wait_for_completed_session(
+        for index, (job, context, video) in enumerate(zip(jobs, contexts, videos), start=1):
+            fingerprint = _video_fingerprint(video)
+            context.log(f"Đang tải video {index}/{len(jobs)} nằm dưới đúng prompt vừa gửi…")
+            context.transition(
+                MuseVideoJobState.DOWNLOADING,
+                progress=80 + round(index / len(jobs) * 15),
+                result_fingerprint=fingerprint,
+                download_attempts=job.download_attempts + 1,
+            )
+            try:
+                results[job.job_id] = self._download(
                     driver,
-                    baseline=baseline,
-                    wanted_fingerprint="",
-                    wanted_text="",
-                    started_epoch_ms=started_epoch_ms,
-                    context=primary,
-                    claimed=claimed_sessions,
+                    video,
+                    Path(job.output_path),
+                    context,
                 )
-                claimed_sessions.add(session.fingerprint)
-                primary.log(
-                    f"Mở Chat Session Complete gần mốc Send tiếp theo: {session.text or session.fingerprint[:12]}"
-                )
-                artifacts = self._open_summary_and_wait_for_all_mp4(
-                    driver,
-                    session=session,
-                    context=primary,
-                )
-                remaining = len(jobs) - output_index
-                if len(artifacts) > remaining:
-                    self._close_summary(driver)
-                    raise MuseVideoDownloadError(
-                        "Chat Session trả về nhiều MP4 hơn số video đang chờ; tool dừng để không bỏ sót hoặc ghép sai file."
-                    )
-                try:
-                    for artifact in artifacts:
-                        job = jobs[output_index]
-                        context = contexts[output_index]
-                        number = output_index + 1
-                        context.log(
-                            f"Đang tải MP4 {number}/{len(jobs)}; phải tải xong file này mới chuyển tiếp."
-                        )
-                        context.transition(
-                            MuseVideoJobState.DOWNLOADING,
-                            progress=82 + round(number / len(jobs) * 13),
-                            result_session_fingerprint=session.fingerprint,
-                            result_session_text=session.text,
-                            result_fingerprint=artifact.fingerprint,
-                            download_attempts=job.download_attempts + 1,
-                        )
-                        try:
-                            results[job.job_id] = self._download_summary_artifact(
-                                driver,
-                                artifact,
-                                Path(job.output_path),
-                                context,
-                            )
-                        except (
-                            MuseVideoStopped,
-                            MuseVideoLoginRequired,
-                            MuseVideoQuotaExhausted,
-                            MuseVideoDriverError,
-                        ):
-                            raise
-                        except BaseException as exc:
-                            results[job.job_id] = exc
-                        output_index += 1
-                finally:
-                    self._close_summary(driver)
-            primary.log("Đã tải đủ toàn bộ MP4 của các Chat Session Complete; tab hiện tại đã xong.")
-            return results
-        finally:
-            self._summary_download_lock.release()
+            except (
+                MuseVideoStopped,
+                MuseVideoLoginRequired,
+                MuseVideoQuotaExhausted,
+                MuseVideoDriverError,
+            ):
+                raise
+            except BaseException as exc:
+                results[job.job_id] = exc
+        return results
+
+    def _summary_lock_for(self, driver: Any) -> threading.Lock:
+        """Serialize one browser tab only; different Muse tabs remain concurrent."""
+        key = id(driver)
+        with self._summary_locks_guard:
+            return self._summary_locks.setdefault(key, threading.Lock())
 
     def recover_batch(
         self,
@@ -691,16 +643,7 @@ class MuseVideoAutomation:
         primary = contexts[0]
         self._check(driver, primary)
         expected = max(job.submission_size for job in jobs)
-        primary.log(f"Khôi phục lượt đã gửi gồm {expected} MP4 từ Summary; không bấm Send lần hai.")
-        if any(not job.result_session_fingerprint for job in jobs):
-            primary.log(f"Đang chờ đủ {expected} video của lượt đã gửi render xong trước khi mở Chat Session.")
-            self._wait_for_distinct_videos(
-                driver,
-                expected=expected,
-                baseline=set(jobs[0].baseline_videos),
-                anchor=self._anchor_from_job(jobs[0]),
-                context=primary,
-            )
+        primary.log(f"Khôi phục lượt đã gửi gồm {expected} MP4; không bấm Send lần hai.")
         results: dict[str, Path | BaseException] = {}
         pending: list[tuple[MuseVideoJob, MuseVideoRunContext]] = []
         for job, context in zip(jobs, contexts):
@@ -712,9 +655,50 @@ class MuseVideoAutomation:
         if not pending:
             return results
 
+        if any(not job.result_session_fingerprint for job, _context in pending):
+            primary.log(
+                f"Đang tìm đủ {expected} video nằm dưới đúng prompt để tải trực tiếp trước."
+            )
+            videos = self._wait_for_distinct_videos(
+                driver,
+                expected=expected,
+                baseline=set(jobs[0].baseline_videos),
+                anchor=self._anchor_from_job(jobs[0]),
+                context=primary,
+            )
+            video_by_job_id = {
+                job.job_id: video for job, video in zip(jobs, videos)
+            }
+            direct_pairs = [
+                (job, context, video_by_job_id[job.job_id])
+                for job, context in pending
+                if job.job_id in video_by_job_id and not job.result_session_fingerprint
+            ]
+            if direct_pairs:
+                direct_results = self._download_chat_videos(
+                    driver,
+                    [job for job, _context, _video in direct_pairs],
+                    [context for _job, context, _video in direct_pairs],
+                    [video for _job, _context, video in direct_pairs],
+                )
+                results.update(direct_results)
+                pending = [
+                    (job, context)
+                    for job, context in pending
+                    if not (Path(job.output_path).is_file() and _valid_mp4(Path(job.output_path)))
+                ]
+                if not pending:
+                    primary.log("Đã tải đủ MP4 trực tiếp từ các video dưới prompt.")
+                    return results
+
+        primary.log(
+            "Tải trực tiếp chưa thành công; đang chờ Chat Session tick Complete ở phút sau thời điểm Send."
+        )
+
         baseline = set(jobs[0].baseline_session_fingerprints)
         claimed_sessions: set[str] = set()
-        self._acquire_summary_download_turn(driver, primary)
+        summary_lock = self._summary_lock_for(driver)
+        summary_lock.acquire()
         try:
             while pending:
                 first_job, _first_context = pending[0]
@@ -809,7 +793,7 @@ class MuseVideoAutomation:
             primary.log("Đã khôi phục và tải đủ MP4 theo từng Chat Session Complete.")
             return results
         finally:
-            self._summary_download_lock.release()
+            summary_lock.release()
 
     def _wait_for_distinct_videos(
         self,
@@ -1187,7 +1171,10 @@ class MuseVideoAutomation:
             self._check(driver, context)
             sessions = self._completed_sessions(driver)
             if started_epoch_ms > 0:
-                cutoff = started_epoch_ms - (started_epoch_ms % 60_000)
+                # Sidebar timestamps have minute precision. Requiring the next
+                # minute is the only safe way to reject an older Complete card
+                # from the same displayed minute as the Send click.
+                cutoff = started_epoch_ms - (started_epoch_ms % 60_000) + 60_000
                 sessions = [
                     session
                     for session in sessions

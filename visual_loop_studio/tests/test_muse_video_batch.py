@@ -249,6 +249,7 @@ class AutomationDriver:
         self.new_videos = []
         self.unrelated_video = None
         self.inject_unrelated_on_generate = False
+        self.fail_direct_download = False
         self.old_user_message = AutomationElement(
             "old-user-message",
             text="make a cinematic video",
@@ -272,6 +273,7 @@ class AutomationDriver:
         )
         self.new_session = None
         self.new_sessions = []
+        self.late_old_session = None
         self.split_summary_sessions = False
         self.session_artifact_indices = {}
         self.current_summary_indices = []
@@ -459,7 +461,8 @@ class AutomationDriver:
             if self.new_session is not None:
                 self.session_poll_count += 1
                 if self.session_poll_count > self.session_poll_delay:
-                    sessions = [*self.new_sessions, *sessions]
+                    late_old = [self.late_old_session] if self.late_old_session is not None else []
+                    sessions = [*self.new_sessions, *late_old, *sessions]
             return [
                 {
                     "element": item,
@@ -471,6 +474,8 @@ class AutomationDriver:
                         1_700_000_060_000
                         + max(0, int(item.id.rsplit("-", 1)[-1]) - 1) * 60_000
                         if item in self.new_sessions
+                        else 1_700_000_000_000
+                        if item is self.late_old_session
                         else 1_699_999_000_000
                     ),
                 }
@@ -536,6 +541,8 @@ class AutomationDriver:
             return list(self.new_videos)
         video = args[0] if args else None
         if "document.querySelectorAll(sel)" in script or "a.download='muse-video.mp4'" in script:
+            if self.fail_direct_download:
+                return False
             source = str(video.get_attribute("src") or "").casefold()
             if source.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")) or source.startswith("data:image/"):
                 return False
@@ -641,19 +648,16 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertEqual(driver.prompt.value, "make a cinematic video")
             self.assertEqual(driver.generate_clicks, 1)
             self.assertGreaterEqual(driver.video_poll_count, 3)
-            self.assertGreaterEqual(driver.session_poll_count, 3)
-            self.assertEqual(driver.downloaded_video_id, "summary-mp4-1")
+            self.assertEqual(driver.downloaded_video_id, "new-video-1")
             self.assertEqual(driver.downloaded_json_ids, [])
-            self.assertEqual(driver.session_clicks, ["new-session-1"])
-            self.assertGreaterEqual(driver.session_click_video_poll_counts[0], 3)
+            self.assertEqual(driver.session_clicks, [])
             self.assertEqual(job.submission_message_id, "new-message-id-1")
             self.assertEqual(job.submission_message_group_id, "new-message-group-1")
             self.assertEqual(job.submission_message_index, 1)
             self.assertEqual(job.baseline_message_ids, ["old-message-id"])
             self.assertEqual(job.submission_started_epoch_ms, 1_700_000_000_000)
             self.assertTrue(job.baseline_session_fingerprints)
-            self.assertTrue(job.result_session_fingerprint)
-            self.assertIn("Generated 1", job.result_session_text)
+            self.assertFalse(job.result_session_fingerprint)
             self.assertEqual(driver.watch_started, driver.watch_stopped)
             self.assertTrue(
                 any(
@@ -719,7 +723,7 @@ class MuseVideoAutomationTests(unittest.TestCase):
             ).process(driver, job, context)
 
             self.assertEqual(result, target)
-            self.assertEqual(driver.downloaded_video_id, "summary-mp4-1")
+            self.assertEqual(driver.downloaded_video_id, "new-video-1")
             self.assertTrue(all("querySelectorAll(sel)" not in script for script in driver.executed_scripts))
             self.assertNotIn("unrelated-video", driver.downloaded_video_ids)
             self.assertEqual(driver.downloaded_json_ids, [])
@@ -777,10 +781,9 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertEqual(driver.uploaded_paths, [str(Path(job.source_path).resolve()) for job in jobs])
             self.assertEqual(
                 driver.downloaded_video_ids,
-                ["summary-mp4-1", "summary-mp4-2", "summary-mp4-3"],
+                ["new-video-1", "new-video-2", "new-video-3"],
             )
-            self.assertGreaterEqual(driver.summary_generation, 4)
-            self.assertGreaterEqual(driver.summary_snapshot_calls, 4)
+            self.assertEqual(driver.session_clicks, [])
             self.assertEqual(driver.downloaded_json_ids, [])
             self.assertEqual(set(results), {job.job_id for job in jobs})
             self.assertTrue(all(Path(result).is_file() for result in results.values()))
@@ -797,7 +800,7 @@ class MuseVideoAutomationTests(unittest.TestCase):
             self.assertEqual(driver.generate_clicks, 1)
             self.assertEqual(
                 driver.downloaded_video_ids,
-                ["summary-mp4-1", "summary-mp4-2", "summary-mp4-3"],
+                ["new-video-1", "new-video-2", "new-video-3"],
             )
             self.assertTrue(all(Path(result).is_file() for result in recovered.values()))
             self.assertEqual(len({Path(result).read_bytes() for result in recovered.values()}), 3)
@@ -808,6 +811,13 @@ class MuseVideoAutomationTests(unittest.TestCase):
             download_dir = root / "downloads"
             driver = AutomationDriver(download_dir)
             driver.split_summary_sessions = True
+            driver.fail_direct_download = True
+            driver.late_old_session = AutomationElement(
+                "late-old-session",
+                text="Generated old video 10:48 am",
+                attrs={"data-testid": "timeline-session-late-old"},
+                click=lambda: driver._open_session("late-old-session"),
+            )
             jobs = []
             contexts = []
             for index in range(1, 4):
@@ -855,6 +865,7 @@ class MuseVideoAutomationTests(unittest.TestCase):
                 driver.session_clicks,
                 ["new-session-1", "new-session-2", "new-session-3"],
             )
+            self.assertNotIn("late-old-session", driver.session_clicks)
             self.assertEqual(
                 driver.downloaded_video_ids,
                 ["summary-mp4-1", "summary-mp4-2", "summary-mp4-3"],
@@ -878,37 +889,21 @@ class MuseVideoAutomationTests(unittest.TestCase):
             )
             self.assertTrue(all(Path(result).is_file() for result in recovered.values()))
 
-    def test_next_tab_waits_until_previous_tab_releases_summary_download_turn(self):
+    def test_different_tabs_do_not_share_summary_download_lock(self):
         with tempfile.TemporaryDirectory() as folder:
             automation = MuseVideoAutomation(poll_interval=0.01)
-            driver = AutomationDriver(Path(folder) / "downloads")
-            logs = []
-            context = MuseVideoRunContext(
-                worker_id=2,
-                download_dir=driver.download_dir,
-                stopped=lambda: False,
-                transition=lambda *_args, **_kwargs: None,
-                log=logs.append,
-                retry_limit=1,
-                backoff_base=0,
-            )
-            acquired = threading.Event()
-            automation._summary_download_lock.acquire()
+            first_driver = AutomationDriver(Path(folder) / "downloads-1")
+            second_driver = AutomationDriver(Path(folder) / "downloads-2")
+            first_lock = automation._summary_lock_for(first_driver)
+            second_lock = automation._summary_lock_for(second_driver)
 
-            def wait_for_turn():
-                automation._acquire_summary_download_turn(driver, context)
-                acquired.set()
-                automation._summary_download_lock.release()
-
-            thread = threading.Thread(target=wait_for_turn)
-            thread.start()
-            time.sleep(0.05)
-            self.assertFalse(acquired.is_set())
-            automation._summary_download_lock.release()
-            thread.join(timeout=1)
-
-            self.assertTrue(acquired.is_set())
-            self.assertTrue(any("tab trước tải hết MP4" in message for message in logs))
+            self.assertIsNot(first_lock, second_lock)
+            first_lock.acquire()
+            try:
+                self.assertTrue(second_lock.acquire(blocking=False))
+                second_lock.release()
+            finally:
+                first_lock.release()
 
     def test_send_selector_does_not_click_other_submit_buttons(self):
         with tempfile.TemporaryDirectory() as folder:
