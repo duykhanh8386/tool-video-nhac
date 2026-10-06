@@ -17,6 +17,7 @@ from auth.muse_login import (
     MuseLoginService,
     MuseLoginTimeout,
     MuseUnsafeNavigationError,
+    google_youtube_login_url,
     muse_native_browser_command,
 )
 
@@ -148,7 +149,7 @@ class MuseLoginServiceTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_native_login_browser_uses_real_profile_without_automation_evasion_flags(self):
+    def test_native_login_browser_uses_real_profile_and_reduces_webdriver_flag(self):
         executable = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")
         profile = Path(self.temp.name) / "profile"
 
@@ -160,7 +161,18 @@ class MuseLoginServiceTests(unittest.TestCase):
         self.assertIn("--remote-debugging-address=127.0.0.1", command)
         self.assertIn("--remote-debugging-port=0", command)
         self.assertFalse(any("user-agent" in value.casefold() for value in command))
-        self.assertFalse(any("disable-blink-features" in value.casefold() for value in command))
+        self.assertIn("--disable-blink-features=AutomationControlled", command)
+
+    def test_native_browser_accepts_google_youtube_login_but_rejects_other_hosts(self):
+        executable = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")
+        profile = Path(self.temp.name) / "profile"
+        login_url = google_youtube_login_url("owner@example.com")
+
+        command = muse_native_browser_command(executable, profile, login_url)
+
+        self.assertEqual(command[-1], login_url)
+        with self.assertRaises(ValueError):
+            muse_native_browser_command(executable, profile, "https://example.invalid/")
 
     def service(self, driver: FakeDriver, **kwargs) -> MuseLoginService:
         return MuseLoginService(

@@ -577,6 +577,24 @@ class MuseVideoBatchManagerTests(unittest.TestCase):
             self.assertEqual(tuple(map(len, allocations)), sizes)
             self.assertLessEqual(max(sizes) - min(sizes), 1)
 
+    def test_selected_ready_accounts_receive_all_images_and_run_concurrently(self):
+        images = self._images(6)
+
+        allocations = self.batch.allocate_images(images, worker_ids=(1, 2))
+        self.batch.start_all(
+            "selected prompt",
+            MuseVideoSettings(),
+            self.output,
+            worker_ids=(1, 2),
+        ).result(timeout=3)
+
+        snapshot = self.batch.snapshot()
+        self.assertEqual(tuple(map(len, allocations)), (3, 3, 0))
+        self.assertEqual(snapshot.enabled_worker_ids, (1, 2))
+        self.assertEqual({job.worker_id for job in snapshot.jobs}, {1, 2})
+        self.assertTrue(all(job.state == MuseVideoJobState.COMPLETED for job in snapshot.jobs))
+        self.assertEqual(set(self.automation.drivers), {1, 2})
+
     def test_scan_normalizes_deduplicates_sorts_and_supports_recursive(self):
         folder = self.root / "scan"
         nested = folder / "nested"

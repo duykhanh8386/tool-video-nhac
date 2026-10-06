@@ -22,6 +22,7 @@ from auth.muse_login import (
     MUSE_SECURITY_SELECTORS,
     MuseAccountStore,
     google_muse_login_url,
+    google_youtube_login_url,
 )
 from auth.muse_sessions import (
     GENERATION_SELECTORS,
@@ -193,6 +194,8 @@ class FakeDriver:
                 self.google_email = parse_qs(urlparse(url).query).get("Email", [""])[0]
             if self.unverified_manage_account:
                 self._current_url = "https://accounts.google.com/ManageAccount"
+            elif self.google_authenticated and parse_qs(urlparse(url).query).get("service") == ["youtube"]:
+                self._current_url = "https://studio.youtube.com/"
             else:
                 self._current_url = (
                     "https://accounts.google.com/ManageAccount"
@@ -306,7 +309,7 @@ class FakeDriver:
                     self._current_url = "https://accounts.google.com/signin/challenge/totp"
                 else:
                     self.google_authenticated = True
-                    self._current_url = "https://accounts.google.com/ManageAccount"
+                    self._current_url = "https://studio.youtube.com/"
             else:
                 self.complete_login()
 
@@ -323,7 +326,7 @@ class FakeDriver:
         if self._current_url.startswith("https://accounts.google.com/"):
             self.google_authenticated = True
             self.google_two_factor = False
-            self._current_url = "https://accounts.google.com/ManageAccount"
+            self._current_url = "https://studio.youtube.com/"
         else:
             self.logged_in = True
             self.muse_stage = ""
@@ -391,7 +394,7 @@ class MuseSessionManagerTests(unittest.TestCase):
             "poll_interval": 0.01,
             "stable_seconds": 0,
             "generation_timeout": 0.35,
-            "login_timeout": 0.25,
+            "login_timeout": 3.0,
             "retry_limit": 0,
             "backoff_base": 0,
         }
@@ -562,11 +565,11 @@ class MuseSessionManagerTests(unittest.TestCase):
         candidates = self.manager.discover_muse_tabs().result(timeout=2)
 
         self.assertEqual(candidates, ())
-        with self.assertRaisesRegex(ValueError, "đúng một tab"):
+        with self.assertRaisesRegex(MuseSessionError, "hostname"):
             self.manager.bind_existing_tabs(
                 {1: "one@example.com"},
                 {1: "main"},
-            )
+            ).result(timeout=2)
 
     def test_password_is_autofilled_once_and_never_written_to_checkpoint(self):
         self.driver_options[1] = {"login_required": True}
@@ -579,11 +582,12 @@ class MuseSessionManagerTests(unittest.TestCase):
         ).result(timeout=2)
 
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
-        expected_login_url = google_muse_login_url("owner@example.com")
+        expected_login_url = google_youtube_login_url("owner@example.com")
         self.assertEqual(self.drivers[1].requested_urls[0], expected_login_url)
-        self.assertIn("/AccountChooser?", expected_login_url)
+        self.assertIn("/v3/signin/identifier?", expected_login_url)
         self.assertIn("Email=owner%40example.com", expected_login_url)
-        self.assertIn("accounts.google.com%2FManageAccount", expected_login_url)
+        self.assertIn("service=youtube", expected_login_url)
+        self.assertIn(google_muse_login_url("owner@example.com"), self.drivers[1].requested_urls)
         self.assertEqual(self.drivers[1].password.value, secret + GOOGLE_ENTER_KEY)
         checkpoint = (self.root / "data" / "muse_sessions.json").read_text(encoding="utf-8")
         self.assertNotIn(secret, checkpoint)
@@ -646,6 +650,18 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertEqual(len({next(iter(driver.thread_ids)) for driver in self.drivers.values()}), 3)
         checkpoint = (self.root / "data" / "muse_sessions.json").read_text(encoding="utf-8")
         self.assertTrue(all(secret not in checkpoint for secret in secrets))
+
+    def test_open_all_sessions_accepts_only_selected_accounts(self):
+        credentials = {
+            1: ("owner1@example.com", ""),
+            2: ("owner2@example.com", ""),
+        }
+
+        results = self.manager.open_all_sessions(credentials).result(timeout=3)
+
+        self.assertEqual(set(results), {1, 2})
+        self.assertEqual(set(self.drivers), {1, 2})
+        self.assertEqual(self.manager.snapshot(3).state, MuseSessionState.IDLE)
 
     def test_muse_security_code_stays_manual_after_google_login(self):
         self.driver_options[1] = {

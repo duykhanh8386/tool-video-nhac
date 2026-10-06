@@ -71,6 +71,7 @@ WORKER_LABELS = {
 
 @dataclass
 class _WorkerWidgets:
+    enabled: QCheckBox
     account: QComboBox
     password: QLineEdit
     muse_tab: QComboBox
@@ -110,7 +111,7 @@ class MuseAccountsPage(QWidget):
         )
         self._workers: dict[int, _WorkerWidgets] = {}
         self._futures: list[Future] = []
-        self._pending_batch_start: tuple[Future, str, MuseVideoSettings, str] | None = None
+        self._pending_batch_start: tuple[Future, str, MuseVideoSettings, str, tuple[int, ...]] | None = None
         self._pending_browser_open: Future | None = None
         self._pending_tab_scan: Future | None = None
         self._tab_candidates: dict[int, tuple[MuseTabCandidate, ...]] = {}
@@ -167,7 +168,7 @@ class MuseAccountsPage(QWidget):
         )
         self.connection_mode.setCurrentIndex(max(0, mode_index))
         self.connection_mode.currentIndexChanged.connect(self._connection_mode_changed)
-        self.open_browsers = QPushButton("Mở 3 Chrome/Muse")
+        self.open_browsers = QPushButton("Mở Chrome/Muse đã tick")
         self.open_browsers.clicked.connect(self._open_browser_sessions)
         self.scan_tabs = QPushButton("Quét tab Muse đang mở")
         self.scan_tabs.clicked.connect(self._scan_muse_tabs)
@@ -252,7 +253,7 @@ class MuseAccountsPage(QWidget):
         ):
             actions.addWidget(button)
         root.addLayout(actions)
-        self.global_status = QLabel("Đăng nhập đủ 3 tài khoản, phân bổ ảnh, sau đó bắt đầu.")
+        self.global_status = QLabel("Tick các tài khoản muốn chạy, phân bổ ảnh, sau đó bắt đầu.")
         self.global_status.setWordWrap(True)
         self.global_status.setObjectName("muted")
         root.addWidget(self.global_status)
@@ -276,8 +277,11 @@ class MuseAccountsPage(QWidget):
         page.setWidget(content)
         root = QVBoxLayout(content)
         account_group = QGroupBox(f"Tài khoản Muse {worker_id}")
-        account_group.setMinimumHeight(270)
+        account_group.setMinimumHeight(305)
         grid = QGridLayout(account_group)
+        enabled = QCheckBox("Dùng tài khoản này để chạy")
+        enabled.setChecked(True)
+        enabled.toggled.connect(lambda _checked: self._worker_selection_changed())
         account = QComboBox()
         account.setEditable(True)
         account.setMinimumHeight(36)
@@ -309,24 +313,25 @@ class MuseAccountsPage(QWidget):
             "Phương án 1: nếu nhập mật khẩu, tool chỉ điền email/mật khẩu trên accounts.google.com; "
             "nếu để trống thì bạn tự đăng nhập. CAPTCHA, passkey và 2FA luôn làm thủ công. "
             "Sau khi Google xác minh, tool tự mở Muse và tiếp tục batch; mật khẩu bị xóa khỏi UI ngay khi bàn giao. "
-            "Phương án 2: bấm Mở 3 Chrome/Muse, mở sẵn Muse trong từng cửa sổ, bấm Quét tab Muse, "
+            "Phương án 2: bấm Mở Chrome/Muse đã tick, mở sẵn Muse trong từng cửa sổ, bấm Quét tab Muse, "
             "rồi chọn một dòng READY cho mỗi tài khoản. Dòng ĐÃ CHỌN TAB màu xanh là đã chọn xong. "
             "Waitlist vẫn do người dùng xử lý."
         )
         login_help.setObjectName("muted")
         login_help.setWordWrap(True)
-        grid.addWidget(QLabel("Email Google"), 0, 0)
-        grid.addWidget(account, 0, 1, 1, 2)
-        grid.addWidget(QLabel("Mật khẩu Google"), 1, 0)
-        grid.addWidget(password, 1, 1, 1, 2)
-        grid.addWidget(QLabel("Tab Muse"), 2, 0)
-        grid.addWidget(muse_tab, 2, 1, 1, 2)
-        grid.addWidget(tab_selection, 3, 1, 1, 2)
-        grid.addWidget(QLabel("Đăng nhập"), 4, 0)
-        grid.addWidget(login_state, 4, 1, 1, 2)
-        grid.addWidget(QLabel("Profile"), 5, 0)
-        grid.addWidget(profile, 5, 1, 1, 2)
-        grid.addWidget(login_help, 6, 0, 1, 3)
+        grid.addWidget(enabled, 0, 0, 1, 3)
+        grid.addWidget(QLabel("Email Google"), 1, 0)
+        grid.addWidget(account, 1, 1, 1, 2)
+        grid.addWidget(QLabel("Mật khẩu Google"), 2, 0)
+        grid.addWidget(password, 2, 1, 1, 2)
+        grid.addWidget(QLabel("Tab Muse"), 3, 0)
+        grid.addWidget(muse_tab, 3, 1, 1, 2)
+        grid.addWidget(tab_selection, 4, 1, 1, 2)
+        grid.addWidget(QLabel("Đăng nhập"), 5, 0)
+        grid.addWidget(login_state, 5, 1, 1, 2)
+        grid.addWidget(QLabel("Profile"), 6, 0)
+        grid.addWidget(profile, 6, 1, 1, 2)
+        grid.addWidget(login_help, 7, 0, 1, 3)
         root.addWidget(account_group)
 
         assigned_count = QLabel("Được phân bổ: 0 ảnh")
@@ -363,6 +368,7 @@ class MuseAccountsPage(QWidget):
         root.addWidget(QLabel("Log riêng"))
         root.addWidget(logs, 1)
         return page, _WorkerWidgets(
+            enabled=enabled,
             account=account,
             password=password,
             muse_tab=muse_tab,
@@ -390,6 +396,9 @@ class MuseAccountsPage(QWidget):
 
     def _restore_ui(self) -> None:
         snapshot = self.batch_manager.snapshot()
+        enabled_ids = set(snapshot.enabled_worker_ids)
+        for worker_id, widgets in self._workers.items():
+            widgets.enabled.setChecked(worker_id in enabled_ids)
         if snapshot.source_paths:
             try:
                 common = Path(snapshot.source_paths[0]).parent
@@ -430,42 +439,73 @@ class MuseAccountsPage(QWidget):
         self.settings_changed.emit()
         self.refresh()
 
-    def _account_emails(self) -> dict[int, str]:
-        emails = {
-            worker_id: widgets.account.currentText().strip().casefold()
+    def _selected_worker_ids(self) -> tuple[int, ...]:
+        selected = tuple(
+            worker_id
             for worker_id, widgets in self._workers.items()
+            if widgets.enabled.isChecked()
+        )
+        if not selected:
+            raise ValueError("Hãy tick ít nhất một tài khoản Muse để chạy.")
+        return selected
+
+    def _worker_selection_changed(self) -> None:
+        selected = tuple(
+            worker_id
+            for worker_id, widgets in self._workers.items()
+            if widgets.enabled.isChecked()
+        )
+        if selected and not self.batch_manager.busy:
+            try:
+                self.batch_manager.set_enabled_workers(selected)
+            except Exception:
+                pass
+        if not self._refreshing:
+            self.refresh()
+
+    def _account_emails(self, worker_ids: tuple[int, ...] | None = None) -> dict[int, str]:
+        selected = worker_ids or self._selected_worker_ids()
+        emails = {
+            worker_id: self._workers[worker_id].account.currentText().strip().casefold()
+            for worker_id in selected
         }
         invalid = [str(worker_id) for worker_id, email in emails.items() if "@" not in email]
         if invalid:
             raise ValueError("Hãy nhập email hợp lệ cho tài khoản " + ", ".join(invalid) + ".")
-        if len(set(emails.values())) != MUSE_SESSION_COUNT:
-            raise ValueError("Ba tài khoản Muse phải dùng ba email khác nhau.")
+        if len(set(emails.values())) != len(emails):
+            raise ValueError("Các tài khoản Muse được tick phải dùng các email khác nhau.")
         return emails
 
-    def _account_credentials(self) -> dict[int, tuple[str, str]]:
-        emails = self._account_emails()
+    def _account_credentials(
+        self,
+        worker_ids: tuple[int, ...] | None = None,
+    ) -> dict[int, tuple[str, str]]:
+        emails = self._account_emails(worker_ids)
         return {
             worker_id: (email, self._workers[worker_id].password.text())
             for worker_id, email in emails.items()
         }
 
-    def _clear_password_inputs(self) -> None:
-        for widgets in self._workers.values():
-            widgets.password.clear()
+    def _clear_password_inputs(self, worker_ids: tuple[int, ...] | None = None) -> None:
+        selected = worker_ids or tuple(self._workers)
+        for worker_id in selected:
+            self._workers[worker_id].password.clear()
 
     def _open_browser_sessions(self) -> None:
         try:
             if self.session_manager.busy or self.batch_manager.busy:
                 raise RuntimeError("Muse đang xử lý; hãy chờ hoặc bấm Dừng tất cả.")
-            credentials = self._account_credentials()
+            selected_ids = self._selected_worker_ids()
+            credentials = self._account_credentials(selected_ids)
             self._pending_browser_open = self.session_manager.open_all_sessions(
                 credentials,
                 force_relogin=False,
                 manual_browser=True,
             )
-            self._clear_password_inputs()
+            self._clear_password_inputs(selected_ids)
             self.global_status.setText(
-                "Đang mở 3 Chrome/Edge thường. Tool sẽ điền tài khoản nào có mật khẩu; "
+                f"Đang mở {len(selected_ids)} Chrome/Edge thường cho tài khoản đã tick. "
+                "Tool sẽ điền tài khoản nào có mật khẩu; "
                 "CAPTCHA/2FA làm thủ công. Giữ nguyên cửa sổ để tool tự nhận READY."
             )
         except Exception as exc:
@@ -494,10 +534,14 @@ class MuseAccountsPage(QWidget):
         widgets.tab_selection.setText(f"ĐÃ CHỌN TAB: {widgets.muse_tab.currentText()}")
         widgets.tab_selection.setStyleSheet("color: #34d399; font-weight: 600;")
 
-    def _selected_tab_handles(self) -> dict[int, str]:
+    def _selected_tab_handles(
+        self,
+        worker_ids: tuple[int, ...] | None = None,
+    ) -> dict[int, str]:
+        selected = worker_ids or self._selected_worker_ids()
         selections = {
-            worker_id: str(widgets.muse_tab.currentData() or "").strip()
-            for worker_id, widgets in self._workers.items()
+            worker_id: str(self._workers[worker_id].muse_tab.currentData() or "").strip()
+            for worker_id in selected
         }
         missing = [str(worker_id) for worker_id, handle in selections.items() if not handle]
         if missing:
@@ -543,7 +587,8 @@ class MuseAccountsPage(QWidget):
     def _allocate(self) -> None:
         try:
             images = self._scan_count()
-            allocations = self.batch_manager.allocate_images(images)
+            selected_ids = self._selected_worker_ids()
+            allocations = self.batch_manager.allocate_images(images, worker_ids=selected_ids)
         except Exception as exc:
             QMessageBox.warning(self, "Không thể phân bổ ảnh", str(exc))
             return
@@ -565,25 +610,29 @@ class MuseAccountsPage(QWidget):
             output_dir = self.output_folder.text().strip()
             if not output_dir:
                 raise ValueError("Hãy chọn thư mục lưu video đầu ra.")
-            emails = self._account_emails()
+            selected_ids = self._selected_worker_ids()
+            emails = self._account_emails(selected_ids)
             settings = self._video_settings()
-            self.batch_manager.prepare_start(prompt, settings, output_dir)
+            self.batch_manager.prepare_start(prompt, settings, output_dir, worker_ids=selected_ids)
             if self._connection_mode() == MuseSessionOpenMode.EXISTING_TAB:
                 login_future = self.session_manager.bind_existing_tabs(
                     emails,
-                    self._selected_tab_handles(),
+                    self._selected_tab_handles(selected_ids),
                 )
-                opening_message = "Đang gắn 3 worker vào 3 tab Muse đã chọn; tab READY sẽ bắt đầu xử lý."
+                opening_message = (
+                    f"Đang gắn {len(selected_ids)} worker đã tick vào tab Muse; "
+                    "các tab READY sẽ bắt đầu xử lý."
+                )
             else:
-                credentials = self._account_credentials()
+                credentials = self._account_credentials(selected_ids)
                 login_future = self.session_manager.open_all_sessions(
                     credentials,
                     force_relogin=False,
                     manual_browser=True,
                 )
-                self._clear_password_inputs()
+                self._clear_password_inputs(selected_ids)
                 opening_message = (
-                    "Đang mở 3 Chrome/Edge thường và đăng nhập các tài khoản có mật khẩu. "
+                    f"Đang mở {len(selected_ids)} Chrome/Edge thường cho tài khoản đã tick. "
                     "CAPTCHA/2FA làm thủ công; tool sẽ chờ đủ profile READY rồi gửi đồng thời."
                 )
             self._pending_started_workers.clear()
@@ -592,6 +641,7 @@ class MuseAccountsPage(QWidget):
                 prompt,
                 settings,
                 output_dir,
+                selected_ids,
             )
             self.global_status.setText(opening_message)
         except Exception as exc:
@@ -616,7 +666,9 @@ class MuseAccountsPage(QWidget):
 
     def _redistribute(self) -> None:
         try:
-            allocations = self.batch_manager.redistribute_unsubmitted()
+            allocations = self.batch_manager.redistribute_unsubmitted(
+                worker_ids=self._selected_worker_ids(),
+            )
             self.global_status.setText(
                 "Đã phân bổ lại ảnh chưa gửi: "
                 + ", ".join(f"TK {index + 1}: {len(items)}" for index, items in enumerate(allocations))
@@ -678,12 +730,17 @@ class MuseAccountsPage(QWidget):
             batch = self.batch_manager.snapshot()
             for worker in batch.workers:
                 self._render_worker(worker, session_values[worker.worker_id])
-            emails = [widgets.account.currentText().strip().casefold() for widgets in self._workers.values()]
-            accounts_valid = all("@" in email for email in emails) and len(set(emails)) == MUSE_SESSION_COUNT
+            selected_ids = tuple(
+                worker_id
+                for worker_id, widgets in self._workers.items()
+                if widgets.enabled.isChecked()
+            )
+            emails = [self._workers[worker_id].account.currentText().strip().casefold() for worker_id in selected_ids]
+            accounts_valid = bool(selected_ids) and all("@" in email for email in emails) and len(set(emails)) == len(emails)
             opening = self._pending_batch_start is not None
             workflow_busy = batch.running or self.session_manager.busy or opening
             tab_mode = self._connection_mode() == MuseSessionOpenMode.EXISTING_TAB
-            tabs_selected = all(bool(widgets.muse_tab.currentData()) for widgets in self._workers.values())
+            tabs_selected = all(bool(self._workers[worker_id].muse_tab.currentData()) for worker_id in selected_ids)
             self.start_all.setEnabled(
                 accounts_valid
                 and (not tab_mode or tabs_selected)
@@ -692,7 +749,7 @@ class MuseAccountsPage(QWidget):
                 and bool(self.output_folder.text().strip())
                 and not workflow_busy
             )
-            self._render_start_requirements(session_values, batch)
+            self._render_start_requirements(session_values, batch, selected_ids)
             self.stop_all.setEnabled(workflow_busy)
             self.open_browsers.setEnabled(not workflow_busy)
             self.scan_tabs.setEnabled(
@@ -709,24 +766,30 @@ class MuseAccountsPage(QWidget):
         finally:
             self._refreshing = False
 
-    def _render_start_requirements(self, session_values, batch) -> None:
+    def _render_start_requirements(self, session_values, batch, selected_ids: tuple[int, ...]) -> None:
         not_ready = [
             str(session_id)
             for session_id, item in sorted(session_values.items())
-            if item.state != MuseSessionState.READY or not item.driver_open
+            if session_id in selected_ids
+            and (item.state != MuseSessionState.READY or not item.driver_open)
         ]
         blockers: list[str] = []
-        emails = [widgets.account.currentText().strip().casefold() for widgets in self._workers.values()]
-        invalid_accounts = [str(index) for index, email in enumerate(emails, 1) if "@" not in email]
-        if invalid_accounts:
+        if not selected_ids:
+            blockers.append("tick ít nhất một tài khoản")
+        emails = {
+            worker_id: self._workers[worker_id].account.currentText().strip().casefold()
+            for worker_id in selected_ids
+        }
+        invalid_accounts = [str(worker_id) for worker_id, email in emails.items() if "@" not in email]
+        if selected_ids and invalid_accounts:
             blockers.append("nhập email Google hợp lệ cho tài khoản " + ", ".join(invalid_accounts))
-        elif len(set(emails)) != MUSE_SESSION_COUNT:
-            blockers.append("ba email Google phải khác nhau")
+        elif selected_ids and len(set(emails.values())) != len(emails):
+            blockers.append("email Google của các tài khoản đã tick phải khác nhau")
         if self._connection_mode() == MuseSessionOpenMode.EXISTING_TAB:
             missing_tabs = [
                 str(worker_id)
-                for worker_id, widgets in self._workers.items()
-                if not widgets.muse_tab.currentData()
+                for worker_id in selected_ids
+                if not self._workers[worker_id].muse_tab.currentData()
             ]
             if missing_tabs:
                 blockers.append("quét và chọn tab Muse cho tài khoản " + ", ".join(missing_tabs))
@@ -741,10 +804,10 @@ class MuseAccountsPage(QWidget):
         elif self._pending_batch_start is not None or self.session_manager.busy:
             message = "Đang đăng nhập; tài khoản READY sẽ tự bắt đầu batch độc lập."
         elif batch.running:
-            message = "Ba worker Muse đang chạy độc lập."
+            message = "Các worker Muse được chọn đang chạy độc lập."
         elif not_ready:
             if self._connection_mode() == MuseSessionOpenMode.EXISTING_TAB:
-                message = "Sẵn sàng kiểm tra 3 tab đã chọn rồi chạy batch."
+                message = f"Sẵn sàng kiểm tra {len(selected_ids)} tab đã chọn rồi chạy batch."
             else:
                 message = (
                     "Sẵn sàng mở Chrome cho tài khoản "
@@ -752,7 +815,8 @@ class MuseAccountsPage(QWidget):
                     + "; hãy tự hoàn tất Google/Muse, sau đó tool chạy batch."
                 )
         else:
-            message = f"Sẵn sàng chạy cả 3 tài khoản với {len(batch.source_paths)} ảnh."
+            labels = ", ".join(str(value) for value in selected_ids)
+            message = f"Sẵn sàng chạy tài khoản {labels} với {len(batch.source_paths)} ảnh."
         self.start_requirements.setText(message)
         self.start_all.setToolTip(message)
 
@@ -792,6 +856,11 @@ class MuseAccountsPage(QWidget):
             scrollbar.setValue(scrollbar.maximum())
         widgets.stop.setEnabled(session.task_running or worker.task_running)
         widgets.retry.setEnabled(worker.failed > 0 and not worker.task_running)
+        widgets.enabled.setEnabled(
+            not self.batch_manager.busy
+            and not self.session_manager.busy
+            and self._pending_batch_start is None
+        )
         widgets.account.setEnabled(not session.driver_open and not session.task_running and not worker.task_running)
         widgets.password.setEnabled(
             self._connection_mode() != MuseSessionOpenMode.EXISTING_TAB
@@ -813,21 +882,25 @@ class MuseAccountsPage(QWidget):
         pending = self._pending_batch_start
         if pending is None:
             return
-        login_future, prompt, settings, output_dir = pending
+        login_future, prompt, settings, output_dir, selected_ids = pending
         if not login_future.done():
             ready_count = sum(
                 1
                 for item in self.session_manager.snapshots()
-                if item.state == MuseSessionState.READY and item.driver_open
+                if item.session_id in selected_ids
+                and item.state == MuseSessionState.READY
+                and item.driver_open
             )
             self.global_status.setText(
-                f"Đang chờ đủ phiên Muse READY ({ready_count}/3); chưa worker nào gửi prompt."
+                f"Đang chờ các phiên đã tick READY ({ready_count}/{len(selected_ids)}); chưa worker nào gửi prompt."
             )
             return
         ready_ids = {
             item.session_id
             for item in self.session_manager.snapshots()
-            if item.state == MuseSessionState.READY and item.driver_open
+            if item.session_id in selected_ids
+            and item.state == MuseSessionState.READY
+            and item.driver_open
         }
         login_error: Exception | None = None
         try:
@@ -842,7 +915,14 @@ class MuseAccountsPage(QWidget):
             QMessageBox.warning(self, "Không thể bắt đầu batch Muse", message)
             return
         try:
-            self._track(self.batch_manager.start_all(prompt, settings, output_dir))
+            self._track(
+                self.batch_manager.start_all(
+                    prompt,
+                    settings,
+                    output_dir,
+                    worker_ids=ready_ids,
+                )
+            )
             self._pending_started_workers.update(ready_ids)
         except Exception as exc:
             self.global_status.setText(f"Không thể khởi động đồng thời các worker Muse: {exc}")
@@ -871,7 +951,7 @@ class MuseAccountsPage(QWidget):
         try:
             future.result()
             self.global_status.setText(
-                "Ba Chrome profile đã READY. Có thể bấm Quét tab Muse hoặc bấm Xử lý."
+                "Các Chrome profile đã chọn đã READY. Có thể bấm Quét tab Muse hoặc bấm Xử lý."
             )
         except Exception as exc:
             self.global_status.setText(f"Một hoặc nhiều phiên Muse chưa READY: {exc}")

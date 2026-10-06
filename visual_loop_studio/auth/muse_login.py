@@ -22,6 +22,7 @@ GOOGLE_MUSE_LOGIN_URL = (
     "https://accounts.google.com/AccountChooser?"
     "continue=https%3A%2F%2Faccounts.google.com%2FManageAccount&hl=en"
 )
+YOUTUBE_AUTH_HOSTS = frozenset({"youtube.com", "www.youtube.com", "studio.youtube.com"})
 MUSE_ALLOWED_HOSTS = frozenset({"muse.ai", "auth.muse.ai", "accounts.google.com"})
 MUSE_PROFILES_DIR = USER_DATA_ROOT / "MuseChromeProfiles"
 MUSE_ACCOUNTS_FILE = DATA_DIR / "muse_accounts.json"
@@ -96,6 +97,35 @@ def google_muse_login_url(email: str) -> str:
         }
     )
     return f"https://accounts.google.com/AccountChooser?{query}"
+
+
+def google_youtube_login_url(email: str) -> str:
+    """Start Google authentication through its first-party YouTube service."""
+    youtube_continue = (
+        "https://www.youtube.com/signin?"
+        + urlencode(
+            {
+                "action_handle_signin": "true",
+                "app": "desktop",
+                "hl": "en",
+                "next": "https://studio.youtube.com/",
+                "feature": "redirect_login",
+            }
+        )
+    )
+    query = urlencode(
+        {
+            "continue": youtube_continue,
+            "hl": "en",
+            "passive": "true",
+            "service": "youtube",
+            "uilel": "3",
+            "flowName": "GlifWebSignIn",
+            "flowEntry": "ServiceLogin",
+            "Email": _normalize_email(email),
+        }
+    )
+    return f"https://accounts.google.com/v3/signin/identifier?{query}"
 
 
 class MuseLoginError(RuntimeError):
@@ -362,7 +392,7 @@ class MuseLoginService:
             if not host and (not url or url.casefold().startswith(("about:blank", "data:,"))):
                 candidates.append((handle, url, "pending"))
                 continue
-            if host not in MUSE_ALLOWED_HOSTS:
+            if host not in MUSE_ALLOWED_HOSTS and host not in YOUTUBE_AUTH_HOSTS:
                 raise MuseUnsafeNavigationError(
                     "Đăng nhập đã chuyển tới hostname không được phép; tool đã dừng mà không tương tác với trang đó."
                 )
@@ -376,7 +406,15 @@ class MuseLoginService:
                         return candidate
                 except Exception:
                     continue
-        priority = {"accounts.google.com": 0, "auth.muse.ai": 1, "muse.ai": 2, "pending": 3}
+        priority = {
+            "accounts.google.com": 0,
+            "youtube.com": 1,
+            "www.youtube.com": 1,
+            "studio.youtube.com": 1,
+            "auth.muse.ai": 2,
+            "muse.ai": 3,
+            "pending": 4,
+        }
         if candidates:
             selected = min(candidates, key=lambda item: priority[item[2]])
             driver.switch_to.window(selected[0])
@@ -620,8 +658,8 @@ class MuseLoginService:
         finally:
             value = ""
 
-    @staticmethod
     def _fill_google_field(
+        self,
         driver: Any,
         selectors: tuple[str, ...],
         value: str,
@@ -637,7 +675,11 @@ class MuseLoginService:
                     continue
                 try:
                     element.clear()
-                    element.send_keys(value)
+                    # Match normal typing closely enough for Google pages which
+                    # discard a whole value sent before their listeners attach.
+                    for character in value:
+                        element.send_keys(character)
+                        self._sleep(0.05)
                     for next_selector in next_selectors:
                         next_button = next(
                             (
@@ -735,6 +777,9 @@ def create_muse_chrome_driver(profile: Path, download_dir: Path | None = None):
     options.add_argument("--no-default-browser-check")
     options.add_argument("--start-maximized")
     options.add_argument("--disable-session-crashed-bubble")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
     if download_dir is not None:
         download_dir.mkdir(parents=True, exist_ok=True)
         options.add_experimental_option(
@@ -751,16 +796,24 @@ def create_muse_chrome_driver(profile: Path, download_dir: Path | None = None):
 
 
 def muse_native_browser_command(executable: str | Path, profile: Path, start_url: str) -> list[str]:
-    """Build a normal Chrome/Edge command without automation-evasion switches."""
+    """Build the isolated Chrome/Edge command used for Google/Muse login."""
+    safe_url = str(start_url or "").strip()
+    parsed = urlparse(safe_url)
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    if parsed.scheme.casefold() != "https" or (
+        host not in MUSE_ALLOWED_HOSTS and host not in YOUTUBE_AUTH_HOSTS
+    ):
+        raise ValueError("URL mở trình duyệt phải thuộc Google, YouTube hoặc Muse.")
     return [
         str(executable),
         f"--user-data-dir={profile.resolve()}",
         "--no-first-run",
         "--no-default-browser-check",
         "--start-maximized",
+        "--disable-blink-features=AutomationControlled",
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
-        validate_muse_start_url(start_url),
+        safe_url,
     ]
 
 

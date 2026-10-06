@@ -332,6 +332,7 @@ class MuseVideoWorkerSnapshot:
 @dataclass(frozen=True)
 class MuseVideoBatchSnapshot:
     source_paths: tuple[str, ...]
+    enabled_worker_ids: tuple[int, ...]
     prompt: str
     output_dir: str
     settings: MuseVideoSettings
@@ -987,6 +988,7 @@ class MuseVideoBatchManager:
         self._closed = False
         self.source_paths: list[str] = []
         self.current_job_ids: list[str] = []
+        self.enabled_worker_ids: list[int] = list(range(1, MUSE_SESSION_COUNT + 1))
         self.prompt = ""
         self.output_dir = ""
         self.settings = MuseVideoSettings()
@@ -1007,6 +1009,16 @@ class MuseVideoBatchManager:
         with self._state_lock:
             return any(worker.active for worker in self.workers.values())
 
+    def set_enabled_workers(self, worker_ids: Iterable[int]) -> tuple[int, ...]:
+        """Persist which account slots may receive new work."""
+        with self._state_lock:
+            if self.busy:
+                raise MuseVideoBatchError("Không thể đổi tài khoản khi batch Muse đang chạy.")
+            selected = self._normalize_worker_ids(worker_ids)
+            self.enabled_worker_ids = list(selected)
+            self._persist_locked()
+            return selected
+
     @staticmethod
     def scan_images(folder: str | Path, *, recursive: bool = False) -> list[Path]:
         if not str(folder or "").strip():
@@ -1026,7 +1038,11 @@ class MuseVideoBatchManager:
             key=lambda item: (item.name.casefold(), str(item).casefold()),
         )
 
-    def allocate_images(self, paths: Iterable[str | Path]) -> tuple[tuple[str, ...], ...]:
+    def allocate_images(
+        self,
+        paths: Iterable[str | Path],
+        worker_ids: Iterable[int] | None = None,
+    ) -> tuple[tuple[str, ...], ...]:
         normalized: dict[str, Path] = {}
         for value in paths:
             path = Path(value).expanduser().resolve()
@@ -1039,6 +1055,8 @@ class MuseVideoBatchManager:
         with self._state_lock:
             if self.busy:
                 raise MuseVideoBatchError("Không thể phân bổ khi batch Muse đang chạy.")
+            selected_ids = self._normalize_worker_ids(worker_ids)
+            self.enabled_worker_ids = list(selected_ids)
             self.source_paths = [str(item) for item in ordered]
             self.current_job_ids = []
             for worker in self.workers.values():
@@ -1049,7 +1067,7 @@ class MuseVideoBatchManager:
                 worker.error = ""
                 worker.state = MuseVideoWorkerState.IDLE
             for index, path in enumerate(ordered):
-                worker_id = index % MUSE_SESSION_COUNT + 1
+                worker_id = selected_ids[index % len(selected_ids)]
                 self.workers[worker_id].assigned_sources.append(str(path))
             self._persist_locked()
             return tuple(tuple(worker.assigned_sources) for worker in self.workers.values())
@@ -1059,11 +1077,12 @@ class MuseVideoBatchManager:
         prompt: str,
         settings: MuseVideoSettings,
         output_dir: str | Path,
+        worker_ids: Iterable[int] | None = None,
     ) -> Future[Any]:
-        self.prepare_start(prompt, settings, output_dir)
-        ready_ids = self._ready_session_ids()
+        self.prepare_start(prompt, settings, output_dir, worker_ids=worker_ids)
+        ready_ids = self._ready_session_ids(self.enabled_worker_ids)
         with self._state_lock:
-            self._build_jobs_locked()
+            self._build_jobs_locked(self.enabled_worker_ids)
             self._persist_locked()
         return self._schedule(self._launch_workers(resume=False, worker_ids=ready_ids))
 
@@ -1072,6 +1091,8 @@ class MuseVideoBatchManager:
         prompt: str,
         settings: MuseVideoSettings,
         output_dir: str | Path,
+        *,
+        worker_ids: Iterable[int] | None = None,
     ) -> None:
         """Checkpoint the user's batch inputs before interactive login begins."""
         text = str(prompt or "").strip()
@@ -1087,13 +1108,20 @@ class MuseVideoBatchManager:
                 raise ValueError("Hãy chọn và phân bổ ảnh trước khi bắt đầu.")
             if self.busy:
                 raise MuseVideoBatchError("Batch Muse đang chạy.")
+            selected_ids = self._normalize_worker_ids(worker_ids)
+            self.enabled_worker_ids = list(selected_ids)
+            for worker in self.workers.values():
+                worker.assigned_sources = []
+            for index, source in enumerate(self.source_paths):
+                worker_id = selected_ids[index % len(selected_ids)]
+                self.workers[worker_id].assigned_sources.append(source)
             self.prompt = text
             self.settings = normalized_settings
             self.output_dir = str(output)
             self._persist_locked()
 
     def resume(self) -> Future[Any]:
-        ready_ids = self._ready_session_ids()
+        ready_ids = self._ready_session_ids(self.enabled_worker_ids)
         with self._state_lock:
             if self.busy:
                 raise MuseVideoBatchError("Batch Muse đang chạy.")
@@ -1103,7 +1131,7 @@ class MuseVideoBatchManager:
 
     def start_ready_workers(self, worker_ids: Iterable[int] | None = None) -> Future[Any]:
         """Start newly READY workers without interrupting workers already running."""
-        ready_ids = set(self._ready_session_ids())
+        ready_ids = set(self._ready_session_ids(self.enabled_worker_ids))
         if worker_ids is not None:
             ready_ids.intersection_update(int(value) for value in worker_ids)
         with self._state_lock:
@@ -1144,10 +1172,15 @@ class MuseVideoBatchManager:
                 self._persist_locked()
             return count
 
-    def redistribute_unsubmitted(self) -> tuple[tuple[str, ...], ...]:
+    def redistribute_unsubmitted(
+        self,
+        worker_ids: Iterable[int] | None = None,
+    ) -> tuple[tuple[str, ...], ...]:
         with self._state_lock:
             if self.busy:
                 raise MuseVideoBatchError("Hãy dừng toàn bộ worker trước khi phân bổ lại.")
+            selected_ids = self._normalize_worker_ids(worker_ids)
+            self.enabled_worker_ids = list(selected_ids)
             movable = [
                 self.jobs[job_id]
                 for job_id in self.current_job_ids
@@ -1165,7 +1198,7 @@ class MuseVideoBatchManager:
             for worker in self.workers.values():
                 worker.queue = [job_id for job_id in worker.queue if job_id not in movable_ids]
             for index, job in enumerate(movable):
-                worker_id = index % MUSE_SESSION_COUNT + 1
+                worker_id = selected_ids[index % len(selected_ids)]
                 job.worker_id = worker_id
                 session = self.session_manager.sessions[worker_id]
                 job.account_id = session.account_id
@@ -1210,6 +1243,7 @@ class MuseVideoBatchManager:
             )
             return MuseVideoBatchSnapshot(
                 source_paths=tuple(self.source_paths),
+                enabled_worker_ids=tuple(self.enabled_worker_ids),
                 prompt=self.prompt,
                 output_dir=self.output_dir,
                 settings=self.settings,
@@ -1509,7 +1543,8 @@ class MuseVideoBatchManager:
                     setattr(job, key, value)
             self._persist_locked()
 
-    def _build_jobs_locked(self) -> None:
+    def _build_jobs_locked(self, worker_ids: Iterable[int] | None = None) -> None:
+        selected_ids = self._normalize_worker_ids(worker_ids)
         self.current_job_ids = []
         for worker in self.workers.values():
             worker.queue = []
@@ -1524,7 +1559,7 @@ class MuseVideoBatchManager:
             worker.account_id = session.account_id
             worker.email = session.email
         for index, source_value in enumerate(self.source_paths):
-            worker_id = index % MUSE_SESSION_COUNT + 1
+            worker_id = selected_ids[index % len(selected_ids)]
             source = Path(source_value)
             session = self.session_manager.sessions[worker_id]
             job_id = create_muse_video_job_id(source, self.prompt, self.settings)
@@ -1552,12 +1587,15 @@ class MuseVideoBatchManager:
             assigned_worker.queue.append(job_id)
         self._sync_assigned_from_queues_locked()
 
-    def _ready_session_ids(self) -> tuple[int, ...]:
+    def _ready_session_ids(self, worker_ids: Iterable[int] | None = None) -> tuple[int, ...]:
+        selected_ids = set(self._normalize_worker_ids(worker_ids))
         snapshots = self.session_manager.snapshots()
         ready = tuple(
             item.session_id
             for item in snapshots
-            if item.state == MuseSessionState.READY and item.driver_open
+            if item.session_id in selected_ids
+            and item.state == MuseSessionState.READY
+            and item.driver_open
         )
         if not ready:
             raise MuseVideoBatchError("Chưa có tài khoản Muse nào READY để chạy batch.")
@@ -1565,6 +1603,18 @@ class MuseVideoBatchManager:
         if len(set(emails)) != len(emails):
             raise MuseVideoBatchError("Các worker READY phải dùng các tài khoản khác nhau.")
         return ready
+
+    def _normalize_worker_ids(self, worker_ids: Iterable[int] | None) -> tuple[int, ...]:
+        values = self.enabled_worker_ids if worker_ids is None else worker_ids
+        try:
+            selected = tuple(sorted({int(value) for value in values}))
+        except (TypeError, ValueError):
+            raise ValueError("Danh sách tài khoản Muse được chọn không hợp lệ.") from None
+        if not selected:
+            raise ValueError("Hãy tick ít nhất một tài khoản Muse để chạy.")
+        if any(worker_id not in self.workers for worker_id in selected):
+            raise ValueError("Tài khoản Muse được chọn phải là 1, 2 hoặc 3.")
+        return selected
 
     def _worker_snapshot(self, worker: MuseVideoWorker) -> MuseVideoWorkerSnapshot:
         jobs = [self.jobs[job_id] for job_id in worker.queue if job_id in self.jobs]
@@ -1662,6 +1712,11 @@ class MuseVideoBatchManager:
         with self._state_lock:
             self.source_paths = [str(item) for item in raw.get("source_paths", [])]
             self.current_job_ids = [str(item) for item in raw.get("current_job_ids", [])]
+            raw_enabled = raw.get("enabled_worker_ids", list(range(1, MUSE_SESSION_COUNT + 1)))
+            try:
+                self.enabled_worker_ids = list(self._normalize_worker_ids(raw_enabled))
+            except ValueError:
+                self.enabled_worker_ids = list(range(1, MUSE_SESSION_COUNT + 1))
             self.prompt = str(raw.get("prompt") or "")
             self.output_dir = str(raw.get("output_dir") or "")
             self.settings = MuseVideoSettings.from_dict(raw.get("settings") or {})
@@ -1696,9 +1751,10 @@ class MuseVideoBatchManager:
         write_json(
             self.checkpoint_path,
             {
-                "version": 1,
+                "version": 2,
                 "source_paths": self.source_paths,
                 "current_job_ids": self.current_job_ids,
+                "enabled_worker_ids": self.enabled_worker_ids,
                 "prompt": self.prompt,
                 "output_dir": self.output_dir,
                 "settings": asdict(self.settings),

@@ -17,6 +17,7 @@ from auth.muse_login import (
     MUSE_GOOGLE_TEXT,
     MUSE_LOGIN_TEXT,
     MUSE_START_URL,
+    YOUTUBE_AUTH_HOSTS,
     MuseAccountStore,
     MuseLoginService,
     MuseUnsafeNavigationError,
@@ -31,6 +32,7 @@ from auth.muse_login import (
     create_muse_attached_driver,
     create_muse_chrome_driver,
     google_muse_login_url,
+    google_youtube_login_url,
     launch_muse_native_browser,
     validate_muse_start_url,
 )
@@ -318,10 +320,12 @@ class MuseSessionManager:
         force_relogin: bool = False,
         manual_browser: bool = False,
     ) -> Future[Any]:
-        if set(credentials) != set(range(1, MUSE_SESSION_COUNT + 1)):
-            raise ValueError("Cần nhập đủ email Google cho cả 3 tài khoản Muse.")
+        allowed = set(range(1, MUSE_SESSION_COUNT + 1))
+        selected = set(credentials)
+        if not selected or not selected.issubset(allowed):
+            raise ValueError("Hãy chọn ít nhất một tài khoản Muse hợp lệ để mở.")
         prepared: dict[int, tuple[str, bytearray]] = {}
-        for session_id in range(1, MUSE_SESSION_COUNT + 1):
+        for session_id in sorted(selected):
             email, password = credentials[session_id]
             normalized = str(email or "").strip().casefold()
             if not normalized or "@" not in normalized:
@@ -333,10 +337,10 @@ class MuseSessionManager:
                 bytearray(str(password or "").encode("utf-8")),
             )
         emails = [email for email, _password in prepared.values()]
-        if len(set(emails)) != MUSE_SESSION_COUNT:
+        if len(set(emails)) != len(prepared):
             for _email, secret in prepared.values():
                 _wipe_secret(secret)
-            raise ValueError("Ba phiên Muse phải sử dụng ba tài khoản Google khác nhau.")
+            raise ValueError("Các phiên Muse đã chọn phải sử dụng các tài khoản Google khác nhau.")
         try:
             return self._schedule(
                 self._launch_open_all(
@@ -363,14 +367,15 @@ class MuseSessionManager:
         emails: dict[int, str],
         selections: dict[int, str],
     ) -> Future[Any]:
-        required = set(range(1, MUSE_SESSION_COUNT + 1))
-        if set(emails) != required or set(selections) != required:
-            raise ValueError("Cần chọn đúng một tab Muse cho cả 3 tài khoản.")
+        allowed = set(range(1, MUSE_SESSION_COUNT + 1))
+        selected = set(emails)
+        if not selected or selected != set(selections) or not selected.issubset(allowed):
+            raise ValueError("Cần chọn đúng một tab Muse cho mỗi tài khoản được tick.")
         normalized = {key: str(value or "").strip().casefold() for key, value in emails.items()}
         if any("@" not in value for value in normalized.values()):
-            raise ValueError("Hãy nhập email Google hợp lệ cho cả 3 tài khoản Muse.")
-        if len(set(normalized.values())) != MUSE_SESSION_COUNT:
-            raise ValueError("Ba tab Muse phải được gán cho ba tài khoản Google khác nhau.")
+            raise ValueError("Hãy nhập email Google hợp lệ cho các tài khoản Muse được tick.")
+        if len(set(normalized.values())) != len(normalized):
+            raise ValueError("Các tab Muse phải được gán cho các tài khoản Google khác nhau.")
         handles = {key: str(value or "").strip() for key, value in selections.items()}
         if any(not value for value in handles.values()):
             raise ValueError("Hãy quét và chọn một tab Muse cho từng tài khoản.")
@@ -498,7 +503,7 @@ class MuseSessionManager:
                     open_mode,
                 ),
             )
-            for session_id in range(1, MUSE_SESSION_COUNT + 1)
+            for session_id in sorted(credentials)
         ]
         results = await asyncio.gather(
             *(coroutine for _session_id, coroutine in ordered),
@@ -546,7 +551,7 @@ class MuseSessionManager:
                 session_id,
                 self._launch_bind_existing_tab(session_id, emails[session_id], handles[session_id]),
             )
-            for session_id in range(1, MUSE_SESSION_COUNT + 1)
+            for session_id in sorted(handles)
         ]
         results = await asyncio.gather(
             *(coroutine for _session_id, coroutine in ordered),
@@ -823,7 +828,8 @@ class MuseSessionManager:
         if open_mode == MuseSessionOpenMode.MANUAL_BROWSER and not password:
             self._open_manual_browser_login(session, helper)
             return
-        target_google_url = google_muse_login_url(session.email)
+        target_google_url = google_youtube_login_url(session.email)
+        google_verification_url = google_muse_login_url(session.email)
         if session.google_verified_email.casefold() != session.email.casefold():
             self._navigate_with_retry(session, target_google_url)
         elif not (
@@ -975,6 +981,22 @@ class MuseSessionManager:
                             session,
                             message="Muse cần thao tác xác minh bổ sung trên auth.muse.ai; hãy hoàn tất trong Chrome.",
                         )
+            elif host in YOUTUBE_AUTH_HOSTS:
+                verification_key = (session.email, "youtube_google_verified")
+                if verification_key not in actions:
+                    actions.add(verification_key)
+                    manual_mode = False
+                    idle_polls = 0
+                    self._set_state(
+                        session,
+                        MuseSessionState.OPENING,
+                        progress=42,
+                        status_message=(
+                            "Google đã hoàn tất đăng nhập qua YouTube; đang kiểm tra đúng email trước khi mở Muse…"
+                        ),
+                    )
+                    self._navigate_with_retry(session, google_verification_url)
+                return False
             elif host == "accounts.google.com":
                 if "/manageaccount" in url.casefold():
                     if helper._google_page_has_email(driver, session.email):
@@ -1186,7 +1208,7 @@ class MuseSessionManager:
         driver = session.driver
         if driver is None or not session.driver_open:
             raise MuseSessionError(
-                "Chrome profile này chưa mở. Hãy bấm Mở 3 Chrome/Muse trước rồi quét tab."
+                "Chrome profile này chưa mở. Hãy bấm Mở Chrome/Muse đã tick trước rồi quét tab."
             )
         try:
             handles = {str(value) for value in driver.window_handles}
@@ -1232,7 +1254,8 @@ class MuseSessionManager:
         try:
             MuseLoginService._acquire_profile(profile_key)
             session.profile_acquired = True
-            process = self._native_browser_factory(session.profile_dir, self.start_url)
+            initial_url = google_youtube_login_url(session.email) if assisted else self.start_url
+            process = self._native_browser_factory(session.profile_dir, initial_url)
         except Exception as exc:
             if session.profile_acquired:
                 MuseLoginService._release_profile(profile_key)
