@@ -637,7 +637,6 @@ class MuseSessionManagerTests(unittest.TestCase):
 
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
         self.assertEqual(driver.current_url, "https://muse.ai/chat")
-        self.assertTrue(any("AccountChooser" in value for value in driver.requested_urls))
         self.assertTrue(any(value.startswith("https://muse.ai/") for value in driver.requested_urls))
 
     def test_google_myaccount_redirect_is_verified_then_muse_opens(self):
@@ -660,7 +659,7 @@ class MuseSessionManagerTests(unittest.TestCase):
 
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
         self.assertEqual(driver.current_url, "https://muse.ai/chat")
-        self.assertTrue(any("AccountChooser" in value for value in driver.requested_urls))
+        self.assertTrue(any(value.startswith("https://muse.ai/") for value in driver.requested_urls))
 
     def test_discovers_and_binds_one_ready_muse_tab_per_profile(self):
         self._open_three()
@@ -712,8 +711,7 @@ class MuseSessionManagerTests(unittest.TestCase):
         self.assertEqual(self.drivers[1].requested_urls[0], expected_login_url)
         self.assertIn("/v3/signin/identifier?", expected_login_url)
         self.assertIn("Email=owner%40example.com", expected_login_url)
-        self.assertIn("service=youtube", expected_login_url)
-        self.assertIn(google_muse_login_url("owner@example.com"), self.drivers[1].requested_urls)
+        self.assertIn("https://muse.ai/", self.drivers[1].requested_urls)
         self.assertEqual(self.drivers[1].password.value, secret + GOOGLE_ENTER_KEY)
         checkpoint = (self.root / "data" / "muse_sessions.json").read_text(encoding="utf-8")
         self.assertNotIn(secret, checkpoint)

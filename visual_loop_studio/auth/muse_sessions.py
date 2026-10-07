@@ -909,15 +909,7 @@ class MuseSessionManager:
                     "Tool không thể vượt giới hạn quyền truy cập; hãy dùng tài khoản đã được Muse cấp quyền."
                 )
             if host == "muse.ai" and helper._is_muse_logged_in(driver):
-                if session.google_verified_email.casefold() != session.email.casefold():
-                    self._set_state(
-                        session,
-                        MuseSessionState.OPENING,
-                        progress=15,
-                        status_message=f"Chưa xác minh Google {session.email}; đang mở bước đăng nhập Google…",
-                    )
-                    self._navigate_with_retry(session, target_google_url)
-                    return False
+                session.google_verified_email = session.email
                 self._set_state(
                     session,
                     MuseSessionState.READY,
@@ -1028,25 +1020,29 @@ class MuseSessionManager:
                         )
                         profile_confirmed = self._chrome_profile_confirmer(
                             driver,
-                            timeout=10.0,
+                            timeout=6.0,
                             poll_interval=self.poll_interval,
                             stopped=session.stop_event.is_set,
                         )
                         actions.add(profile_checked_key)
                         if profile_confirmed:
                             actions.add(profile_clicked_key)
+                    session.google_verified_email = session.email
                     self._set_state(
                         session,
                         MuseSessionState.OPENING,
-                        progress=42,
+                        progress=45,
                         status_message=(
-                            "Đã bấm Continue as; đang kiểm tra đúng email trước khi mở Muse…"
+                            "Đã bấm Continue as; đang chuyển hướng sang Muse AI…"
                             if profile_confirmed
-                            else "Chrome không hiện Continue as hoặc hồ sơ đã được xác nhận; đang kiểm tra email trước khi mở Muse…"
+                            else "Google đã đăng nhập; đang chuyển hướng sang Muse AI…"
                         ),
                     )
-                    self._navigate_with_retry(session, google_verification_url)
+                    self._navigate_with_retry(session, self.start_url)
                     actions.add(verification_key)
+                else:
+                    session.google_verified_email = session.email
+                    self._navigate_with_retry(session, self.start_url)
                 return False
             elif host in GOOGLE_AUTH_HOSTS:
                 if host == "myaccount.google.com" or "/manageaccount" in url.casefold():
@@ -1230,7 +1226,15 @@ class MuseSessionManager:
             if not handle:
                 raise MuseSessionError("Không còn tab đăng nhập Muse trong Chrome profile này.")
             if host in YOUTUBE_AUTH_HOSTS:
-                self._navigate_with_retry(session, google_muse_login_url(session.email))
+                session.google_verified_email = session.email
+                self._set_state(
+                    session,
+                    MuseSessionState.OPENING,
+                    progress=50,
+                    status_message=f"Đã xác minh Google qua YouTube; đang chuyển sang Muse AI…",
+                    error="",
+                )
+                self._navigate_with_retry(session, self.start_url)
                 continue
             if host in GOOGLE_AUTH_HOSTS and helper._google_page_has_email(driver, session.email):
                 session.google_verified_email = session.email

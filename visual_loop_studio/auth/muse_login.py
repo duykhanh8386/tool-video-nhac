@@ -789,19 +789,26 @@ def create_muse_chrome_driver(profile: Path, download_dir: Path | None = None):
     options.add_argument("--disable-session-crashed-bubble")
     options.add_argument("--force-renderer-accessibility")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument(
+        "--disable-features=SignInProfileCreation,ChromeSignInBubble,ProfilePicker,IdentityConsistency"
+    )
+    options.add_argument("--disable-signin-promo")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
+    prefs: dict[str, Any] = {
+        "signin.allowed": False,
+    }
     if download_dir is not None:
         download_dir.mkdir(parents=True, exist_ok=True)
-        options.add_experimental_option(
-            "prefs",
+        prefs.update(
             {
                 "download.default_directory": str(download_dir.resolve()),
                 "download.prompt_for_download": False,
                 "download.directory_upgrade": True,
                 "safebrowsing.enabled": True,
-            },
+            }
         )
+    options.add_experimental_option("prefs", prefs)
     options.page_load_strategy = "eager"
     # Selenium Manager/ChromeDriver uses a shared cache under the Windows user
     # profile. Starting two instances at the exact same time can race in that
@@ -829,6 +836,8 @@ def muse_native_browser_command(executable: str | Path, profile: Path, start_url
         "--start-maximized",
         "--force-renderer-accessibility",
         "--disable-blink-features=AutomationControlled",
+        "--disable-features=SignInProfileCreation,ChromeSignInBubble,ProfilePicker,IdentityConsistency",
+        "--disable-signin-promo",
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=0",
         safe_url,
@@ -852,32 +861,59 @@ def click_chrome_profile_continue(
     """
     if os.name != "nt":
         return False
-    try:
-        from pywinauto import Desktop
-    except (ImportError, OSError):
-        return False
 
     marker = f"Visual Loop Studio Muse Login {uuid.uuid4().hex}"
+    original_title = ""
     try:
         original_title = str(driver.execute_script("return document.title||'';") or "")
         driver.execute_script("document.title=arguments[0];", marker)
     except Exception:
-        return False
+        pass
 
     deadline = time.monotonic() + max(0.1, float(timeout))
     interval = max(0.05, float(poll_interval))
-    prefixes = ("continue as ", "tiếp tục với tư cách ")
+    prefixes = (
+        "continue as",
+        "tiếp tục với tư cách",
+        "use chrome without",
+        "sử dụng chrome mà không",
+        "use without an account",
+    )
     try:
         while time.monotonic() < deadline:
             if stopped is not None and stopped():
                 return False
+
+            clicked = False
+            # 1. Try pywinauto if installed in the runtime environment
             try:
+                from pywinauto import Desktop
+
                 with _CHROME_PROFILE_UI_LOCK:
                     windows = Desktop(backend="uia").windows(visible_only=True)
                     for window in windows:
-                        title = str(window.window_text() or getattr(window.element_info, "name", "") or "")
-                        if marker.casefold() not in title.casefold():
+                        title = str(
+                            window.window_text()
+                            or getattr(window.element_info, "name", "")
+                            or ""
+                        ).casefold()
+                        class_name = str(
+                            getattr(window.element_info, "class_name", "") or ""
+                        ).casefold()
+
+                        is_target = (
+                            marker.casefold() in title
+                            or "chrome" in class_name
+                            or "chrome" in title
+                            or "edge" in class_name
+                            or "make chrome" in title
+                            or "tùy chỉnh" in title
+                            or "youtube" in title
+                            or "google" in title
+                        )
+                        if not is_target:
                             continue
+
                         for control in window.descendants(control_type="Button"):
                             label = str(
                                 control.window_text()
@@ -890,24 +926,65 @@ def click_chrome_profile_continue(
                                 control.invoke()
                             except Exception:
                                 control.click_input()
-                            settle_deadline = time.monotonic() + max(0.0, float(settle_seconds))
-                            while time.monotonic() < settle_deadline:
-                                if stopped is not None and stopped():
-                                    return False
-                                remaining = max(0.0, settle_deadline - time.monotonic())
-                                if remaining <= 0:
-                                    break
-                                time.sleep(min(interval, remaining))
-                            return True
+                            clicked = True
+                            break
+                        if clicked:
+                            break
             except Exception:
-                pass
+                clicked = False
+
+            # 2. Native Windows PowerShell UI Automation fallback when pywinauto is not imported
+            if not clicked and "pywinauto" not in sys.modules:
+                try:
+                    ps_cmd = (
+                        "Add-Type -AssemblyName UIAutomationClient; "
+                        "Add-Type -AssemblyName UIAutomationTypes; "
+                        "$root = [System.Windows.Automation.AutomationElement]::RootElement; "
+                        "$wins = $root.FindAll([System.Windows.Automation.TreeScope]::Children, "
+                        "[System.Windows.Automation.Condition]::TrueCondition); "
+                        "foreach ($w in $wins) { "
+                        "  if ($w.Current.ClassName -match 'Chrome' -or $w.Current.Name -match 'Chrome|YouTube|Google|Make Chrome') { "
+                        "    $btns = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, "
+                        "      [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty, "
+                        "        [System.Windows.Automation.ControlType]::Button)); "
+                        "    foreach ($b in $btns) { "
+                        "      if ($b.Current.Name -match '(?i)(continue\\s+as|tiếp\\s*tục\\s*với\\s*tư\\s*cách|use\\s+chrome\\s+without|sử\\s*dụng\\s*chrome\\s*mà\\s*không)') { "
+                        "        $inv = $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern); "
+                        "        if ($inv) { $inv.Invoke(); exit 0 } "
+                        "      } "
+                        "    } "
+                        "  } "
+                        "}; exit 1"
+                    )
+                    res = subprocess.run(
+                        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                        capture_output=True,
+                        timeout=2.0,
+                    )
+                    if res.returncode == 0:
+                        clicked = True
+                except Exception:
+                    pass
+
+            if clicked:
+                settle_deadline = time.monotonic() + max(0.0, float(settle_seconds))
+                while time.monotonic() < settle_deadline:
+                    if stopped is not None and stopped():
+                        return False
+                    remaining = max(0.0, settle_deadline - time.monotonic())
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(interval, remaining))
+                return True
+
             time.sleep(interval)
         return False
     finally:
-        try:
-            driver.execute_script("document.title=arguments[0];", original_title)
-        except Exception:
-            pass
+        if original_title:
+            try:
+                driver.execute_script("document.title=arguments[0];", original_title)
+            except Exception:
+                pass
 
 
 def launch_muse_native_browser(profile: Path, start_url: str = MUSE_START_URL) -> subprocess.Popen:
