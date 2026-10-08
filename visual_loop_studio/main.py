@@ -425,9 +425,10 @@ QLineEdit, QComboBox, QSpinBox, QTableWidget, QPlainTextEdit, QTextEdit {
     background: #ffffff;
     border: 1.5px solid #cbd5e1;
     border-radius: 6px;
-    padding: 8px 10px;
+    padding: 7px 10px;
     color: #0f172a;
     font-size: 13px;
+    min-height: 22px;
 }
 
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {
@@ -439,9 +440,10 @@ QPushButton {
     background: #ffffff;
     border: 1.5px solid #cbd5e1;
     border-radius: 6px;
-    padding: 8px 14px;
+    padding: 7px 14px;
     color: #1e293b;
     font-weight: 600;
+    min-height: 22px;
 }
 
 QPushButton:hover {

@@ -137,8 +137,19 @@ class MuseAccountsPage(QWidget):
         self.session_manager.shutdown()
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setSpacing(10)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        page_scroll = QScrollArea()
+        page_scroll.setWidgetResizable(True)
+        outer_layout.addWidget(page_scroll)
+
+        content = QWidget()
+        root = QVBoxLayout(content)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+        page_scroll.setWidget(content)
+
         title = QLabel("✨ Muse AI Studio — Batch Ảnh Thành Video (3 Tài Khoản)")
         title.setObjectName("pageTitle")
         root.addWidget(title)
@@ -154,6 +165,7 @@ class MuseAccountsPage(QWidget):
         connection_row = QHBoxLayout(connection_group)
         connection_row.setSpacing(10)
         self.connection_mode = QComboBox()
+        self.connection_mode.setMinimumHeight(36)
         self.connection_mode.addItem(
             "Phương án 1 — Profile riêng: tự điền Google hoặc đăng nhập tay",
             MuseSessionOpenMode.MANUAL_BROWSER.value,
@@ -168,8 +180,10 @@ class MuseAccountsPage(QWidget):
         self.connection_mode.setCurrentIndex(max(0, mode_index))
         self.connection_mode.currentIndexChanged.connect(self._connection_mode_changed)
         self.open_browsers = QPushButton("🌐 Mở Chrome/Muse đã tick")
+        self.open_browsers.setMinimumHeight(36)
         self.open_browsers.clicked.connect(self._open_browser_sessions)
         self.scan_tabs = QPushButton("🔍 Quét tab Muse đang mở")
+        self.scan_tabs.setMinimumHeight(36)
         self.scan_tabs.clicked.connect(self._scan_muse_tabs)
         connection_row.addWidget(self.connection_mode, 1)
         connection_row.addWidget(self.open_browsers)
@@ -179,20 +193,25 @@ class MuseAccountsPage(QWidget):
         # Card 1: Nguồn ảnh & Thư mục lưu
         source_group = QGroupBox("📁 Nguồn Ảnh & Thư Mục Xuất File")
         source_grid = QGridLayout(source_group)
-        source_grid.setVerticalSpacing(8)
+        source_grid.setVerticalSpacing(10)
         source_grid.setHorizontalSpacing(10)
         self.url = QLineEdit(self.settings.muse_start_url or MUSE_START_URL)
+        self.url.setMinimumHeight(36)
         self.url.editingFinished.connect(self._save_url)
         self.image_folder = QLineEdit()
+        self.image_folder.setMinimumHeight(36)
         self.image_folder.setPlaceholderText("Chọn hoặc nhập đường dẫn thư mục ảnh (JPG, PNG, WEBP)...")
         choose_images = QPushButton("📂 Chọn thư mục ảnh")
+        choose_images.setMinimumHeight(36)
         choose_images.clicked.connect(self._choose_image_folder)
         self.recursive = QCheckBox("Quét cả thư mục con")
         self.image_count = QLabel("Chưa quét ảnh")
         self.image_count.setStyleSheet("color: #2563eb; font-weight: 600; padding: 2px 4px;")
         self.output_folder = QLineEdit(self.settings.last_output_folder)
+        self.output_folder.setMinimumHeight(36)
         self.output_folder.setPlaceholderText("Chọn hoặc nhập thư mục lưu video MP4 kết quả...")
         choose_output = QPushButton("📁 Chọn thư mục lưu")
+        choose_output.setMinimumHeight(36)
         choose_output.clicked.connect(self._choose_output_folder)
 
         source_grid.addWidget(QLabel("MUSE_URL:"), 0, 0)
@@ -210,7 +229,7 @@ class MuseAccountsPage(QWidget):
         # Card 2: Hộp nhập Prompt chuyên biệt (AI Motion Prompt Box)
         prompt_card = QGroupBox("✨ Prompt Tạo Video AI (Motion Prompt)")
         prompt_vbox = QVBoxLayout(prompt_card)
-        prompt_vbox.setSpacing(6)
+        prompt_vbox.setSpacing(8)
 
         prompt_header = QHBoxLayout()
         prompt_hint = QLabel("Mô tả chuyển động, góc máy, ánh sáng (áp dụng chung cho batch ảnh):")
@@ -230,8 +249,7 @@ class MuseAccountsPage(QWidget):
             "✍️ Nhập prompt điều khiển chuyển động cho AI Muse tại đây...\n"
             "Ví dụ: Tạo video chuyển động nhân vật nhẹ nhàng, cinematic lighting, ultra smooth camera pan, 4k highly detailed"
         )
-        self.prompt.setMinimumHeight(75)
-        self.prompt.setMaximumHeight(95)
+        self.prompt.setMinimumHeight(85)
         self.prompt.setStyleSheet(
             "QPlainTextEdit { "
             "background: #ffffff; "
@@ -273,6 +291,7 @@ class MuseAccountsPage(QWidget):
             lbl = QLabel(icon_label)
             lbl.setStyleSheet("color: #1e293b; font-weight: 600; font-size: 13px;")
             box.addWidget(lbl)
+            widget.setMinimumHeight(36)
             widget.setMinimumWidth(130)
             box.addWidget(widget)
             settings_layout.addLayout(box)
@@ -326,8 +345,11 @@ class MuseAccountsPage(QWidget):
         utility_row = QHBoxLayout()
         utility_row.setSpacing(10)
         self.resume = QPushButton("⏯ Tiếp tục")
+        self.resume.setMinimumHeight(34)
         self.redistribute = QPushButton("🔁 Phân bổ lại ảnh chưa gửi")
+        self.redistribute.setMinimumHeight(34)
         self.clear = QPushButton("🗑 Xóa dữ liệu UI")
+        self.clear.setMinimumHeight(34)
         utility_row.addWidget(self.resume)
         utility_row.addWidget(self.redistribute)
         utility_row.addWidget(self.clear)
@@ -354,11 +376,12 @@ class MuseAccountsPage(QWidget):
         root.addWidget(self.start_requirements)
 
         self.tabs = QTabWidget()
+        self.tabs.setMinimumHeight(560)
         for worker_id in range(1, MUSE_SESSION_COUNT + 1):
             page, widgets = self._build_worker_tab(worker_id)
             self._workers[worker_id] = widgets
             self.tabs.addTab(page, f"Tài khoản {worker_id}")
-        root.addWidget(self.tabs, 1)
+        root.addWidget(self.tabs)
 
     def _build_worker_tab(self, worker_id: int) -> tuple[QWidget, _WorkerWidgets]:
         page = QScrollArea()
