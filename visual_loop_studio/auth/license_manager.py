@@ -20,7 +20,7 @@ KEYGEN_CONFIG_FILE = DATA_DIR / "license_config.json"
 KEYGEN_API_URL = "https://api.keygen.sh/v1"
 
 # Người dùng có thể điền sẵn Account ID vào đây hoặc qua UI
-DEFAULT_ACCOUNT_ID = ""
+DEFAULT_ACCOUNT_ID = "ca6dc302-b143-4eac-b61d-a8f0cb8f6706"
 
 
 def get_hardware_fingerprint() -> str:
@@ -179,20 +179,27 @@ class LicenseManager:
             raise ConnectionError(f"Không thể kết nối tới Keygen: {exc}") from exc
 
         meta = body.get("meta", {})
-        code = meta.get("code", "")
-        constant = meta.get("constant", "")
+        code = str(meta.get("code") or meta.get("constant") or "").upper()
+        detail = str(meta.get("detail") or "License không hợp lệ.")
         data_block = body.get("data") or {}
         license_id = data_block.get("id", "")
         attrs = data_block.get("attributes", {})
         expiry = attrs.get("expiry")
 
         # Trường hợp 1: Key đã hợp lệ cho chính máy này
-        if meta.get("valid", False) or constant == "VALID":
+        if meta.get("valid", False) or code == "VALID":
             self._save_valid_license(license_key, license_id, expiry, attrs)
             return True, "Kích hoạt bản quyền thành công!", body
 
-        # Trường hợp 2: Key hợp lệ nhưng máy này chưa được activate (FINGERPRINT_SCOPE_MISMATCH hoặc NO_MACHINES)
-        if constant in {"FINGERPRINT_SCOPE_MISMATCH", "NO_MACHINES", "NO_MACHINE"}:
+        # Trường hợp 2: Key hợp lệ trên hệ thống nhưng máy tính này chưa được đăng ký vào license
+        # (Keygen trả về "fingerprint is not activated (has no associated machines)" hoặc code NO_MACHINES / FINGERPRINT_SCOPE_MISMATCH)
+        detail_lower = detail.lower()
+        if (
+            code in {"FINGERPRINT_SCOPE_MISMATCH", "NO_MACHINES", "NO_MACHINE", "NOT_ACTIVATED", "UNACTIVATED"}
+            or "not activated" in detail_lower
+            or "no associated machines" in detail_lower
+            or "fingerprint" in detail_lower
+        ):
             # Thử tự động đăng ký máy tính này vào license
             act_ok, act_msg, machine_data = self._activate_machine(license_key, license_id)
             if act_ok:
@@ -203,15 +210,14 @@ class LicenseManager:
                 return False, act_msg, body
 
         # Các lỗi khác
-        detail = meta.get("detail", "License không hợp lệ.")
-        if constant == "EXPIRED":
+        if code == "EXPIRED" or "expired" in detail_lower:
             return False, "License đã hết hạn sử dụng. Vui lòng liên hệ Admin để gia hạn.", body
-        if constant == "SUSPENDED":
+        if code == "SUSPENDED" or "suspended" in detail_lower:
             return False, "License đã bị tạm khóa bởi Admin.", body
-        if constant == "BANNED":
+        if code == "BANNED" or "banned" in detail_lower:
             return False, "License đã bị cấm/thu hồi.", body
 
-        return False, f"Không thể kích hoạt ({constant}): {detail}", body
+        return False, f"Không thể kích hoạt ({code or 'INVALID'}): {detail}", body
 
     def _activate_machine(self, license_key: str, license_id: str) -> tuple[bool, str, dict[str, Any]]:
         """Đăng ký máy tính này (Machine) vào License trên Keygen."""

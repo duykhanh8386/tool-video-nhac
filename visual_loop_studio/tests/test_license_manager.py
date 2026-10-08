@@ -18,7 +18,8 @@ class LicenseManagerTests(unittest.TestCase):
     def test_account_id_storage(self):
         with tempfile.TemporaryDirectory() as td:
             tmp_cfg = Path(td) / "license_config.json"
-            with patch("auth.license_manager.KEYGEN_CONFIG_FILE", tmp_cfg):
+            with patch("auth.license_manager.KEYGEN_CONFIG_FILE", tmp_cfg), \
+                 patch("auth.license_manager.DEFAULT_ACCOUNT_ID", ""):
                 mgr = LicenseManager()
                 self.assertEqual(mgr.get_account_id(), "")
                 mgr.set_account_id("my-test-account-id-1234")
@@ -30,7 +31,8 @@ class LicenseManagerTests(unittest.TestCase):
             tmp_lic = Path(td) / "license.json"
             tmp_cfg = Path(td) / "license_config.json"
             with patch("auth.license_manager.LICENSE_FILE", tmp_lic), \
-                 patch("auth.license_manager.KEYGEN_CONFIG_FILE", tmp_cfg):
+                 patch("auth.license_manager.KEYGEN_CONFIG_FILE", tmp_cfg), \
+                 patch("auth.license_manager.DEFAULT_ACCOUNT_ID", ""):
                 mgr = LicenseManager()
                 valid, msg = mgr.check_license()
                 self.assertFalse(valid)
@@ -71,6 +73,49 @@ class LicenseManagerTests(unittest.TestCase):
                     self.assertIn("thành công", msg)
                     self.assertTrue(mgr.is_cached_valid())
                     self.assertTrue(tmp_lic.exists())
+
+    def test_validate_online_unactivated_machine_triggers_activation(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp_lic = Path(td) / "license.json"
+            tmp_cfg = Path(td) / "license_config.json"
+            with patch("auth.license_manager.LICENSE_FILE", tmp_lic), \
+                 patch("auth.license_manager.KEYGEN_CONFIG_FILE", tmp_cfg):
+                mgr = LicenseManager()
+                mgr.set_account_id("acc-uuid-1234")
+
+                # Keygen returns NO_MACHINES with detail "fingerprint is not activated (has no associated machines)"
+                mock_val_res = MagicMock()
+                mock_val_res.read.return_value = json.dumps({
+                    "meta": {
+                        "code": "NO_MACHINES",
+                        "detail": "fingerprint is not activated (has no associated machines)",
+                        "valid": False
+                    },
+                    "data": {
+                        "id": "lic-1234",
+                        "type": "licenses",
+                        "attributes": {
+                            "name": "Khách B",
+                            "expiry": "2030-01-01T00:00:00.000Z",
+                            "status": "ACTIVE"
+                        }
+                    }
+                }).encode("utf-8")
+                mock_val_res.__enter__.return_value = mock_val_res
+
+                mock_machine_data = {
+                    "data": {
+                        "id": "mach-5678",
+                        "type": "machines"
+                    }
+                }
+                with patch("urllib.request.urlopen", return_value=mock_val_res), \
+                     patch.object(mgr, "_activate_machine", return_value=(True, "Thêm máy thành công", mock_machine_data)):
+                    ok, msg, data = mgr.validate_online("TEST-KEY-1111-2222")
+                    self.assertTrue(ok)
+                    self.assertIn("thành công", msg)
+                    self.assertTrue(mgr.is_cached_valid())
+                    self.assertEqual(mgr.get_license_info().get("machine_id"), "mach-5678")
 
 
 if __name__ == "__main__":
