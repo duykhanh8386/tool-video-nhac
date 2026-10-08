@@ -35,10 +35,41 @@ class LicenseDialog(QDialog):
         self._worker: ValidationWorker | None = None
 
         self.setWindowTitle("Xác thực Bản Quyền — Keygen.sh")
-        self.setFixedSize(540, 520)
+        self.setMinimumWidth(520)
+        self.resize(540, 420)
         self.setModal(True)
         self._build_ui()
         self._load_data()
+
+    def _toggle_admin_settings(self) -> None:
+        visible = self.acc_group.isVisible()
+        self.acc_group.setVisible(not visible)
+        self.toggle_admin_btn.setText("▲ Thu gọn cấu hình Admin" if not visible else "⚙️ Cấu hình máy chủ Keygen (Admin)...")
+        self.adjustSize()
+
+    def _load_data(self) -> None:
+        acc_id = self.manager.get_account_id()
+        self.acc_input.setText(acc_id)
+        # Nếu đã có Account ID thì mặc định ẩn đi đối với người dùng
+        self.acc_group.setVisible(not bool(acc_id))
+        self.toggle_admin_btn.setText("⚙️ Cấu hình máy chủ Keygen (Admin)..." if acc_id else "▲ Thu gọn cấu hình Admin")
+
+        info = self.manager.get_license_info()
+        cached_key = info.get("key", "")
+        if cached_key:
+            self.key_input.setText(cached_key)
+
+        if info.get("valid"):
+            expiry = info.get("expiry")
+            exp_text = f"Hết hạn: {expiry[:10]}" if expiry else "Thời hạn: Vĩnh viễn (Perpetual)"
+            cust_name = info.get("customer_name")
+            owner_text = f" • Khách hàng: {cust_name}" if cust_name else ""
+            self.status_lbl.setText(f"✅ ĐÃ KÍCH HOẠT HỢP LỆ ({exp_text}{owner_text})")
+            self.status_lbl.setStyleSheet("color: #16a34a; font-weight: bold;")
+            self.deactivate_btn.setVisible(True)
+            self.activate_btn.setText("🔄 Kiểm tra lại")
+        else:
+            self.status_lbl.setText("⚠️ Chưa kích hoạt. Vui lòng nhập License Key.")
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -91,10 +122,25 @@ class LicenseDialog(QDialog):
         hwid_layout.addWidget(self.copy_btn)
         root.addWidget(hwid_group)
 
-        # 2. Keygen Account ID
-        acc_group = QGroupBox("Keygen Account ID (Mã tài khoản nhà phát triển)")
-        acc_group.setStyleSheet("QGroupBox { font-weight: 600; color: #334155; }")
-        acc_layout = QVBoxLayout(acc_group)
+        # 2. License Key (Trọng tâm chính cho người dùng)
+        key_group = QGroupBox("Mã Bản Quyền (License Key)")
+        key_group.setStyleSheet("QGroupBox { font-weight: 600; color: #334155; }")
+        key_layout = QVBoxLayout(key_group)
+        key_layout.setSpacing(6)
+
+        self.key_input = QLineEdit()
+        self.key_input.setPlaceholderText("Dán mã License Key được cấp vào đây (XXXX-XXXX-XXXX...)")
+        self.key_input.setStyleSheet(
+            "QLineEdit { font-family: 'Consolas', monospace; font-size: 13px; font-weight: bold; "
+            "color: #2563eb; background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 6px; padding: 10px 12px; }"
+        )
+        key_layout.addWidget(self.key_input)
+        root.addWidget(key_group)
+
+        # 3. Keygen Account ID (Ẩn mặc định cho khách hàng, chỉ mở khi cần cấu hình máy chủ)
+        self.acc_group = QGroupBox("Cấu Hình Máy Chủ Keygen (Dành Cho Admin)")
+        self.acc_group.setStyleSheet("QGroupBox { font-weight: 600; color: #64748b; }")
+        acc_layout = QVBoxLayout(self.acc_group)
         acc_layout.setSpacing(6)
 
         self.acc_input = QLineEdit()
@@ -107,22 +153,17 @@ class LicenseDialog(QDialog):
         acc_hint.setStyleSheet("font-size: 11px; color: #64748b;")
         acc_layout.addWidget(self.acc_input)
         acc_layout.addWidget(acc_hint)
-        root.addWidget(acc_group)
+        root.addWidget(self.acc_group)
 
-        # 3. License Key
-        key_group = QGroupBox("Mã Bản Quyền (License Key)")
-        key_group.setStyleSheet("QGroupBox { font-weight: 600; color: #334155; }")
-        key_layout = QVBoxLayout(key_group)
-        key_layout.setSpacing(6)
-
-        self.key_input = QLineEdit()
-        self.key_input.setPlaceholderText("XXXX-XXXX-XXXX-XXXX-XXXX-XXXX")
-        self.key_input.setStyleSheet(
-            "QLineEdit { font-family: 'Consolas', monospace; font-size: 13px; font-weight: bold; "
-            "color: #2563eb; background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 6px; padding: 8px 10px; }"
+        # Nút chuyển đổi hiển thị cài đặt Account ID
+        self.toggle_admin_btn = QPushButton("⚙️ Cấu hình máy chủ Keygen (Admin)...")
+        self.toggle_admin_btn.setFlat(True)
+        self.toggle_admin_btn.setStyleSheet(
+            "QPushButton { color: #64748b; font-size: 11px; text-align: left; padding: 0; } "
+            "QPushButton:hover { color: #2563eb; text-decoration: underline; }"
         )
-        key_layout.addWidget(self.key_input)
-        root.addWidget(key_group)
+        self.toggle_admin_btn.clicked.connect(self._toggle_admin_settings)
+        root.addWidget(self.toggle_admin_btn)
 
         # Status Label
         self.status_lbl = QLabel("")
@@ -170,25 +211,6 @@ class LicenseDialog(QDialog):
 
         root.addLayout(btn_row)
 
-    def _load_data(self) -> None:
-        self.acc_input.setText(self.manager.get_account_id())
-        info = self.manager.get_license_info()
-        cached_key = info.get("key", "")
-        if cached_key:
-            self.key_input.setText(cached_key)
-
-        if info.get("valid"):
-            expiry = info.get("expiry")
-            exp_text = f"Hết hạn: {expiry[:10]}" if expiry else "Thời hạn: Vĩnh viễn (Perpetual)"
-            cust_name = info.get("customer_name")
-            owner_text = f" • Khách hàng: {cust_name}" if cust_name else ""
-            self.status_lbl.setText(f"✅ ĐÃ KÍCH HOẠT HỢP LỆ ({exp_text}{owner_text})")
-            self.status_lbl.setStyleSheet("color: #16a34a; font-weight: bold;")
-            self.deactivate_btn.setVisible(True)
-            self.activate_btn.setText("🔄 Kiểm tra lại")
-        else:
-            self.status_lbl.setText("⚠️ Chưa kích hoạt. Vui lòng nhập License Key.")
-            self.status_lbl.setStyleSheet("color: #d97706; font-weight: 500;")
 
     def _copy_hwid(self) -> None:
         clipboard = QApplication.clipboard()
