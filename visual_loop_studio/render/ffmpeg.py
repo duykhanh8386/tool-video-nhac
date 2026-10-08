@@ -35,10 +35,18 @@ def _filter_script(value: str) -> str:
 
 def _video_encoding(encoder: str) -> list[str]:
     if encoder == "libx264":
-        return ["-c:v", encoder, "-preset", "medium", "-crf", "18"]
+        return ["-c:v", encoder, "-preset", "veryfast", "-crf", "20", "-threads", "0"]
     if encoder == "hevc_nvenc":
-        return ["-c:v", encoder, "-preset", "p5", "-cq", "20", "-tag:v", "hvc1"]
-    return ["-c:v", encoder, "-preset", "p5", "-cq", "19"]
+        return ["-c:v", encoder, "-preset", "p4", "-cq", "22", "-tag:v", "hvc1"]
+    if encoder == "h264_nvenc":
+        return ["-c:v", encoder, "-preset", "p4", "-cq", "21"]
+    if encoder == "h264_qsv":
+        return ["-c:v", encoder, "-preset", "veryfast", "-global_quality", "22"]
+    if encoder == "h264_amf":
+        return ["-c:v", encoder, "-quality", "speed", "-rc", "cqp", "-qp_p", "22", "-qp_i", "22"]
+    if encoder == "h264_mf":
+        return ["-c:v", encoder, "-b:v", "8M"]
+    return ["-c:v", encoder, "-preset", "p4", "-cq", "21"]
 
 
 def build_visual_job(project: VisualProject, settings: AppSettings) -> RenderJob:
