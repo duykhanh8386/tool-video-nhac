@@ -139,7 +139,7 @@ class MuseAccountsPage(QWidget):
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setSpacing(10)
-        title = QLabel("✨ Muse AI — Batch ảnh thành video trên 3 tài khoản")
+        title = QLabel("✨ Muse AI Studio — Batch Ảnh Thành Video (3 Tài Khoản)")
         title.setObjectName("pageTitle")
         root.addWidget(title)
         notice = QLabel(
@@ -150,7 +150,7 @@ class MuseAccountsPage(QWidget):
         notice.setObjectName("notice")
         root.addWidget(notice)
 
-        connection_group = QGroupBox("Cách kết nối Muse")
+        connection_group = QGroupBox("🌐 Cách kết nối tài khoản Muse")
         connection_row = QHBoxLayout(connection_group)
         connection_row.setSpacing(10)
         self.connection_mode = QComboBox()
@@ -176,26 +176,25 @@ class MuseAccountsPage(QWidget):
         connection_row.addWidget(self.scan_tabs)
         root.addWidget(connection_group)
 
-        source_group = QGroupBox("Nguồn ảnh và Prompt chung")
+        # Card 1: Nguồn ảnh & Thư mục lưu
+        source_group = QGroupBox("📁 Nguồn Ảnh & Thư Mục Xuất File")
         source_grid = QGridLayout(source_group)
         source_grid.setVerticalSpacing(8)
         source_grid.setHorizontalSpacing(10)
         self.url = QLineEdit(self.settings.muse_start_url or MUSE_START_URL)
         self.url.editingFinished.connect(self._save_url)
         self.image_folder = QLineEdit()
-        self.image_folder.setPlaceholderText("Thư mục chứa JPG, JPEG, PNG hoặc WEBP...")
+        self.image_folder.setPlaceholderText("Chọn hoặc nhập đường dẫn thư mục ảnh (JPG, PNG, WEBP)...")
         choose_images = QPushButton("📂 Chọn thư mục ảnh")
         choose_images.clicked.connect(self._choose_image_folder)
-        self.recursive = QCheckBox("Quét thư mục con")
+        self.recursive = QCheckBox("Quét cả thư mục con")
         self.image_count = QLabel("Chưa quét ảnh")
-        self.image_count.setObjectName("muted")
-        self.prompt = QPlainTextEdit()
-        self.prompt.setPlaceholderText("Prompt tạo video chung cho Muse AI — được snapshot khi bắt đầu batch...")
-        self.prompt.setMaximumHeight(85)
+        self.image_count.setStyleSheet("color: #2563eb; font-weight: 600; padding: 2px 4px;")
         self.output_folder = QLineEdit(self.settings.last_output_folder)
-        self.output_folder.setPlaceholderText("Thư mục lưu video MP4 kết quả...")
-        choose_output = QPushButton("📁 Chọn output")
+        self.output_folder.setPlaceholderText("Chọn hoặc nhập thư mục lưu video MP4 kết quả...")
+        choose_output = QPushButton("📁 Chọn thư mục lưu")
         choose_output.clicked.connect(self._choose_output_folder)
+
         source_grid.addWidget(QLabel("MUSE_URL:"), 0, 0)
         source_grid.addWidget(self.url, 0, 1, 1, 3)
         source_grid.addWidget(QLabel("Thư mục ảnh:"), 1, 0)
@@ -203,16 +202,58 @@ class MuseAccountsPage(QWidget):
         source_grid.addWidget(choose_images, 1, 2)
         source_grid.addWidget(self.recursive, 1, 3)
         source_grid.addWidget(self.image_count, 2, 1, 1, 3)
-        source_grid.addWidget(QLabel("Prompt chung:"), 3, 0)
-        source_grid.addWidget(self.prompt, 3, 1, 1, 3)
-        source_grid.addWidget(QLabel("Thư mục output:"), 4, 0)
-        source_grid.addWidget(self.output_folder, 4, 1, 1, 2)
-        source_grid.addWidget(choose_output, 4, 3)
+        source_grid.addWidget(QLabel("Thư mục output:"), 3, 0)
+        source_grid.addWidget(self.output_folder, 3, 1, 1, 2)
+        source_grid.addWidget(choose_output, 3, 3)
         root.addWidget(source_group)
 
-        settings_group = QGroupBox("Cài đặt video chung (để trống = Muse mặc định)")
+        # Card 2: Hộp nhập Prompt chuyên biệt (AI Motion Prompt Box)
+        prompt_card = QGroupBox("✨ Prompt Tạo Video AI (Motion Prompt)")
+        prompt_vbox = QVBoxLayout(prompt_card)
+        prompt_vbox.setSpacing(6)
+
+        prompt_header = QHBoxLayout()
+        prompt_hint = QLabel("Mô tả chuyển động, góc máy, ánh sáng (áp dụng chung cho batch ảnh):")
+        prompt_hint.setStyleSheet("color: #475569; font-size: 12px; font-weight: 500;")
+        prompt_tag = QLabel("📸 Snapshot khi bắt đầu batch")
+        prompt_tag.setStyleSheet(
+            "color: #1d4ed8; font-size: 11px; font-weight: 600; background: #eff6ff; "
+            "border: 1px solid #bfdbfe; border-radius: 4px; padding: 2px 8px;"
+        )
+        prompt_header.addWidget(prompt_hint)
+        prompt_header.addStretch()
+        prompt_header.addWidget(prompt_tag)
+        prompt_vbox.addLayout(prompt_header)
+
+        self.prompt = QPlainTextEdit()
+        self.prompt.setPlaceholderText(
+            "✍️ Nhập prompt điều khiển chuyển động cho AI Muse tại đây...\n"
+            "Ví dụ: Tạo video chuyển động nhân vật nhẹ nhàng, cinematic lighting, ultra smooth camera pan, 4k highly detailed"
+        )
+        self.prompt.setMinimumHeight(75)
+        self.prompt.setMaximumHeight(95)
+        self.prompt.setStyleSheet(
+            "QPlainTextEdit { "
+            "background: #ffffff; "
+            "border: 2px solid #3b82f6; "
+            "border-radius: 8px; "
+            "padding: 10px 12px; "
+            "color: #0f172a; "
+            "font-size: 13px; "
+            "line-height: 1.4; "
+            "} "
+            "QPlainTextEdit:focus { "
+            "border: 2px solid #1d4ed8; "
+            "background: #ffffff; "
+            "}"
+        )
+        prompt_vbox.addWidget(self.prompt)
+        root.addWidget(prompt_card)
+
+        # Card 3: Cài đặt video
+        settings_group = QGroupBox("⚙️ Cài đặt video Muse (để trống = mặc định của Muse)")
         settings_layout = QHBoxLayout(settings_group)
-        settings_layout.setSpacing(16)
+        settings_layout.setSpacing(20)
         # Giữ ngầm model và quantity để bảo toàn tương thích tuyệt đối
         self.model = self._editable_combo(("",))
         self.quantity = QSpinBox()
@@ -230,43 +271,52 @@ class MuseAccountsPage(QWidget):
         ):
             box = QHBoxLayout()
             lbl = QLabel(icon_label)
-            lbl.setStyleSheet("color: #bae6fd; font-weight: 500;")
+            lbl.setStyleSheet("color: #1e293b; font-weight: 600; font-size: 13px;")
             box.addWidget(lbl)
-            widget.setMinimumWidth(125)
+            widget.setMinimumWidth(130)
             box.addWidget(widget)
             settings_layout.addLayout(box)
         settings_layout.addStretch()
         root.addWidget(settings_group)
 
-        # Thanh điều khiển chính và công cụ phụ
+        # Card 4: Thanh điều khiển chính và công cụ phụ
         actions_card = QWidget()
         actions_card.setStyleSheet(
-            "background: #0f172a; border: 1px solid #1e293b; border-radius: 8px;"
+            "background: #ffffff; border: 1.5px solid #e2e8f0; border-radius: 10px;"
         )
         actions_vbox = QVBoxLayout(actions_card)
-        actions_vbox.setContentsMargins(10, 8, 10, 8)
-        actions_vbox.setSpacing(8)
+        actions_vbox.setContentsMargins(12, 10, 12, 10)
+        actions_vbox.setSpacing(10)
 
         primary_row = QHBoxLayout()
-        primary_row.setSpacing(10)
+        primary_row.setSpacing(12)
         self.start_all = QPushButton("▶ Bắt đầu xử lý")
         self.start_all.setObjectName("primary")
-        self.start_all.setMinimumHeight(38)
-        self.start_all.setMinimumWidth(150)
-        self.start_all.setStyleSheet("font-size: 13px; font-weight: bold; padding: 0 16px;")
+        self.start_all.setMinimumHeight(40)
+        self.start_all.setMinimumWidth(160)
+        self.start_all.setStyleSheet(
+            "QPushButton#primary { background: #2563eb; border: 1.5px solid #1d4ed8; color: #ffffff; font-weight: 700; font-size: 14px; border-radius: 7px; padding: 0 20px; } "
+            "QPushButton#primary:hover { background: #1d4ed8; } "
+            "QPushButton#primary:disabled { background: #e2e8f0; border-color: #cbd5e1; color: #94a3b8; }"
+        )
 
         self.stop_all = QPushButton("⏹ Dừng tất cả")
-        self.stop_all.setMinimumHeight(38)
+        self.stop_all.setMinimumHeight(40)
         self.stop_all.setMinimumWidth(130)
         self.stop_all.setStyleSheet(
-            "QPushButton { background: #7f1d1d; border: 1px solid #ef4444; color: #fee2e2; font-weight: 600; border-radius: 6px; padding: 0 14px; } "
-            "QPushButton:hover { background: #991b1b; border-color: #f87171; } "
-            "QPushButton:disabled { background: #111827; border-color: #334155; color: #64748b; }"
+            "QPushButton { background: #fee2e2; border: 1.5px solid #f87171; color: #991b1b; font-weight: 700; border-radius: 7px; padding: 0 16px; font-size: 13px; } "
+            "QPushButton:hover { background: #fecaca; border-color: #ef4444; } "
+            "QPushButton:disabled { background: #f8fafc; border-color: #e2e8f0; color: #cbd5e1; }"
         )
 
         self.allocate = QPushButton("📊 Phân bổ ảnh")
-        self.allocate.setMinimumHeight(38)
+        self.allocate.setMinimumHeight(40)
         self.allocate.setMinimumWidth(130)
+        self.allocate.setStyleSheet(
+            "QPushButton { background: #f8fafc; border: 1.5px solid #cbd5e1; color: #0f172a; font-weight: 600; border-radius: 7px; padding: 0 16px; font-size: 13px; } "
+            "QPushButton:hover { background: #f1f5f9; border-color: #94a3b8; } "
+            "QPushButton:disabled { background: #f8fafc; border-color: #e2e8f0; color: #94a3b8; }"
+        )
 
         primary_row.addWidget(self.start_all)
         primary_row.addWidget(self.stop_all)
@@ -274,7 +324,7 @@ class MuseAccountsPage(QWidget):
         primary_row.addStretch()
 
         utility_row = QHBoxLayout()
-        utility_row.setSpacing(8)
+        utility_row.setSpacing(10)
         self.resume = QPushButton("⏯ Tiếp tục")
         self.redistribute = QPushButton("🔁 Phân bổ lại ảnh chưa gửi")
         self.clear = QPushButton("🗑 Xóa dữ liệu UI")
@@ -296,7 +346,7 @@ class MuseAccountsPage(QWidget):
 
         self.global_status = QLabel("Tick các tài khoản muốn chạy, phân bổ ảnh, sau đó bắt đầu.")
         self.global_status.setWordWrap(True)
-        self.global_status.setObjectName("muted")
+        self.global_status.setStyleSheet("color: #475569; font-size: 12px; padding: 2px 4px;")
         root.addWidget(self.global_status)
         self.start_requirements = QLabel()
         self.start_requirements.setWordWrap(True)
@@ -343,15 +393,16 @@ class MuseAccountsPage(QWidget):
         )
         stop = QPushButton("⏹ Dừng worker")
         stop.setStyleSheet(
-            "QPushButton { background: #450a0a; border: 1px solid #7f1d1d; color: #fca5a5; font-weight: 500; } "
-            "QPushButton:hover { background: #7f1d1d; } "
-            "QPushButton:disabled { background: #111827; border-color: #334155; color: #64748b; }"
+            "QPushButton { background: #fee2e2; border: 1.5px solid #f87171; color: #991b1b; font-weight: 600; border-radius: 6px; padding: 6px 14px; } "
+            "QPushButton:hover { background: #fecaca; } "
+            "QPushButton:disabled { background: #f8fafc; border-color: #e2e8f0; color: #cbd5e1; }"
         )
         retry = QPushButton("🔄 Chạy lại ảnh lỗi")
         stop.clicked.connect(lambda _checked=False, value=worker_id: self._stop_worker(value))
         retry.clicked.connect(lambda _checked=False, value=worker_id: self._retry_failed(value))
         login_state = QLabel("Chưa đăng nhập")
         login_state.setWordWrap(True)
+        login_state.setStyleSheet("font-weight: 600; color: #0284c7;")
         profile = QLabel()
         profile.setObjectName("muted")
         profile.setWordWrap(True)
@@ -382,13 +433,13 @@ class MuseAccountsPage(QWidget):
         root.addWidget(account_group)
 
         assigned_count = QLabel("Được phân bổ: 0 ảnh")
-        assigned_count.setStyleSheet("font-weight: 600; color: #7dd3fc;")
+        assigned_count.setStyleSheet("font-weight: 700; color: #0f172a; font-size: 13px;")
         allocation = QPlainTextEdit()
         allocation.setReadOnly(True)
         allocation.setMinimumHeight(70)
         allocation.setMaximumHeight(110)
         allocation.setStyleSheet(
-            "font-family: Consolas, monospace; font-size: 11px; background: #0b1120; border: 1px solid #1e293b; color: #94a3b8;"
+            "font-family: Consolas, monospace; font-size: 12px; background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 6px; color: #0f172a; padding: 6px;"
         )
         allocation.setPlaceholderText("Danh sách ảnh được phân bổ sẽ hiển thị trước khi chạy.")
         root.addWidget(assigned_count)
@@ -396,13 +447,14 @@ class MuseAccountsPage(QWidget):
 
         current_image = QLabel("Ảnh hiện tại: —")
         current_image.setWordWrap(True)
+        current_image.setStyleSheet("font-weight: 600; color: #1e293b;")
         progress = QProgressBar()
         progress.setRange(0, 100)
         stats = QLabel("Chờ: 0 • Thành công: 0 • Lỗi: 0 • Quota: 0")
-        stats.setStyleSheet("font-weight: 600; color: #94a3b8; font-size: 12px;")
+        stats.setStyleSheet("font-weight: 600; color: #475569; font-size: 12px;")
         error = QLabel()
         error.setWordWrap(True)
-        error.setStyleSheet("color: #fca5a5;")
+        error.setStyleSheet("color: #dc2626; font-weight: 600;")
         root.addWidget(current_image)
         root.addWidget(progress)
         root.addWidget(stats)
@@ -417,10 +469,10 @@ class MuseAccountsPage(QWidget):
         logs.setReadOnly(True)
         logs.setMinimumHeight(100)
         logs.setStyleSheet(
-            "font-family: Consolas, monospace; font-size: 11px; background: #0b1120; border: 1px solid #1e293b; color: #cbd5e1;"
+            "font-family: Consolas, monospace; font-size: 12px; background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 6px; color: #0f172a; padding: 6px;"
         )
         logs.setPlaceholderText("Log riêng của worker")
-        root.addWidget(QLabel("Log riêng"))
+        root.addWidget(QLabel("Log riêng:"))
         root.addWidget(logs, 1)
         return page, _WorkerWidgets(
             enabled=enabled,
@@ -587,7 +639,7 @@ class MuseAccountsPage(QWidget):
             widgets.tab_selection.setStyleSheet("")
             return
         widgets.tab_selection.setText(f"ĐÃ CHỌN TAB: {widgets.muse_tab.currentText()}")
-        widgets.tab_selection.setStyleSheet("color: #34d399; font-weight: 600;")
+        widgets.tab_selection.setStyleSheet("color: #059669; font-weight: 700;")
 
     def _selected_tab_handles(
         self,
@@ -860,10 +912,19 @@ class MuseAccountsPage(QWidget):
             blockers.append("chọn thư mục output")
         if blockers:
             message = "Chưa thể bắt đầu: " + "; ".join(blockers) + "."
+            self.start_requirements.setStyleSheet(
+                "background: #fef2f2; color: #991b1b; border: 1.5px solid #fecaca; border-radius: 8px; padding: 10px 14px; font-weight: 500;"
+            )
         elif self._pending_batch_start is not None or self.session_manager.busy:
             message = "Đang đăng nhập; tài khoản READY sẽ tự bắt đầu batch độc lập."
+            self.start_requirements.setStyleSheet(
+                "background: #eff6ff; color: #1e40af; border: 1.5px solid #bfdbfe; border-radius: 8px; padding: 10px 14px; font-weight: 500;"
+            )
         elif batch.running:
             message = "Các worker Muse được chọn đang chạy độc lập."
+            self.start_requirements.setStyleSheet(
+                "background: #eff6ff; color: #1e40af; border: 1.5px solid #bfdbfe; border-radius: 8px; padding: 10px 14px; font-weight: 500;"
+            )
         elif not_ready:
             if self._connection_mode() == MuseSessionOpenMode.EXISTING_TAB:
                 message = f"Sẵn sàng kiểm tra {len(selected_ids)} tab đã chọn rồi chạy batch."
@@ -873,10 +934,16 @@ class MuseAccountsPage(QWidget):
                     + ", ".join(not_ready)
                     + "; hãy tự hoàn tất Google/Muse, sau đó tool chạy batch."
                 )
+            self.start_requirements.setStyleSheet(
+                "background: #fffbeb; color: #92400e; border: 1.5px solid #fde68a; border-radius: 8px; padding: 10px 14px; font-weight: 500;"
+            )
         else:
             labels = ", ".join(str(value) for value in selected_ids)
             count_label = f"{len(batch.source_paths)} ảnh" if batch.source_paths else "ảnh từ thư mục đã chọn"
             message = f"Sẵn sàng chạy tài khoản {labels} với {count_label}."
+            self.start_requirements.setStyleSheet(
+                "background: #f0fdf4; color: #166534; border: 1.5px solid #bbf7d0; border-radius: 8px; padding: 10px 14px; font-weight: 600;"
+            )
         self.start_requirements.setText(message)
         self.start_all.setToolTip(message)
 
