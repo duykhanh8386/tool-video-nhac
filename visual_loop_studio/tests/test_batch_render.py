@@ -4,7 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ui.batch_render import natural_sort_key, scan_folder, VIDEO_EXTS, AUDIO_EXTS
+from ui.batch_render import (
+    natural_sort_key, scan_folder, VIDEO_EXTS, AUDIO_EXTS,
+    parse_duration_string, format_seconds_to_hhmmss,
+)
 
 
 class BatchRenderTests(unittest.TestCase):
@@ -27,6 +30,31 @@ class BatchRenderTests(unittest.TestCase):
 
     def test_scan_folder_empty_or_invalid(self):
         self.assertEqual(scan_folder("non_existent_folder_12345", VIDEO_EXTS), [])
+
+    def test_parse_duration_string(self):
+        self.assertEqual(parse_duration_string("Theo nhạc"), ("audio", 0.0))
+        self.assertEqual(parse_duration_string("audio"), ("audio", 0.0))
+        self.assertEqual(parse_duration_string(""), ("audio", 0.0))
+
+        # HH:MM:SS format
+        self.assertEqual(parse_duration_string("00:30:00"), ("custom", 1800.0))
+        self.assertEqual(parse_duration_string("01:00:00"), ("custom", 3600.0))
+        self.assertEqual(parse_duration_string("00:01:30"), ("custom", 90.0))
+
+        # MM:SS format
+        self.assertEqual(parse_duration_string("30:00"), ("custom", 1800.0))
+        self.assertEqual(parse_duration_string("05:00"), ("custom", 300.0))
+
+        # Raw seconds
+        self.assertEqual(parse_duration_string("60s"), ("custom", 60.0))
+        self.assertEqual(parse_duration_string("120 giây"), ("custom", 120.0))
+        self.assertEqual(parse_duration_string("1800"), ("custom", 1800.0))
+
+    def test_format_seconds_to_hhmmss(self):
+        self.assertEqual(format_seconds_to_hhmmss(1800.0), "00:30:00")
+        self.assertEqual(format_seconds_to_hhmmss(3600.0), "01:00:00")
+        self.assertEqual(format_seconds_to_hhmmss(30.0), "00:00:30")
+        self.assertEqual(format_seconds_to_hhmmss(3661.0), "01:01:01")
 
 
 if __name__ == "__main__":

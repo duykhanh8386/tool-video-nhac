@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from render.ffprobe import probe_media
 from render.nvenc import resolve_encoder
 from utils.media import existing_file
 from utils.paths import CACHE_DIR, ensure_app_dirs, unique_output
+from utils.process import hidden_process_kwargs
 from visual.compositor import build_visual_graph
 
 
@@ -79,6 +81,83 @@ def build_visual_job(project: VisualProject, settings: AppSettings) -> RenderJob
     return RenderJob(command, output, 60.0, "Visual 60 giây")
 
 
+def prepare_seamless_video(video_path: str, duration: float, ffmpeg: str) -> str:
+    """Creates a seamless crossfade loop clip so that each loop cycle transitions smoothly without hard cuts."""
+    if duration < 2.0:
+        return video_path
+    ensure_app_dirs()
+    trans = min(1.0, duration / 4.0)
+    stem = Path(video_path).stem
+    try:
+        mtime = int(Path(video_path).stat().st_mtime)
+    except Exception:
+        mtime = 0
+    cache_file = CACHE_DIR / f"seamless_v_{stem}_{mtime}_{int(trans * 1000)}.mp4"
+    if cache_file.exists() and cache_file.stat().st_size > 0:
+        return str(cache_file)
+
+    body_end = duration - trans
+    filter_expr = (
+        f"[0:v]split=3[v_body][v_head][v_tail]; "
+        f"[v_body]trim=start={trans:.3f}:end={body_end:.3f},setpts=PTS-STARTPTS[body]; "
+        f"[v_head]trim=start={body_end:.3f}:end={duration:.3f},setpts=PTS-STARTPTS[head]; "
+        f"[v_tail]trim=start=0:end={trans:.3f},setpts=PTS-STARTPTS[tail]; "
+        f"[head][tail]xfade=transition=fade:duration={trans:.3f}:offset=0[trans]; "
+        f"[body][trans]concat=n=2:v=1:a=0[vout]"
+    )
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", video_path,
+        "-filter_complex", filter_expr, "-map", "[vout]",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        str(cache_file),
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=60, check=False, **hidden_process_kwargs())
+        if res.returncode == 0 and cache_file.exists() and cache_file.stat().st_size > 0:
+            return str(cache_file)
+    except Exception:
+        pass
+    return video_path
+
+
+def prepare_seamless_audio(audio_path: str, duration: float, ffmpeg: str) -> str:
+    """Creates a seamless crossfade loop clip so that each audio cycle transitions smoothly without hard cuts."""
+    if duration < 4.0:
+        return audio_path
+    ensure_app_dirs()
+    trans = min(1.5, duration / 8.0)
+    stem = Path(audio_path).stem
+    try:
+        mtime = int(Path(audio_path).stat().st_mtime)
+    except Exception:
+        mtime = 0
+    cache_file = CACHE_DIR / f"seamless_a_{stem}_{mtime}_{int(trans * 1000)}.wav"
+    if cache_file.exists() and cache_file.stat().st_size > 0:
+        return str(cache_file)
+
+    body_end = duration - trans
+    filter_expr = (
+        f"[0:a]asplit=3[a_body][a_head][a_tail]; "
+        f"[a_body]atrim=start={trans:.3f}:end={body_end:.3f},asetpts=PTS-STARTPTS[body]; "
+        f"[a_head]atrim=start={body_end:.3f}:end={duration:.3f},asetpts=PTS-STARTPTS[head]; "
+        f"[a_tail]atrim=start=0:end={trans:.3f},asetpts=PTS-STARTPTS[tail]; "
+        f"[head][tail]acrossfade=d={trans:.3f}:c1=tri:c2=tri[trans]; "
+        f"[body][trans]concat=n=2:v=0:a=1[aout]"
+    )
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", audio_path,
+        "-filter_complex", filter_expr, "-map", "[aout]",
+        str(cache_file),
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=60, check=False, **hidden_process_kwargs())
+        if res.returncode == 0 and cache_file.exists() and cache_file.stat().st_size > 0:
+            return str(cache_file)
+    except Exception:
+        pass
+    return audio_path
+
+
 def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
     project.video = existing_file(project.video, "video")
     project.main_audio = existing_file(project.main_audio, "main music")
@@ -98,10 +177,19 @@ def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
         raise ValueError("Background music không có audio stream.")
     encoder = resolve_encoder(project.encoder, settings.ffmpeg_path)
     output = unique_output(project.output_folder, project.output_name, "final", ".mp4")
-    command = [settings.ffmpeg_path, "-hide_banner", "-y", "-stream_loop", "-1", "-i", project.video]
+
+    video_input = project.video
+    if project.seamless_video and video_info.duration and duration > video_info.duration and video_info.duration >= 2.0:
+        video_input = prepare_seamless_video(project.video, video_info.duration, settings.ffmpeg_path)
+
+    audio_input = project.main_audio
+    if project.seamless_video and audio_duration and duration > audio_duration and audio_duration >= 4.0:
+        audio_input = prepare_seamless_audio(project.main_audio, audio_duration, settings.ffmpeg_path)
+
+    command = [settings.ffmpeg_path, "-hide_banner", "-y", "-stream_loop", "-1", "-i", video_input]
     if project.duration_mode == "custom" and duration > audio_duration:
         command += ["-stream_loop", "-1"]
-    command += ["-i", project.main_audio]
+    command += ["-i", audio_input]
     if project.background_audio:
         if project.loop_background:
             command += ["-stream_loop", "-1"]
@@ -114,6 +202,9 @@ def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
     if project.fps != "Keep source":
         video_filters.append(f"fps={project.fps}")
     video_filters += ["setpts=PTS-STARTPTS", "format=yuv420p"]
+    if duration >= 4.0:
+        fade_st = max(0.0, duration - 1.5)
+        video_filters.append(f"fade=t=out:st={fade_st:.3f}:d=1.5")
 
     audio_filters = [f"[1:a]volume={project.main_volume:.4f}[main]"]
     audio_map = "[main]"
@@ -128,11 +219,19 @@ def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
         mix = "[main][bg]amix=inputs=2:duration=first:dropout_transition=2"
         if project.normalize:
             mix += ",loudnorm=I=-14:LRA=11:TP=-1.5"
+        if duration >= 4.0:
+            fade_st = max(0.0, duration - 1.5)
+            mix += f",afade=t=out:st={fade_st:.3f}:d=1.5"
         audio_filters.append(mix + "[mix]")
         audio_map = "[mix]"
     elif project.normalize:
-        audio_filters.append("[main]loudnorm=I=-14:LRA=11:TP=-1.5[mix]")
+        audio_filters.append(f"[main]loudnorm=I=-14:LRA=11:TP=-1.5" + (f",afade=t=out:st={max(0.0, duration - 1.5):.3f}:d=1.5" if duration >= 4.0 else "") + "[mix]")
         audio_map = "[mix]"
+    elif duration >= 4.0:
+        fade_st = max(0.0, duration - 1.5)
+        audio_filters.append(f"[main]afade=t=out:st={fade_st:.3f}:d=1.5[mix]")
+        audio_map = "[mix]"
+
     filter_complex = f"[0:v]{','.join(video_filters)}[vout];" + ";".join(audio_filters)
     command += ["-filter_complex", filter_complex, "-map", "[vout]", "-map", audio_map]
     command += [*_video_encoding(encoder), "-c:a", "aac", "-b:a", "320k", "-t", f"{duration:.6f}", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]

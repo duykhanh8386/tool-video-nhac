@@ -37,6 +37,56 @@ def scan_folder(folder_path: str, valid_extensions: set[str]) -> list[Path]:
         return []
 
 
+def parse_duration_string(text: str) -> tuple[str, float]:
+    """
+    Phân tích chuỗi thời lượng (ví dụ: '00:30:00', '01:00:00', '15:30', '1800', '60s', 'Theo nhạc').
+    Trả về (duration_mode, custom_duration):
+      - 'audio', 0.0 nếu theo bài nhạc
+      - 'custom', số_giây nếu là thời lượng cụ thể
+    """
+    cleaned = (text or "").strip()
+    if not cleaned or cleaned.lower().startswith("theo") or cleaned.lower() == "audio":
+        return "audio", 0.0
+
+    # Kiểm tra định dạng HH:MM:SS hoặc MM:SS
+    parts = cleaned.split(":")
+    if len(parts) == 3:
+        try:
+            h = float(parts[0].strip())
+            m = float(parts[1].strip())
+            s = float(parts[2].strip().replace("s", ""))
+            return "custom", max(1.0, h * 3600 + m * 60 + s)
+        except ValueError:
+            pass
+    elif len(parts) == 2:
+        try:
+            m = float(parts[0].strip())
+            s = float(parts[1].strip().replace("s", ""))
+            return "custom", max(1.0, m * 60 + s)
+        except ValueError:
+            pass
+
+    # Kiểm tra số giây thuần (ví dụ: "1800", "60s", "120 giây")
+    digits_match = re.search(r"(\d+(\.\d+)?)", cleaned)
+    if digits_match:
+        try:
+            sec = float(digits_match.group(1))
+            return "custom", max(1.0, sec)
+        except ValueError:
+            pass
+
+    return "audio", 0.0
+
+
+def format_seconds_to_hhmmss(seconds: float) -> str:
+    """Định dạng số giây sang chuỗi Giờ:Phút:Giây (HH:MM:SS) kiểu '00:30:00'."""
+    total = max(0, int(round(seconds)))
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 class BatchRenderPage(QWidget):
     COLUMNS = [
         "#",
@@ -126,24 +176,37 @@ class BatchRenderPage(QWidget):
         self.duration_combo = QComboBox()
         self.duration_combo.setMinimumHeight(36)
         self.duration_combo.addItem("Theo độ dài bài nhạc (Chuẩn - Tự động)", "audio")
-        self.duration_combo.addItem("30 giây (Shorts / TikTok / Reels)", "30")
-        self.duration_combo.addItem("60 giây (1 Phút)", "60")
-        self.duration_combo.addItem("90 giây (1.5 Phút)", "90")
-        self.duration_combo.addItem("120 giây (2 Phút)", "120")
-        self.duration_combo.addItem("180 giây (3 Phút)", "180")
-        self.duration_combo.addItem("300 giây (5 Phút)", "300")
-        self.duration_combo.addItem("600 giây (10 Phút)", "600")
-        self.duration_combo.addItem("Tùy chỉnh số giây...", "custom")
+        self.duration_combo.addItem("00:00:30 (30 giây - Shorts / Reels)", "00:00:30")
+        self.duration_combo.addItem("00:01:00 (1 phút)", "00:01:00")
+        self.duration_combo.addItem("00:02:00 (2 phút)", "00:02:00")
+        self.duration_combo.addItem("00:03:00 (3 phút)", "00:03:00")
+        self.duration_combo.addItem("00:05:00 (5 phút)", "00:05:00")
+        self.duration_combo.addItem("00:10:00 (10 phút)", "00:10:00")
+        self.duration_combo.addItem("00:15:00 (15 phút)", "00:15:00")
+        self.duration_combo.addItem("00:30:00 (30 phút)", "00:30:00")
+        self.duration_combo.addItem("01:00:00 (1 tiếng)", "01:00:00")
+        self.duration_combo.addItem("02:00:00 (2 tiếng)", "02:00:00")
+        self.duration_combo.addItem("Tùy chỉnh Giờ:Phút:Giây (Tự điền)...", "custom")
         self.duration_combo.currentIndexChanged.connect(self._duration_mode_changed)
         config_row.addWidget(self.duration_combo)
 
-        self.duration_spin = QSpinBox()
-        self.duration_spin.setMinimumHeight(36)
-        self.duration_spin.setRange(5, 86400)
-        self.duration_spin.setValue(60)
-        self.duration_spin.setSuffix(" giây")
-        self.duration_spin.setEnabled(False)
-        config_row.addWidget(self.duration_spin)
+        dur_input_label = QLabel("Giờ:Phút:Giây:")
+        dur_input_label.setStyleSheet("color: #475569; font-weight: 500;")
+        config_row.addWidget(dur_input_label)
+
+        self.duration_input = QLineEdit("00:30:00")
+        self.duration_input.setMinimumHeight(36)
+        self.duration_input.setFixedWidth(115)
+        self.duration_input.setPlaceholderText("00:30:00")
+        self.duration_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.duration_input.setStyleSheet(
+            "QLineEdit { font-size: 13px; font-weight: bold; color: #1e293b; background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 6px; padding: 0 8px; } "
+            "QLineEdit:disabled { background: #f1f5f9; color: #94a3b8; border-color: #e2e8f0; }"
+        )
+        self.duration_input.setToolTip("Nhập thời lượng theo định dạng Giờ:Phút:Giây (ví dụ: 00:30:00 hoặc 01:00:00). Cả video và nhạc sẽ tự động loop và chuyển cảnh mượt mà đến đúng thời lượng này.")
+        self.duration_input.setEnabled(False)
+        self.duration_input.textEdited.connect(self._on_duration_input_edited)
+        config_row.addWidget(self.duration_input)
 
         self.loop_mismatch = QCheckBox("Lặp lại bên ít hơn để ghép hết bên nhiều hơn")
         self.loop_mismatch.setChecked(True)
@@ -286,17 +349,33 @@ class BatchRenderPage(QWidget):
             self.settings.last_output_folder = folder
 
     def _duration_mode_changed(self) -> None:
+        val = self.duration_combo.currentData()
+        if val == "audio":
+            self.duration_input.setEnabled(False)
+        elif val == "custom":
+            self.duration_input.setEnabled(True)
+            self.duration_input.setFocus()
+            self.duration_input.selectAll()
+        else:
+            self.duration_input.setEnabled(True)
+            self.duration_input.setText(str(val))
+
+    def _on_duration_input_edited(self, _text: str) -> None:
+        idx = self.duration_combo.findData("custom")
+        if idx >= 0 and self.duration_combo.currentIndex() != idx:
+            self.duration_combo.blockSignals(True)
+            self.duration_combo.setCurrentIndex(idx)
+            self.duration_combo.blockSignals(False)
+
+    def _get_current_duration_label(self) -> str:
         mode = self.duration_combo.currentData()
         if mode == "audio":
-            self.duration_spin.setEnabled(False)
-        elif mode == "custom":
-            self.duration_spin.setEnabled(True)
-        else:
-            self.duration_spin.setEnabled(False)
-            try:
-                self.duration_spin.setValue(int(mode))
-            except ValueError:
-                pass
+            return "Theo nhạc"
+        raw = self.duration_input.text().strip()
+        dur_mode, seconds = parse_duration_string(raw)
+        if dur_mode == "audio":
+            return "Theo nhạc"
+        return format_seconds_to_hhmmss(seconds)
 
     def _auto_pair(self) -> None:
         video_dir = self.video_folder.text().strip()
@@ -329,8 +408,7 @@ class BatchRenderPage(QWidget):
         loop_mismatch = self.loop_mismatch.isChecked()
         total_pairs = max(len(videos), len(audios)) if loop_mismatch else min(len(videos), len(audios))
 
-        dur_mode = self.duration_combo.currentData()
-        dur_label = "Theo nhạc" if dur_mode == "audio" else f"{self.duration_spin.value()}s"
+        dur_label = self._get_current_duration_label()
         enc_choice = self.encoder_combo.currentText()
 
         added = 0
@@ -386,8 +464,7 @@ class BatchRenderPage(QWidget):
         if not folder:
             return
 
-        dur_mode = self.duration_combo.currentData()
-        dur_label = "Theo nhạc" if dur_mode == "audio" else f"{self.duration_spin.value()}s"
+        dur_label = self._get_current_duration_label()
         enc_choice = self.encoder_combo.currentText()
 
         row = self.table.rowCount()
@@ -466,15 +543,7 @@ class BatchRenderPage(QWidget):
         duration_text = self._text(row, 5)
         enc_text = self._text(row, 6)
 
-        if duration_text == "Theo nhạc":
-            dur_mode = "audio"
-            cust_dur = 0.0
-        else:
-            dur_mode = "custom"
-            try:
-                cust_dur = float(duration_text.replace("s", "").replace(" giây", "").strip())
-            except ValueError:
-                cust_dur = 60.0
+        dur_mode, cust_dur = parse_duration_string(duration_text)
 
         project = LoopProject(
             video=video_path,
@@ -485,6 +554,7 @@ class BatchRenderPage(QWidget):
             encoder=enc_text or "Auto",
             duration_mode=dur_mode,
             custom_duration=cust_dur,
+            seamless_video=True,
         )
 
         try:
