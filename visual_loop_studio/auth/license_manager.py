@@ -246,7 +246,7 @@ class LicenseManager:
             url,
             data=json.dumps(payload).encode("utf-8"),
             headers={
-                "Authorization": f"Bearer {license_key}",
+                "Authorization": f"License {license_key}",
                 "Content-Type": "application/vnd.api+json",
                 "Accept": "application/vnd.api+json",
                 "User-Agent": "VisualLoopStudio-Client/1.0",
@@ -267,9 +267,21 @@ class LicenseManager:
                     detail = errors[0].get("detail", "")
                     if code == "MACHINE_LIMIT_EXCEEDED" or "limit" in detail.lower():
                         return False, "Key này đã đạt giới hạn số lượng máy tính cho phép! Không thể kích hoạt thêm máy mới.", {}
+                    if err.code == 401 or "authenticated" in detail.lower():
+                        return False, (
+                            "Lỗi xác thực (HTTP 401).\n"
+                            "👉 Hãy kiểm tra Policy trên web Keygen.sh: Đảm bảo mục 'Authentication Strategy' "
+                            "trong Policy được chọn là 'LICENSE' hoặc 'MIXED' (thay vì 'TOKEN')."
+                        ), {}
                     return False, f"Không thể kích hoạt máy: {detail}", {}
             except Exception:
                 pass
+            if err.code == 401:
+                return False, (
+                    "Lỗi xác thực (HTTP 401).\n"
+                    "👉 Hãy kiểm tra Policy trên web Keygen.sh: Đảm bảo mục 'Authentication Strategy' "
+                    "trong Policy được chọn là 'LICENSE' hoặc 'MIXED' (thay vì 'TOKEN')."
+                ), {}
             return False, f"Lỗi kích hoạt máy tính: HTTP {err.code}", {}
         except Exception as exc:
             return False, f"Lỗi kết nối khi kích hoạt máy: {exc}", {}
@@ -285,7 +297,7 @@ class LicenseManager:
             req = urllib.request.Request(
                 url,
                 headers={
-                    "Authorization": f"Bearer {cached_key}",
+                    "Authorization": f"License {cached_key}",
                     "Accept": "application/vnd.api+json",
                     "User-Agent": "VisualLoopStudio-Client/1.0",
                 },
