@@ -3,7 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QSlider, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QRadioButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from models.loop_project import LoopProject
@@ -25,7 +25,9 @@ class LoopMusicPage(QWidget):
         title = QLabel("Lặp Video + Nhạc")
         title.setObjectName("pageTitle")
         root.addWidget(title)
-        note = QLabel("Main music là master clock. Video cuối luôn được cắt chính xác theo thời lượng main music.")
+        note = QLabel(
+            "Hỗ trợ 2 chế độ thời lượng: Bắt chuẩn theo độ dài nhạc chính, hoặc Tự do chọn thời lượng video theo ý muốn."
+        )
         note.setObjectName("notice")
         root.addWidget(note)
         columns = QHBoxLayout()
@@ -42,6 +44,69 @@ class LoopMusicPage(QWidget):
             input_layout.addWidget(item)
         input_layout.addWidget(QLabel("Tên file đầu ra"))
         input_layout.addWidget(self.output_name)
+
+        # Chế độ thời lượng video
+        dur_group = QGroupBox("THỜI LƯỢNG VIDEO ĐẦU RA")
+        dur_layout = QVBoxLayout(dur_group)
+        dur_mode_row = QHBoxLayout()
+        self.dur_mode_audio = QRadioButton("🎵 Bắt chuẩn theo nhạc chính")
+        self.dur_mode_custom = QRadioButton("⏱ Tự do chọn thời lượng video")
+        self.dur_mode_audio.setChecked(True)
+        dur_mode_row.addWidget(self.dur_mode_audio)
+        dur_mode_row.addWidget(self.dur_mode_custom)
+        dur_mode_row.addStretch()
+        dur_layout.addLayout(dur_mode_row)
+
+        self.custom_dur_container = QWidget()
+        custom_layout = QVBoxLayout(self.custom_dur_container)
+        custom_layout.setContentsMargins(0, 4, 0, 0)
+
+        spin_row = QHBoxLayout()
+        spin_row.addWidget(QLabel("Đặt thời lượng:"))
+        self.custom_hours = QSpinBox()
+        self.custom_hours.setRange(0, 99)
+        self.custom_hours.setSuffix(" giờ")
+        self.custom_minutes = QSpinBox()
+        self.custom_minutes.setRange(0, 59)
+        self.custom_minutes.setSuffix(" phút")
+        self.custom_minutes.setValue(5)
+        self.custom_seconds = QSpinBox()
+        self.custom_seconds.setRange(0, 59)
+        self.custom_seconds.setSuffix(" giây")
+        spin_row.addWidget(self.custom_hours)
+        spin_row.addWidget(self.custom_minutes)
+        spin_row.addWidget(self.custom_seconds)
+        spin_row.addStretch()
+        custom_layout.addLayout(spin_row)
+
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel("Chọn nhanh:"))
+        for label, secs in (
+            ("30s", 30),
+            ("1 phút", 60),
+            ("3 phút", 180),
+            ("5 phút", 300),
+            ("10 phút", 600),
+            ("30 phút", 1800),
+            ("1 giờ", 3600),
+        ):
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda _=False, s=secs: self._apply_preset_duration(s))
+            preset_row.addWidget(btn)
+        preset_row.addStretch()
+        custom_layout.addLayout(preset_row)
+
+        dur_layout.addWidget(self.custom_dur_container)
+        self.dur_hint = QLabel("💡 Video sẽ được cắt và lặp chính xác theo thời lượng bài nhạc chính.")
+        self.dur_hint.setObjectName("muted")
+        self.dur_hint.setWordWrap(True)
+        dur_layout.addWidget(self.dur_hint)
+
+        self.dur_mode_audio.toggled.connect(self._on_dur_mode_changed)
+        self.dur_mode_custom.toggled.connect(self._on_dur_mode_changed)
+        self.custom_dur_container.setEnabled(False)
+
+        input_layout.addWidget(dur_group)
         columns.addWidget(inputs, 1)
 
         options = QGroupBox("TRỘN ÂM THANH VÀ MÃ HÓA")
@@ -100,6 +165,34 @@ class LoopMusicPage(QWidget):
         self.worker.failed.connect(self._failed)
         self.worker.canceled.connect(lambda: self.status.stopped())
 
+    def _on_dur_mode_changed(self) -> None:
+        is_custom = self.dur_mode_custom.isChecked()
+        self.custom_dur_container.setEnabled(is_custom)
+        if is_custom:
+            self.dur_hint.setText(
+                "💡 Chế độ tự do: Nếu thời lượng dài hơn bài nhạc, nhạc chính sẽ tự động lặp lại để chạy hết video."
+            )
+        else:
+            self.dur_hint.setText(
+                "💡 Chế độ bắt theo nhạc: Video cuối sẽ được lặp và cắt đúng bằng thời lượng file nhạc chính."
+            )
+
+    def _get_custom_duration_seconds(self) -> float:
+        return float(self.custom_hours.value() * 3600 + self.custom_minutes.value() * 60 + self.custom_seconds.value())
+
+    def _set_custom_duration_seconds(self, seconds: float) -> None:
+        total = max(0, int(round(seconds)))
+        hours = total // 3600
+        mins = (total % 3600) // 60
+        secs = total % 60
+        self.custom_hours.setValue(hours)
+        self.custom_minutes.setValue(mins)
+        self.custom_seconds.setValue(secs)
+
+    def _apply_preset_duration(self, seconds: int) -> None:
+        self.dur_mode_custom.setChecked(True)
+        self._set_custom_duration_seconds(float(seconds))
+
     def analyze(self) -> None:
         try:
             video = probe_media(self.video.text(), self.settings.ffprobe_path)
@@ -108,7 +201,19 @@ class LoopMusicPage(QWidget):
                 raise ValueError("File đã chọn không có video stream.")
             if not audio.has_audio:
                 raise ValueError("Main music không có audio stream.")
-            text = f"Video: {video.width}×{video.height}, {video.fps:.3f} fps, {video.video_codec}, {format_duration(video.duration)}\nMain music: {audio.audio_codec}, {audio.sample_rate} Hz, {audio.channels} ch, {format_duration(audio.duration)}\nFinal duration: {format_duration(audio.duration)}"
+            
+            if self.dur_mode_custom.isChecked():
+                target_sec = self._get_custom_duration_seconds()
+                if target_sec > 0:
+                    dur_text = f"{format_duration(target_sec)} (Tự do chọn)"
+                    if target_sec > audio.duration:
+                        dur_text += f" — Nhạc sẽ tự lặp lại ({audio.duration:.1f}s/lượt)"
+                else:
+                    dur_text = f"{format_duration(audio.duration)} (Chưa đặt thời lượng tự do)"
+            else:
+                dur_text = f"{format_duration(audio.duration)} (Bắt chuẩn theo nhạc chính)"
+
+            text = f"Video: {video.width}×{video.height}, {video.fps:.3f} fps, {video.video_codec}, {format_duration(video.duration)}\nMain music: {audio.audio_codec}, {audio.sample_rate} Hz, {audio.channels} ch, {format_duration(audio.duration)}\nFinal duration: {dur_text}"
             if self.background_audio.text():
                 bg = probe_media(self.background_audio.text(), self.settings.ffprobe_path)
                 if not bg.has_audio:
@@ -119,6 +224,8 @@ class LoopMusicPage(QWidget):
             show_error(self, "Không thể phân tích media", exc)
 
     def collect(self) -> LoopProject:
+        duration_mode = "custom" if self.dur_mode_custom.isChecked() else "audio"
+        custom_duration = self._get_custom_duration_seconds()
         return LoopProject(
             video=self.video.text(), main_audio=self.main_audio.text(), background_audio=self.background_audio.text(),
             output_folder=self.output_folder.text(), output_name=self.output_name.text(),
@@ -127,6 +234,7 @@ class LoopMusicPage(QWidget):
             crossfade_ms=int(self.crossfade_ms.currentText()), normalize=self.normalize.isChecked(),
             seamless_video=self.seamless.isChecked(), encoder=self.encoder.currentText(),
             resolution=self.resolution.currentText(), fps=self.fps.currentText(),
+            duration_mode=duration_mode, custom_duration=custom_duration,
         )
 
     def load(self, project: LoopProject) -> None:
@@ -143,10 +251,18 @@ class LoopMusicPage(QWidget):
         self.encoder.setCurrentText(project.encoder)
         self.resolution.setCurrentText(project.resolution)
         self.fps.setCurrentText(str(project.fps))
+        if project.duration_mode == "custom":
+            self.dur_mode_custom.setChecked(True)
+        else:
+            self.dur_mode_audio.setChecked(True)
+        if project.custom_duration > 0:
+            self._set_custom_duration_seconds(project.custom_duration)
 
     def start_render(self) -> None:
         try:
             project = self.collect()
+            if project.duration_mode == "custom" and project.custom_duration <= 0:
+                raise ValueError("Vui lòng đặt thời lượng video lớn hơn 0 giây khi chọn chế độ tự do.")
             job = build_loop_job(project, self.settings)
             self.settings.last_output_folder = project.output_folder
             self.settings.encoder = project.encoder

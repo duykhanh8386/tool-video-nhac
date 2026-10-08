@@ -27,6 +27,31 @@ class LoopEngineTests(unittest.TestCase):
             self.assertEqual(job.duration, 7200.125)
             self.assertEqual(job.command[job.command.index("-t") + 1], "7200.125000")
 
+    def test_custom_duration_loops_audio_when_longer(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            video = root / "short.mp4"
+            audio = root / "short.wav"
+            video.write_bytes(b"video")
+            audio.write_bytes(b"audio")
+            project = LoopProject(
+                video=str(video),
+                main_audio=str(audio),
+                output_folder=str(root),
+                encoder="libx264",
+                duration_mode="custom",
+                custom_duration=600.0,
+            )
+            info = MediaInfo(str(video), 10.0, True, False, width=1920, height=1080, fps=30)
+            with patch("render.ffmpeg.probe_media", return_value=info), patch(
+                "render.ffmpeg.main_audio_duration", return_value=120.0
+            ), patch("render.ffmpeg.resolve_encoder", return_value="libx264"):
+                job = build_loop_job(project, AppSettings())
+            self.assertEqual(job.duration, 600.0)
+            self.assertEqual(job.command[job.command.index("-t") + 1], "600.000000")
+            # Both video and audio should have -stream_loop -1 because 600 > 120
+            self.assertEqual(job.command.count("-stream_loop"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

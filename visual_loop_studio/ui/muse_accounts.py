@@ -138,15 +138,13 @@ class MuseAccountsPage(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        title = QLabel("Muse AI — Batch ảnh thành video trên 3 tài khoản")
+        root.setSpacing(10)
+        title = QLabel("✨ Muse AI — Batch ảnh thành video trên 3 tài khoản")
         title.setObjectName("pageTitle")
         root.addWidget(title)
         notice = QLabel(
-            "Mỗi tài khoản dùng một Chrome profile/driver riêng. Nếu bạn nhập mật khẩu, tool chỉ điền trên "
-            "accounts.google.com, không lưu mật khẩu và không giả User-Agent; CAPTCHA/2FA làm thủ công. "
-            "mỗi worker gửi đúng 1 ảnh với 1 prompt, tải đúng video mới của ảnh đó rồi mới sang ảnh tiếp theo; "
-            "tool không lưu bí mật và không vượt CAPTCHA, "
-            "mã xác minh, 2FA, quota hoặc rate limit."
+            "💡 Hỗ trợ tạo video đa luồng song song trên tối đa 3 tài khoản Muse AI (profile Chrome độc lập). "
+            "Tự động điền tài khoản an toàn, không lưu mật khẩu. Mọi xác minh Google / CAPTCHA thực hiện trực tiếp trên trình duyệt."
         )
         notice.setWordWrap(True)
         notice.setObjectName("notice")
@@ -154,13 +152,14 @@ class MuseAccountsPage(QWidget):
 
         connection_group = QGroupBox("Cách kết nối Muse")
         connection_row = QHBoxLayout(connection_group)
+        connection_row.setSpacing(10)
         self.connection_mode = QComboBox()
         self.connection_mode.addItem(
             "Phương án 1 — Profile riêng: tự điền Google hoặc đăng nhập tay",
             MuseSessionOpenMode.MANUAL_BROWSER.value,
         )
         self.connection_mode.addItem(
-            "Phương án 2 — Chọn tab Muse đang mở",
+            "Phương án 2 — Chọn tab Muse đang mở sẵn",
             MuseSessionOpenMode.EXISTING_TAB.value,
         )
         mode_index = self.connection_mode.findData(
@@ -168,91 +167,133 @@ class MuseAccountsPage(QWidget):
         )
         self.connection_mode.setCurrentIndex(max(0, mode_index))
         self.connection_mode.currentIndexChanged.connect(self._connection_mode_changed)
-        self.open_browsers = QPushButton("Mở Chrome/Muse đã tick")
+        self.open_browsers = QPushButton("🌐 Mở Chrome/Muse đã tick")
         self.open_browsers.clicked.connect(self._open_browser_sessions)
-        self.scan_tabs = QPushButton("Quét tab Muse đang mở")
+        self.scan_tabs = QPushButton("🔍 Quét tab Muse đang mở")
         self.scan_tabs.clicked.connect(self._scan_muse_tabs)
         connection_row.addWidget(self.connection_mode, 1)
         connection_row.addWidget(self.open_browsers)
         connection_row.addWidget(self.scan_tabs)
         root.addWidget(connection_group)
 
-        source_group = QGroupBox("Nguồn ảnh và prompt chung")
+        source_group = QGroupBox("Nguồn ảnh và Prompt chung")
         source_grid = QGridLayout(source_group)
+        source_grid.setVerticalSpacing(8)
+        source_grid.setHorizontalSpacing(10)
         self.url = QLineEdit(self.settings.muse_start_url or MUSE_START_URL)
         self.url.editingFinished.connect(self._save_url)
         self.image_folder = QLineEdit()
-        self.image_folder.setPlaceholderText("Thư mục chứa JPG, JPEG, PNG hoặc WEBP")
-        choose_images = QPushButton("Chọn thư mục ảnh")
+        self.image_folder.setPlaceholderText("Thư mục chứa JPG, JPEG, PNG hoặc WEBP...")
+        choose_images = QPushButton("📂 Chọn thư mục ảnh")
         choose_images.clicked.connect(self._choose_image_folder)
         self.recursive = QCheckBox("Quét thư mục con")
         self.image_count = QLabel("Chưa quét ảnh")
         self.image_count.setObjectName("muted")
         self.prompt = QPlainTextEdit()
-        self.prompt.setPlaceholderText("Prompt tạo video chung — được snapshot khi bắt đầu batch")
-        self.prompt.setMaximumHeight(90)
+        self.prompt.setPlaceholderText("Prompt tạo video chung cho Muse AI — được snapshot khi bắt đầu batch...")
+        self.prompt.setMaximumHeight(85)
         self.output_folder = QLineEdit(self.settings.last_output_folder)
-        self.output_folder.setPlaceholderText("Thư mục lưu video MP4")
-        choose_output = QPushButton("Chọn output")
+        self.output_folder.setPlaceholderText("Thư mục lưu video MP4 kết quả...")
+        choose_output = QPushButton("📁 Chọn output")
         choose_output.clicked.connect(self._choose_output_folder)
-        source_grid.addWidget(QLabel("MUSE_URL"), 0, 0)
+        source_grid.addWidget(QLabel("MUSE_URL:"), 0, 0)
         source_grid.addWidget(self.url, 0, 1, 1, 3)
-        source_grid.addWidget(QLabel("Thư mục ảnh"), 1, 0)
+        source_grid.addWidget(QLabel("Thư mục ảnh:"), 1, 0)
         source_grid.addWidget(self.image_folder, 1, 1)
         source_grid.addWidget(choose_images, 1, 2)
         source_grid.addWidget(self.recursive, 1, 3)
         source_grid.addWidget(self.image_count, 2, 1, 1, 3)
-        source_grid.addWidget(QLabel("Prompt tạo video chung"), 3, 0)
+        source_grid.addWidget(QLabel("Prompt chung:"), 3, 0)
         source_grid.addWidget(self.prompt, 3, 1, 1, 3)
-        source_grid.addWidget(QLabel("Thư mục output"), 4, 0)
+        source_grid.addWidget(QLabel("Thư mục output:"), 4, 0)
         source_grid.addWidget(self.output_folder, 4, 1, 1, 2)
         source_grid.addWidget(choose_output, 4, 3)
         root.addWidget(source_group)
 
         settings_group = QGroupBox("Cài đặt video chung (để trống = Muse mặc định)")
-        settings_row = QHBoxLayout(settings_group)
+        settings_layout = QHBoxLayout(settings_group)
+        settings_layout.setSpacing(16)
+        # Giữ ngầm model và quantity để bảo toàn tương thích tuyệt đối
         self.model = self._editable_combo(("",))
-        self.aspect_ratio = self._editable_combo(("", "16:9", "9:16", "1:1"))
-        self.duration = self._editable_combo(("", "5s", "8s", "10s"))
-        self.resolution = self._editable_combo(("", "720p", "1080p"))
         self.quantity = QSpinBox()
         self.quantity.setRange(1, 1)
         self.quantity.setValue(1)
-        for label, widget in (
-            ("Model", self.model),
-            ("Tỷ lệ", self.aspect_ratio),
-            ("Độ dài", self.duration),
-            ("Độ phân giải", self.resolution),
-            ("Video/ảnh", self.quantity),
+
+        # Các tùy chọn video thiết thực hiển thị trên giao diện
+        self.aspect_ratio = self._editable_combo(("", "16:9", "9:16", "1:1"))
+        self.duration = self._editable_combo(("", "5s", "8s", "10s"))
+        self.resolution = self._editable_combo(("", "720p", "1080p"))
+        for icon_label, widget in (
+            ("📐 Tỷ lệ khung hình:", self.aspect_ratio),
+            ("⏱ Độ dài video:", self.duration),
+            ("📺 Độ phân giải:", self.resolution),
         ):
-            settings_row.addWidget(QLabel(label))
-            settings_row.addWidget(widget)
+            box = QHBoxLayout()
+            lbl = QLabel(icon_label)
+            lbl.setStyleSheet("color: #bae6fd; font-weight: 500;")
+            box.addWidget(lbl)
+            widget.setMinimumWidth(125)
+            box.addWidget(widget)
+            settings_layout.addLayout(box)
+        settings_layout.addStretch()
         root.addWidget(settings_group)
 
-        actions = QHBoxLayout()
-        self.allocate = QPushButton("Phân bổ ảnh")
-        self.start_all = QPushButton("Xử lý")
+        # Thanh điều khiển chính và công cụ phụ
+        actions_card = QWidget()
+        actions_card.setStyleSheet(
+            "background: #0f172a; border: 1px solid #1e293b; border-radius: 8px;"
+        )
+        actions_vbox = QVBoxLayout(actions_card)
+        actions_vbox.setContentsMargins(10, 8, 10, 8)
+        actions_vbox.setSpacing(8)
+
+        primary_row = QHBoxLayout()
+        primary_row.setSpacing(10)
+        self.start_all = QPushButton("▶ Bắt đầu xử lý")
         self.start_all.setObjectName("primary")
-        self.stop_all = QPushButton("Dừng tất cả")
-        self.resume = QPushButton("Tiếp tục")
-        self.redistribute = QPushButton("Phân bổ lại ảnh chưa gửi")
-        self.clear = QPushButton("Xóa dữ liệu UI")
+        self.start_all.setMinimumHeight(38)
+        self.start_all.setMinimumWidth(150)
+        self.start_all.setStyleSheet("font-size: 13px; font-weight: bold; padding: 0 16px;")
+
+        self.stop_all = QPushButton("⏹ Dừng tất cả")
+        self.stop_all.setMinimumHeight(38)
+        self.stop_all.setMinimumWidth(130)
+        self.stop_all.setStyleSheet(
+            "QPushButton { background: #7f1d1d; border: 1px solid #ef4444; color: #fee2e2; font-weight: 600; border-radius: 6px; padding: 0 14px; } "
+            "QPushButton:hover { background: #991b1b; border-color: #f87171; } "
+            "QPushButton:disabled { background: #111827; border-color: #334155; color: #64748b; }"
+        )
+
+        self.allocate = QPushButton("📊 Phân bổ ảnh")
+        self.allocate.setMinimumHeight(38)
+        self.allocate.setMinimumWidth(130)
+
+        primary_row.addWidget(self.start_all)
+        primary_row.addWidget(self.stop_all)
+        primary_row.addWidget(self.allocate)
+        primary_row.addStretch()
+
+        utility_row = QHBoxLayout()
+        utility_row.setSpacing(8)
+        self.resume = QPushButton("⏯ Tiếp tục")
+        self.redistribute = QPushButton("🔁 Phân bổ lại ảnh chưa gửi")
+        self.clear = QPushButton("🗑 Xóa dữ liệu UI")
+        utility_row.addWidget(self.resume)
+        utility_row.addWidget(self.redistribute)
+        utility_row.addWidget(self.clear)
+        utility_row.addStretch()
+
+        actions_vbox.addLayout(primary_row)
+        actions_vbox.addLayout(utility_row)
+        root.addWidget(actions_card)
+
         self.allocate.clicked.connect(self._allocate)
         self.start_all.clicked.connect(self._start_all)
         self.stop_all.clicked.connect(self._stop_all)
         self.resume.clicked.connect(self._resume)
         self.redistribute.clicked.connect(self._redistribute)
         self.clear.clicked.connect(self._clear)
-        for button in (
-            self.allocate,
-            self.start_all,
-            self.stop_all,
-            self.resume,
-            self.redistribute,
-            self.clear,
-        ):
-            actions.addWidget(button)
-        root.addLayout(actions)
+
         self.global_status = QLabel("Tick các tài khoản muốn chạy, phân bổ ảnh, sau đó bắt đầu.")
         self.global_status.setWordWrap(True)
         self.global_status.setObjectName("muted")
@@ -300,8 +341,13 @@ class MuseAccountsPage(QWidget):
         muse_tab.currentIndexChanged.connect(
             lambda _index, value=worker_id: self._tab_selection_changed(value)
         )
-        stop = QPushButton("Dừng")
-        retry = QPushButton("Chạy lại ảnh lỗi")
+        stop = QPushButton("⏹ Dừng worker")
+        stop.setStyleSheet(
+            "QPushButton { background: #450a0a; border: 1px solid #7f1d1d; color: #fca5a5; font-weight: 500; } "
+            "QPushButton:hover { background: #7f1d1d; } "
+            "QPushButton:disabled { background: #111827; border-color: #334155; color: #64748b; }"
+        )
+        retry = QPushButton("🔄 Chạy lại ảnh lỗi")
         stop.clicked.connect(lambda _checked=False, value=worker_id: self._stop_worker(value))
         retry.clicked.connect(lambda _checked=False, value=worker_id: self._retry_failed(value))
         login_state = QLabel("Chưa đăng nhập")
@@ -336,10 +382,14 @@ class MuseAccountsPage(QWidget):
         root.addWidget(account_group)
 
         assigned_count = QLabel("Được phân bổ: 0 ảnh")
+        assigned_count.setStyleSheet("font-weight: 600; color: #7dd3fc;")
         allocation = QPlainTextEdit()
         allocation.setReadOnly(True)
         allocation.setMinimumHeight(70)
         allocation.setMaximumHeight(110)
+        allocation.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 11px; background: #0b1120; border: 1px solid #1e293b; color: #94a3b8;"
+        )
         allocation.setPlaceholderText("Danh sách ảnh được phân bổ sẽ hiển thị trước khi chạy.")
         root.addWidget(assigned_count)
         root.addWidget(allocation)
@@ -349,6 +399,7 @@ class MuseAccountsPage(QWidget):
         progress = QProgressBar()
         progress.setRange(0, 100)
         stats = QLabel("Chờ: 0 • Thành công: 0 • Lỗi: 0 • Quota: 0")
+        stats.setStyleSheet("font-weight: 600; color: #94a3b8; font-size: 12px;")
         error = QLabel()
         error.setWordWrap(True)
         error.setStyleSheet("color: #fca5a5;")
@@ -365,6 +416,9 @@ class MuseAccountsPage(QWidget):
         logs = QPlainTextEdit()
         logs.setReadOnly(True)
         logs.setMinimumHeight(100)
+        logs.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 11px; background: #0b1120; border: 1px solid #1e293b; color: #cbd5e1;"
+        )
         logs.setPlaceholderText("Log riêng của worker")
         root.addWidget(QLabel("Log riêng"))
         root.addWidget(logs, 1)
@@ -604,7 +658,11 @@ class MuseAccountsPage(QWidget):
                 raise RuntimeError("Ba phiên Muse đang được mở; hãy chờ hoặc bấm Dừng tất cả.")
             batch = self.batch_manager.snapshot()
             if not batch.source_paths:
-                raise ValueError("Hãy chọn và phân bổ ảnh trước khi bắt đầu.")
+                if self.image_folder.text().strip():
+                    self._allocate()
+                    batch = self.batch_manager.snapshot()
+                if not batch.source_paths:
+                    raise ValueError("Hãy chọn thư mục ảnh và phân bổ ảnh trước khi bắt đầu.")
             prompt = self.prompt.toPlainText().strip()
             if not prompt:
                 raise ValueError("Prompt tạo video chung không được để trống.")
@@ -745,7 +803,7 @@ class MuseAccountsPage(QWidget):
             self.start_all.setEnabled(
                 accounts_valid
                 and (not tab_mode or tabs_selected)
-                and bool(batch.source_paths)
+                and (bool(batch.source_paths) or bool(self.image_folder.text().strip()))
                 and bool(self.prompt.toPlainText().strip())
                 and bool(self.output_folder.text().strip())
                 and not workflow_busy
@@ -794,8 +852,8 @@ class MuseAccountsPage(QWidget):
             ]
             if missing_tabs:
                 blockers.append("quét và chọn tab Muse cho tài khoản " + ", ".join(missing_tabs))
-        if not batch.source_paths:
-            blockers.append("bấm Phân bổ ảnh")
+        if not batch.source_paths and not self.image_folder.text().strip():
+            blockers.append("chọn thư mục ảnh")
         if not self.prompt.toPlainText().strip():
             blockers.append("nhập prompt chung")
         if not self.output_folder.text().strip():
@@ -817,7 +875,8 @@ class MuseAccountsPage(QWidget):
                 )
         else:
             labels = ", ".join(str(value) for value in selected_ids)
-            message = f"Sẵn sàng chạy tài khoản {labels} với {len(batch.source_paths)} ảnh."
+            count_label = f"{len(batch.source_paths)} ảnh" if batch.source_paths else "ảnh từ thư mục đã chọn"
+            message = f"Sẵn sàng chạy tài khoản {labels} với {count_label}."
         self.start_requirements.setText(message)
         self.start_all.setToolTip(message)
 

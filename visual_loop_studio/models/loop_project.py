@@ -21,6 +21,8 @@ class LoopProject:
     encoder: str = "Auto"
     resolution: str = "Keep source"
     fps: str = "Keep source"
+    duration_mode: str = "audio"
+    custom_duration: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

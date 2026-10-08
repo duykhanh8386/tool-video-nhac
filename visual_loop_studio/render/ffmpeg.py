@@ -81,12 +81,19 @@ def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
     video_info = probe_media(project.video, settings.ffprobe_path)
     if not video_info.has_video:
         raise ValueError("File video không có video stream.")
-    duration = main_audio_duration(project.main_audio, settings.ffprobe_path)
+    audio_duration = main_audio_duration(project.main_audio, settings.ffprobe_path)
+    if project.duration_mode == "custom" and project.custom_duration > 0:
+        duration = float(project.custom_duration)
+    else:
+        duration = audio_duration
     if project.background_audio and not probe_media(project.background_audio, settings.ffprobe_path).has_audio:
         raise ValueError("Background music không có audio stream.")
     encoder = resolve_encoder(project.encoder, settings.ffmpeg_path)
     output = unique_output(project.output_folder, project.output_name, "final", ".mp4")
-    command = [settings.ffmpeg_path, "-hide_banner", "-y", "-stream_loop", "-1", "-i", project.video, "-i", project.main_audio]
+    command = [settings.ffmpeg_path, "-hide_banner", "-y", "-stream_loop", "-1", "-i", project.video]
+    if project.duration_mode == "custom" and duration > audio_duration:
+        command += ["-stream_loop", "-1"]
+    command += ["-i", project.main_audio]
     if project.background_audio:
         if project.loop_background:
             command += ["-stream_loop", "-1"]
