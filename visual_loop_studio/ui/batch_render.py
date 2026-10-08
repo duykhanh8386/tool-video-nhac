@@ -334,10 +334,17 @@ class BatchRenderPage(QWidget):
         enc_choice = self.encoder_combo.currentText()
 
         added = 0
+        seen_names: dict[str, int] = {}
         for i in range(total_pairs):
             v_file = videos[i % len(videos)]
             a_file = audios[i % len(audios)]
-            out_name = f"final_{i + 1:02d}_{v_file.stem}.mp4"
+            base_name = f"{a_file.stem}.mp4"
+            if base_name in seen_names:
+                seen_names[base_name] += 1
+                out_name = f"{a_file.stem}_{seen_names[base_name]}.mp4"
+            else:
+                seen_names[base_name] = 1
+                out_name = base_name
 
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -385,7 +392,7 @@ class BatchRenderPage(QWidget):
 
         row = self.table.rowCount()
         self.table.insertRow(row)
-        out_name = f"final_{row + 1:02d}_{Path(video).stem}.mp4"
+        out_name = f"{Path(audio).stem}.mp4"
 
         self._set_item(row, 0, str(row + 1))
         self._set_item(row, 1, Path(video).name, video)
