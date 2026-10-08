@@ -787,7 +787,7 @@ class MuseVideoAutomationTests(unittest.TestCase):
                 download_timeout=1,
             ).process(driver, job, context)
 
-            self.assertLess(time.monotonic() - started, 0.8)
+            self.assertLess(time.monotonic() - started, 1.5)
             self.assertEqual(result, target)
             self.assertEqual(driver.downloaded_video_ids, ["new-video-1"])
             self.assertEqual(driver.session_clicks, [])

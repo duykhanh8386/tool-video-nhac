@@ -18,7 +18,7 @@ try:
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QAction, QCloseEvent, QIcon, QPixmap
     from PySide6.QtWidgets import (
-        QApplication, QFileDialog, QHBoxLayout, QLabel, QListWidget, QMainWindow,
+        QApplication, QDialog, QFileDialog, QHBoxLayout, QLabel, QListWidget, QMainWindow,
         QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
     )
 except ModuleNotFoundError as exc:
@@ -37,6 +37,8 @@ from ui.settings import SettingsDialog
 from ui.updater import UpdateController
 from ui.visual_creator import VisualCreatorPage
 from ui.youtube_accounts import YouTubeAccountsPage
+from auth.license_manager import get_license_manager
+from ui.license_dialog import LicenseDialog
 from utils.config import load_settings, save_settings, write_json
 from utils.paths import RESOURCE_DIR, ensure_app_dirs
 from utils.shortcuts import ensure_desktop_shortcut
@@ -49,6 +51,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = load_settings()
+        self.license_mgr = get_license_manager()
         self.updater = UpdateController(self)
         self.project_path = ""
         self.setWindowTitle(f"Visual Loop Studio v{__version__}")
@@ -148,9 +151,16 @@ class MainWindow(QMainWindow):
         action.triggered.connect(self.open_settings)
         settings_menu.addAction(action)
         help_menu = self.menuBar().addMenu("Trợ giúp")
+        license_action = QAction("Quản lý Bản quyền (License)...", self)
+        license_action.triggered.connect(self._open_license_dialog)
+        help_menu.addAction(license_action)
         update_action = QAction("Kiểm tra cập nhật", self)
         update_action.triggered.connect(lambda: self.updater.check(silent=False))
         help_menu.addAction(update_action)
+
+    def _open_license_dialog(self) -> None:
+        dialog = LicenseDialog(self.license_mgr, view_mode=True, parent=self)
+        dialog.exec()
 
     def _navigate(self, index: int) -> None:
         if index >= 0:
@@ -567,6 +577,12 @@ def main() -> int:
         app.setWindowIcon(app_icon)
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE)
+    license_mgr = get_license_manager()
+    is_licensed, _ = license_mgr.check_license()
+    if not is_licensed:
+        lic_dialog = LicenseDialog(license_mgr)
+        if lic_dialog.exec() != QDialog.DialogCode.Accepted:
+            return 0
     window = MainWindow()
     window.show()
     if shortcut_error:
