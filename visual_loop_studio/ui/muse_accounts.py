@@ -376,7 +376,7 @@ class MuseAccountsPage(QWidget):
         root.addWidget(self.start_requirements)
 
         self.tabs = QTabWidget()
-        self.tabs.setMinimumHeight(560)
+        self.tabs.setMinimumHeight(780)
         for worker_id in range(1, MUSE_SESSION_COUNT + 1):
             page, widgets = self._build_worker_tab(worker_id)
             self._workers[worker_id] = widgets
@@ -384,73 +384,83 @@ class MuseAccountsPage(QWidget):
         root.addWidget(self.tabs)
 
     def _build_worker_tab(self, worker_id: int) -> tuple[QWidget, _WorkerWidgets]:
-        page = QScrollArea()
-        page.setWidgetResizable(True)
-        content = QWidget()
-        content.setMinimumHeight(520)
-        page.setWidget(content)
-        root = QVBoxLayout(content)
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+
         account_group = QGroupBox(f"Tài khoản Muse {worker_id}")
-        account_group.setMinimumHeight(305)
         grid = QGridLayout(account_group)
+        grid.setVerticalSpacing(8)
+        grid.setHorizontalSpacing(10)
+
         enabled = QCheckBox("Dùng tài khoản này để chạy")
         enabled.setChecked(True)
         enabled.toggled.connect(lambda _checked: self._worker_selection_changed())
+
         account = QComboBox()
         account.setEditable(True)
         account.setMinimumHeight(36)
         account.lineEdit().setPlaceholderText("Email Google được phép sử dụng")
+
         password = QLineEdit()
         password.setMinimumHeight(36)
         password.setEchoMode(QLineEdit.EchoMode.Password)
         password.setClearButtonEnabled(True)
         password.setPlaceholderText("Mật khẩu Google (không lưu; có thể để trống để tự đăng nhập)")
+
         muse_tab = QComboBox()
         muse_tab.setMinimumHeight(36)
         muse_tab.setPlaceholderText("Bấm Quét tab Muse rồi chọn đúng tab của tài khoản này")
+
         tab_selection = QLabel("Chưa chọn tab Muse")
         tab_selection.setObjectName("muted")
         tab_selection.setWordWrap(True)
         muse_tab.currentIndexChanged.connect(
             lambda _index, value=worker_id: self._tab_selection_changed(value)
         )
+
         stop = QPushButton("⏹ Dừng worker")
+        stop.setMinimumHeight(34)
         stop.setStyleSheet(
             "QPushButton { background: #fee2e2; border: 1.5px solid #f87171; color: #991b1b; font-weight: 600; border-radius: 6px; padding: 6px 14px; } "
             "QPushButton:hover { background: #fecaca; } "
             "QPushButton:disabled { background: #f8fafc; border-color: #e2e8f0; color: #cbd5e1; }"
         )
         retry = QPushButton("🔄 Chạy lại ảnh lỗi")
+        retry.setMinimumHeight(34)
         stop.clicked.connect(lambda _checked=False, value=worker_id: self._stop_worker(value))
         retry.clicked.connect(lambda _checked=False, value=worker_id: self._retry_failed(value))
+
         login_state = QLabel("Chưa đăng nhập")
         login_state.setWordWrap(True)
         login_state.setStyleSheet("font-weight: 600; color: #0284c7;")
+
         profile = QLabel()
         profile.setObjectName("muted")
         profile.setWordWrap(True)
+
         login_help = QLabel(
-            "Phương án 1: tài khoản có mật khẩu được mở bằng driver/profile riêng biệt; tool chỉ điền "
-            "email/mật khẩu trên accounts.google.com. Nếu để trống thì bạn tự đăng nhập trong Chrome thường. "
-            "CAPTCHA, passkey và 2FA luôn làm thủ công. Sau khi Google xác minh, tool bấm nút Continue as "
-            "của đúng cửa sổ Chrome, xác nhận email rồi tự mở Muse; mật khẩu bị xóa khỏi UI ngay khi bàn giao. "
-            "Phương án 2: bấm Mở Chrome/Muse đã tick, mở sẵn Muse trong từng cửa sổ, bấm Quét tab Muse, "
-            "rồi chọn một dòng READY cho mỗi tài khoản. Dòng ĐÃ CHỌN TAB màu xanh là đã chọn xong. "
-            "Waitlist vẫn do người dùng xử lý."
+            "💡 Phương án 1: Profile riêng biệt, hỗ trợ tự điền email/mật khẩu Google (hoặc tự đăng nhập trong Chrome). "
+            "Sau khi Google xác minh, tool tự bấm Continue as và mở Muse.\n"
+            "💡 Phương án 2: Mở Chrome thường, đăng nhập sẵn Muse, bấm Quét tab Muse rồi chọn dòng tab READY. "
+            "Dòng màu xanh là đã nhận tab thành công."
         )
         login_help.setObjectName("muted")
         login_help.setWordWrap(True)
+        login_help.setStyleSheet("color: #64748b; font-size: 11px; padding: 4px 0;")
+
         grid.addWidget(enabled, 0, 0, 1, 3)
-        grid.addWidget(QLabel("Email Google"), 1, 0)
+        grid.addWidget(QLabel("Email Google:"), 1, 0)
         grid.addWidget(account, 1, 1, 1, 2)
-        grid.addWidget(QLabel("Mật khẩu Google"), 2, 0)
+        grid.addWidget(QLabel("Mật khẩu Google:"), 2, 0)
         grid.addWidget(password, 2, 1, 1, 2)
-        grid.addWidget(QLabel("Tab Muse"), 3, 0)
+        grid.addWidget(QLabel("Tab Muse:"), 3, 0)
         grid.addWidget(muse_tab, 3, 1, 1, 2)
         grid.addWidget(tab_selection, 4, 1, 1, 2)
-        grid.addWidget(QLabel("Đăng nhập"), 5, 0)
+        grid.addWidget(QLabel("Đăng nhập:"), 5, 0)
         grid.addWidget(login_state, 5, 1, 1, 2)
-        grid.addWidget(QLabel("Profile"), 6, 0)
+        grid.addWidget(QLabel("Profile Chrome:"), 6, 0)
         grid.addWidget(profile, 6, 1, 1, 2)
         grid.addWidget(login_help, 7, 0, 1, 3)
         root.addWidget(account_group)
@@ -459,8 +469,8 @@ class MuseAccountsPage(QWidget):
         assigned_count.setStyleSheet("font-weight: 700; color: #0f172a; font-size: 13px;")
         allocation = QPlainTextEdit()
         allocation.setReadOnly(True)
-        allocation.setMinimumHeight(70)
-        allocation.setMaximumHeight(110)
+        allocation.setMinimumHeight(65)
+        allocation.setMaximumHeight(90)
         allocation.setStyleSheet(
             "font-family: Consolas, monospace; font-size: 12px; background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 6px; color: #0f172a; padding: 6px;"
         )
@@ -473,6 +483,7 @@ class MuseAccountsPage(QWidget):
         current_image.setStyleSheet("font-weight: 600; color: #1e293b;")
         progress = QProgressBar()
         progress.setRange(0, 100)
+        progress.setMinimumHeight(18)
         stats = QLabel("Chờ: 0 • Thành công: 0 • Lỗi: 0 • Quota: 0")
         stats.setStyleSheet("font-weight: 600; color: #475569; font-size: 12px;")
         error = QLabel()
@@ -488,15 +499,18 @@ class MuseAccountsPage(QWidget):
         button_row.addWidget(retry)
         button_row.addStretch()
         root.addLayout(button_row)
+
         logs = QPlainTextEdit()
         logs.setReadOnly(True)
-        logs.setMinimumHeight(100)
+        logs.setMinimumHeight(130)
+        logs.setMaximumHeight(200)
         logs.setStyleSheet(
             "font-family: Consolas, monospace; font-size: 12px; background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 6px; color: #0f172a; padding: 6px;"
         )
         logs.setPlaceholderText("Log riêng của worker")
         root.addWidget(QLabel("Log riêng:"))
-        root.addWidget(logs, 1)
+        root.addWidget(logs)
+
         return page, _WorkerWidgets(
             enabled=enabled,
             account=account,
