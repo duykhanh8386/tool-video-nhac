@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -66,10 +67,16 @@ from auth.muse_login import (
     create_muse_chrome_driver,
     validate_muse_start_url,
 )
+from auth.muse_sessions import (
+    MuseSessionManager,
+    get_muse_session_manager,
+)
 from auth.muse_video_batch import (
     MUSE_SESSION_DOWNLOADS_DIR,
+    MuseVideoBatchManager,
     MuseVideoSettings,
     SUPPORTED_IMAGE_SUFFIXES,
+    get_muse_video_batch_manager,
 )
 from models.settings_model import AppSettings
 from utils.paths import CACHE_DIR
