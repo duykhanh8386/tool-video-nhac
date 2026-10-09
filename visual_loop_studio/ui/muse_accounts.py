@@ -4,7 +4,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -67,6 +67,22 @@ WORKER_LABELS = {
     MuseVideoWorkerState.FAILED: "Lỗi",
     MuseVideoWorkerState.COMPLETED: "Hoàn tất hàng đợi",
 }
+
+ACTIVE_MODE_STYLE = (
+    "QPushButton { "
+    "background: #2563eb; color: #ffffff; font-weight: 700; font-size: 13px; "
+    "border: 1.5px solid #1d4ed8; border-radius: 7px; padding: 6px 14px; "
+    "} "
+    "QPushButton:hover { background: #1d4ed8; }"
+)
+
+INACTIVE_MODE_STYLE = (
+    "QPushButton { "
+    "background: #ffffff; color: #475569; font-weight: 600; font-size: 13px; "
+    "border: 1.5px solid #cbd5e1; border-radius: 7px; padding: 6px 14px; "
+    "} "
+    "QPushButton:hover { background: #f8fafc; color: #1e293b; border-color: #94a3b8; }"
+)
 
 
 @dataclass
@@ -190,9 +206,36 @@ class MuseAccountsPage(QWidget):
         connection_row.addWidget(self.scan_tabs)
         root.addWidget(connection_group)
 
+        # Mode Toggle Switch Bar (Tách biệt hoàn toàn Tạo Video và Tạo Ảnh)
+        mode_container = QWidget()
+        mode_container.setStyleSheet(
+            "background: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 10px; padding: 4px;"
+        )
+        mode_layout = QHBoxLayout(mode_container)
+        mode_layout.setContentsMargins(6, 6, 6, 6)
+        mode_layout.setSpacing(10)
+
+        mode_desc = QLabel("🛠 Chế độ tác vụ AI:")
+        mode_desc.setStyleSheet("color: #1e293b; font-weight: 700; font-size: 13px; padding-left: 6px;")
+        mode_layout.addWidget(mode_desc)
+
+        self.btn_mode_video = QPushButton("🎬 Tạo Video AI (Image-to-Video)")
+        self.btn_mode_video.setMinimumHeight(40)
+        self.btn_mode_video.setCursor(Qt.PointingHandCursor)
+        self.btn_mode_video.clicked.connect(lambda: self._set_task_mode("video"))
+
+        self.btn_mode_image = QPushButton("🎨 Tạo Ảnh AI (Image Generation)")
+        self.btn_mode_image.setMinimumHeight(40)
+        self.btn_mode_image.setCursor(Qt.PointingHandCursor)
+        self.btn_mode_image.clicked.connect(lambda: self._set_task_mode("image"))
+
+        mode_layout.addWidget(self.btn_mode_video, 1)
+        mode_layout.addWidget(self.btn_mode_image, 1)
+        root.addWidget(mode_container)
+
         # Card 1: Nguồn ảnh & Thư mục lưu
-        source_group = QGroupBox("📁 Nguồn Ảnh & Thư Mục Xuất File")
-        source_grid = QGridLayout(source_group)
+        self.source_group = QGroupBox("📁 Nguồn Ảnh & Thư Mục Xuất File")
+        source_grid = QGridLayout(self.source_group)
         source_grid.setVerticalSpacing(10)
         source_grid.setHorizontalSpacing(10)
         self.url = QLineEdit(self.settings.muse_start_url or MUSE_START_URL)
@@ -216,7 +259,8 @@ class MuseAccountsPage(QWidget):
 
         source_grid.addWidget(QLabel("MUSE_URL:"), 0, 0)
         source_grid.addWidget(self.url, 0, 1, 1, 3)
-        source_grid.addWidget(QLabel("Thư mục ảnh:"), 1, 0)
+        self.source_label = QLabel("Thư mục ảnh:")
+        source_grid.addWidget(self.source_label, 1, 0)
         source_grid.addWidget(self.image_folder, 1, 1)
         source_grid.addWidget(choose_images, 1, 2)
         source_grid.addWidget(self.recursive, 1, 3)
@@ -224,22 +268,22 @@ class MuseAccountsPage(QWidget):
         source_grid.addWidget(QLabel("Thư mục output:"), 3, 0)
         source_grid.addWidget(self.output_folder, 3, 1, 1, 2)
         source_grid.addWidget(choose_output, 3, 3)
-        root.addWidget(source_group)
+        root.addWidget(self.source_group)
 
-        # Card 2: Hộp nhập Prompt chuyên biệt (AI Motion Prompt Box)
-        prompt_card = QGroupBox("✨ Prompt Tạo Video AI (Motion Prompt)")
-        prompt_vbox = QVBoxLayout(prompt_card)
+        # Card 2: Hộp nhập Prompt chuyên biệt (AI Motion / Image Prompt Box)
+        self.prompt_card = QGroupBox("✨ Prompt Tạo Video AI (Motion Prompt)")
+        prompt_vbox = QVBoxLayout(self.prompt_card)
         prompt_vbox.setSpacing(8)
 
         prompt_header = QHBoxLayout()
-        prompt_hint = QLabel("Mô tả chuyển động, góc máy, ánh sáng (áp dụng chung cho batch ảnh):")
-        prompt_hint.setStyleSheet("color: #475569; font-size: 12px; font-weight: 500;")
+        self.prompt_hint = QLabel("Mô tả chuyển động, góc máy, ánh sáng (áp dụng chung cho batch ảnh):")
+        self.prompt_hint.setStyleSheet("color: #475569; font-size: 12px; font-weight: 500;")
         prompt_tag = QLabel("📸 Snapshot khi bắt đầu batch")
         prompt_tag.setStyleSheet(
             "color: #1d4ed8; font-size: 11px; font-weight: 600; background: #eff6ff; "
             "border: 1px solid #bfdbfe; border-radius: 4px; padding: 2px 8px;"
         )
-        prompt_header.addWidget(prompt_hint)
+        prompt_header.addWidget(self.prompt_hint)
         prompt_header.addStretch()
         prompt_header.addWidget(prompt_tag)
         prompt_vbox.addLayout(prompt_header)
@@ -266,11 +310,11 @@ class MuseAccountsPage(QWidget):
             "}"
         )
         prompt_vbox.addWidget(self.prompt)
-        root.addWidget(prompt_card)
+        root.addWidget(self.prompt_card)
 
-        # Card 3: Cài đặt video
-        settings_group = QGroupBox("⚙️ Cài đặt video Muse (để trống = mặc định của Muse)")
-        settings_layout = QHBoxLayout(settings_group)
+        # Card 3: Cài đặt Muse (video/ảnh)
+        self.settings_group = QGroupBox("⚙️ Cài đặt video Muse (để trống = mặc định của Muse)")
+        settings_layout = QHBoxLayout(self.settings_group)
         settings_layout.setSpacing(20)
         # Giữ ngầm model và quantity để bảo toàn tương thích tuyệt đối
         self.model = self._editable_combo(("",))
@@ -278,25 +322,62 @@ class MuseAccountsPage(QWidget):
         self.quantity.setRange(1, 1)
         self.quantity.setValue(1)
 
-        # Các tùy chọn video thiết thực hiển thị trên giao diện
+        # Các tùy chọn thiết thực hiển thị trên giao diện
         self.aspect_ratio = self._editable_combo(("", "16:9", "9:16", "1:1"))
         self.duration = self._editable_combo(("", "5s", "8s", "10s"))
         self.resolution = self._editable_combo(("", "720p", "1080p"))
-        for icon_label, widget in (
-            ("📐 Tỷ lệ khung hình:", self.aspect_ratio),
-            ("⏱ Độ dài video:", self.duration),
-            ("📺 Độ phân giải:", self.resolution),
-        ):
-            box = QHBoxLayout()
-            lbl = QLabel(icon_label)
-            lbl.setStyleSheet("color: #1e293b; font-weight: 600; font-size: 13px;")
-            box.addWidget(lbl)
-            widget.setMinimumHeight(36)
-            widget.setMinimumWidth(130)
-            box.addWidget(widget)
-            settings_layout.addLayout(box)
+
+        # Khung hình
+        ar_box = QHBoxLayout()
+        ar_lbl = QLabel("📐 Tỷ lệ khung hình:")
+        ar_lbl.setStyleSheet("color: #1e293b; font-weight: 600; font-size: 13px;")
+        ar_box.addWidget(ar_lbl)
+        self.aspect_ratio.setMinimumHeight(36)
+        self.aspect_ratio.setMinimumWidth(120)
+        ar_box.addWidget(self.aspect_ratio)
+        settings_layout.addLayout(ar_box)
+
+        # Thời lượng video (ẩn khi ở chế độ tạo ảnh)
+        self.duration_box_widget = QWidget()
+        dur_box = QHBoxLayout(self.duration_box_widget)
+        dur_box.setContentsMargins(0, 0, 0, 0)
+        dur_box.setSpacing(6)
+        dur_lbl = QLabel("⏱ Độ dài video:")
+        dur_lbl.setStyleSheet("color: #1e293b; font-weight: 600; font-size: 13px;")
+        dur_box.addWidget(dur_lbl)
+        self.duration.setMinimumHeight(36)
+        self.duration.setMinimumWidth(120)
+        dur_box.addWidget(self.duration)
+        settings_layout.addWidget(self.duration_box_widget)
+
+        # Số lượng ảnh tạo từ prompt thuần (hiện khi ở chế độ tạo ảnh)
+        self.image_quantity = QSpinBox()
+        self.image_quantity.setRange(1, 50)
+        self.image_quantity.setValue(1)
+        self.image_quantity.setMinimumHeight(36)
+        self.image_quantity.setMinimumWidth(80)
+        self.image_quantity_widget = QWidget()
+        qty_box = QHBoxLayout(self.image_quantity_widget)
+        qty_box.setContentsMargins(0, 0, 0, 0)
+        qty_box.setSpacing(6)
+        qty_lbl = QLabel("🖼 Số lượng ảnh tạo:")
+        qty_lbl.setStyleSheet("color: #1e293b; font-weight: 600; font-size: 13px;")
+        qty_box.addWidget(qty_lbl)
+        qty_box.addWidget(self.image_quantity)
+        settings_layout.addWidget(self.image_quantity_widget)
+
+        # Độ phân giải
+        res_box = QHBoxLayout()
+        res_lbl = QLabel("📺 Độ phân giải:")
+        res_lbl.setStyleSheet("color: #1e293b; font-weight: 600; font-size: 13px;")
+        res_box.addWidget(res_lbl)
+        self.resolution.setMinimumHeight(36)
+        self.resolution.setMinimumWidth(120)
+        res_box.addWidget(self.resolution)
+        settings_layout.addLayout(res_box)
+
         settings_layout.addStretch()
-        root.addWidget(settings_group)
+        root.addWidget(self.settings_group)
 
         # Card 4: Thanh điều khiển chính và công cụ phụ
         actions_card = QWidget()
@@ -538,6 +619,60 @@ class MuseAccountsPage(QWidget):
             combo.addItem(value or "Muse mặc định", value)
         return combo
 
+    def _current_task_mode(self) -> str:
+        return getattr(self.settings, "muse_task_mode", "video") or "video"
+
+    def _set_task_mode(self, mode: str) -> None:
+        if self.busy:
+            QMessageBox.information(self, "Muse đang chạy", "Không thể đổi chế độ khi tác vụ đang chạy.")
+            return
+        if mode not in {"video", "image"}:
+            mode = "video"
+        self.settings.muse_task_mode = mode
+        self.settings_changed.emit()
+        self._update_task_mode_ui()
+        self.refresh()
+
+    def _update_task_mode_ui(self) -> None:
+        mode = self._current_task_mode()
+        is_image = (mode == "image")
+        if is_image:
+            self.btn_mode_image.setStyleSheet(ACTIVE_MODE_STYLE)
+            self.btn_mode_video.setStyleSheet(INACTIVE_MODE_STYLE)
+            self.source_group.setTitle("📁 Nguồn Ảnh Mẫu (Tùy chọn) & Thư Mục Xuất Ảnh")
+            self.source_label.setText("Thư mục ảnh mẫu:")
+            self.image_folder.setPlaceholderText("(Tùy chọn) Chọn ảnh mẫu để tạo Image-to-Image, hoặc để trống nếu chỉ dùng Prompt...")
+            self.output_folder.setPlaceholderText("Chọn hoặc nhập thư mục lưu ảnh PNG/JPG kết quả...")
+            self.prompt_card.setTitle("🎨 Prompt Tạo Ảnh AI (Image Prompt)")
+            self.prompt_hint.setText("Mô tả nội dung, phong cách, chi tiết ảnh (áp dụng chung):")
+            self.prompt.setPlaceholderText(
+                "✍️ Nhập prompt tạo ảnh cho AI Muse tại đây...\n"
+                "Ví dụ: A majestic cinematic portrait of a cyberpunk character in neon rainy street, 8k resolution, highly detailed, masterwork"
+            )
+            self.settings_group.setTitle("⚙️ Cài đặt ảnh Muse (để trống = mặc định của Muse)")
+            self.duration_box_widget.setVisible(False)
+            self.image_quantity_widget.setVisible(True)
+            self.start_all.setText("▶ Bắt đầu tạo ảnh")
+            self.allocate.setText("📊 Phân bổ lượt tạo ảnh")
+        else:
+            self.btn_mode_video.setStyleSheet(ACTIVE_MODE_STYLE)
+            self.btn_mode_image.setStyleSheet(INACTIVE_MODE_STYLE)
+            self.source_group.setTitle("📁 Nguồn Ảnh & Thư Mục Xuất File")
+            self.source_label.setText("Thư mục ảnh:")
+            self.image_folder.setPlaceholderText("Chọn hoặc nhập đường dẫn thư mục ảnh (JPG, PNG, WEBP)...")
+            self.output_folder.setPlaceholderText("Chọn hoặc nhập thư mục lưu video MP4 kết quả...")
+            self.prompt_card.setTitle("✨ Prompt Tạo Video AI (Motion Prompt)")
+            self.prompt_hint.setText("Mô tả chuyển động, góc máy, ánh sáng (áp dụng chung cho batch ảnh):")
+            self.prompt.setPlaceholderText(
+                "✍️ Nhập prompt điều khiển chuyển động cho AI Muse tại đây...\n"
+                "Ví dụ: Tạo video chuyển động nhân vật nhẹ nhàng, cinematic lighting, ultra smooth camera pan, 4k highly detailed"
+            )
+            self.settings_group.setTitle("⚙️ Cài đặt video Muse (để trống = mặc định của Muse)")
+            self.duration_box_widget.setVisible(True)
+            self.image_quantity_widget.setVisible(False)
+            self.start_all.setText("▶ Bắt đầu tạo video")
+            self.allocate.setText("📊 Phân bổ ảnh")
+
     def _restore_ui(self) -> None:
         snapshot = self.batch_manager.snapshot()
         enabled_ids = set(snapshot.enabled_worker_ids)
@@ -556,6 +691,11 @@ class MuseAccountsPage(QWidget):
         self.aspect_ratio.setCurrentText(snapshot.settings.aspect_ratio or "Muse mặc định")
         self.duration.setCurrentText(snapshot.settings.duration or "Muse mặc định")
         self.resolution.setCurrentText(snapshot.settings.resolution or "Muse mặc định")
+        if getattr(snapshot.settings, "task_mode", None):
+            self.settings.muse_task_mode = snapshot.settings.task_mode
+        if getattr(snapshot.settings, "quantity", None):
+            self.image_quantity.setValue(max(1, snapshot.settings.quantity))
+        self._update_task_mode_ui()
 
     def _reload_account_choices(self) -> None:
         emails = [account.email_label for account in self.store.all()]
@@ -699,22 +839,27 @@ class MuseAccountsPage(QWidget):
         return "" if value == "Muse mặc định" else value
 
     def _video_settings(self) -> MuseVideoSettings:
+        is_image_mode = (self._current_task_mode() == "image")
+        qty = self.image_quantity.value() if is_image_mode else self.quantity.value()
         return MuseVideoSettings(
+            task_mode="image" if is_image_mode else "video",
             model=self._settings_value(self.model),
             aspect_ratio=self._settings_value(self.aspect_ratio),
-            duration=self._settings_value(self.duration),
+            duration="" if is_image_mode else self._settings_value(self.duration),
             resolution=self._settings_value(self.resolution),
-            quantity=self.quantity.value(),
+            quantity=qty,
         )
 
     def _choose_image_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục ảnh", self.image_folder.text())
+        title = "Chọn thư mục ảnh mẫu (Image-to-Image)" if self._current_task_mode() == "image" else "Chọn thư mục ảnh"
+        folder = QFileDialog.getExistingDirectory(self, title, self.image_folder.text())
         if folder:
             self.image_folder.setText(folder)
             self._scan_count()
 
     def _choose_output_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục lưu video", self.output_folder.text())
+        title = "Chọn thư mục lưu ảnh kết quả" if self._current_task_mode() == "image" else "Chọn thư mục lưu video"
+        folder = QFileDialog.getExistingDirectory(self, title, self.output_folder.text())
         if folder:
             self.output_folder.setText(folder)
             self.settings.last_output_folder = folder
@@ -725,20 +870,51 @@ class MuseAccountsPage(QWidget):
             self.image_folder.text().strip(),
             recursive=self.recursive.isChecked(),
         )
-        self.image_count.setText(f"Đã tìm thấy {len(images)} ảnh hợp lệ.")
+        if images:
+            self.image_count.setText(f"Đã tìm thấy {len(images)} ảnh hợp lệ.")
+        elif self._current_task_mode() == "image":
+            self.image_count.setText("Chưa chọn ảnh mẫu (sẽ tạo ảnh Text-to-Image thuần từ Prompt)")
+        else:
+            self.image_count.setText("Chưa quét ảnh")
         return images
 
     def _allocate(self) -> None:
+        is_image_mode = (self._current_task_mode() == "image")
+        selected_ids = self._selected_worker_ids()
         try:
-            images = self._scan_count()
-            selected_ids = self._selected_worker_ids()
-            allocations = self.batch_manager.allocate_images(images, worker_ids=selected_ids)
+            folder_text = self.image_folder.text().strip()
+            if folder_text:
+                images = self._scan_count()
+                if not images and not is_image_mode:
+                    raise ValueError("Không tìm thấy ảnh hợp lệ trong thư mục đã chọn.")
+                if images:
+                    allocations = self.batch_manager.allocate_images(images, worker_ids=selected_ids)
+                    self.global_status.setText(
+                        "Đã phân bổ round-robin: " + ", ".join(f"TK {index + 1}: {len(items)}" for index, items in enumerate(allocations))
+                    )
+                else:
+                    qty = self.image_quantity.value()
+                    allocations = self.batch_manager.allocate_text_jobs(qty, worker_ids=selected_ids)
+                    self.global_status.setText(
+                        f"Đã phân bổ {qty} lượt tạo ảnh (Prompt): " + ", ".join(f"TK {index + 1}: {len(items)}" for index, items in enumerate(allocations))
+                    )
+            elif is_image_mode:
+                qty = self.image_quantity.value()
+                allocations = self.batch_manager.allocate_text_jobs(qty, worker_ids=selected_ids)
+                self.image_count.setText(f"Tạo {qty} ảnh từ prompt thuần (không ảnh mẫu)")
+                self.global_status.setText(
+                    f"Đã phân bổ {qty} lượt tạo ảnh (Prompt): " + ", ".join(f"TK {index + 1}: {len(items)}" for index, items in enumerate(allocations))
+                )
+            else:
+                images = self._scan_count()
+                allocations = self.batch_manager.allocate_images(images, worker_ids=selected_ids)
+                self.global_status.setText(
+                    "Đã phân bổ round-robin: " + ", ".join(f"TK {index + 1}: {len(items)}" for index, items in enumerate(allocations))
+                )
         except Exception as exc:
-            QMessageBox.warning(self, "Không thể phân bổ ảnh", str(exc))
+            title = "Không thể phân bổ lượt tạo ảnh" if is_image_mode else "Không thể phân bổ ảnh"
+            QMessageBox.warning(self, title, str(exc))
             return
-        self.global_status.setText(
-            "Đã phân bổ round-robin: " + ", ".join(f"TK {index + 1}: {len(items)}" for index, items in enumerate(allocations))
-        )
         self.refresh()
 
     def _start_all(self) -> None:
@@ -746,19 +922,30 @@ class MuseAccountsPage(QWidget):
             if self._pending_batch_start is not None:
                 raise RuntimeError("Ba phiên Muse đang được mở; hãy chờ hoặc bấm Dừng tất cả.")
             batch = self.batch_manager.snapshot()
+            is_image_mode = (self._current_task_mode() == "image")
+            selected_ids = self._selected_worker_ids()
+
             if not batch.source_paths:
                 if self.image_folder.text().strip():
                     self._allocate()
                     batch = self.batch_manager.snapshot()
-                if not batch.source_paths:
+                elif is_image_mode:
+                    self.batch_manager.allocate_text_jobs(
+                        self.image_quantity.value(),
+                        worker_ids=selected_ids,
+                    )
+                    batch = self.batch_manager.snapshot()
+                else:
                     raise ValueError("Hãy chọn thư mục ảnh và phân bổ ảnh trước khi bắt đầu.")
+
+            action_name = "ảnh" if is_image_mode else "video"
             prompt = self.prompt.toPlainText().strip()
             if not prompt:
-                raise ValueError("Prompt tạo video chung không được để trống.")
+                raise ValueError(f"Prompt tạo {action_name} chung không được để trống.")
             output_dir = self.output_folder.text().strip()
             if not output_dir:
-                raise ValueError("Hãy chọn thư mục lưu video đầu ra.")
-            selected_ids = self._selected_worker_ids()
+                raise ValueError(f"Hãy chọn thư mục lưu {action_name} đầu ra.")
+
             emails = self._account_emails(selected_ids)
             settings = self._video_settings()
             self.batch_manager.prepare_start(prompt, settings, output_dir, worker_ids=selected_ids)
@@ -889,10 +1076,16 @@ class MuseAccountsPage(QWidget):
             workflow_busy = batch.running or self.session_manager.busy or opening
             tab_mode = self._connection_mode() == MuseSessionOpenMode.EXISTING_TAB
             tabs_selected = all(bool(self._workers[worker_id].muse_tab.currentData()) for worker_id in selected_ids)
+            is_image_mode = (self._current_task_mode() == "image")
+            has_sources = (
+                is_image_mode
+                or bool(batch.source_paths)
+                or bool(self.image_folder.text().strip())
+            )
             self.start_all.setEnabled(
                 accounts_valid
                 and (not tab_mode or tabs_selected)
-                and (bool(batch.source_paths) or bool(self.image_folder.text().strip()))
+                and has_sources
                 and bool(self.prompt.toPlainText().strip())
                 and bool(self.output_folder.text().strip())
                 and not workflow_busy
@@ -941,12 +1134,15 @@ class MuseAccountsPage(QWidget):
             ]
             if missing_tabs:
                 blockers.append("quét và chọn tab Muse cho tài khoản " + ", ".join(missing_tabs))
-        if not batch.source_paths and not self.image_folder.text().strip():
+        is_image_mode = (self._current_task_mode() == "image")
+        if not is_image_mode and not batch.source_paths and not self.image_folder.text().strip():
             blockers.append("chọn thư mục ảnh")
         if not self.prompt.toPlainText().strip():
-            blockers.append("nhập prompt chung")
+            action_desc = "tạo ảnh" if is_image_mode else "tạo video"
+            blockers.append(f"nhập prompt {action_desc}")
         if not self.output_folder.text().strip():
-            blockers.append("chọn thư mục output")
+            action_noun = "ảnh" if is_image_mode else "video"
+            blockers.append(f"chọn thư mục lưu {action_noun}")
         if blockers:
             message = "Chưa thể bắt đầu: " + "; ".join(blockers) + "."
             self.start_requirements.setStyleSheet(
@@ -958,7 +1154,8 @@ class MuseAccountsPage(QWidget):
                 "background: #eff6ff; color: #1e40af; border: 1.5px solid #bfdbfe; border-radius: 8px; padding: 10px 14px; font-weight: 500;"
             )
         elif batch.running:
-            message = "Các worker Muse được chọn đang chạy độc lập."
+            action_verb = "tạo ảnh" if is_image_mode else "tạo video"
+            message = f"Các worker Muse được chọn đang chạy {action_verb} độc lập."
             self.start_requirements.setStyleSheet(
                 "background: #eff6ff; color: #1e40af; border: 1.5px solid #bfdbfe; border-radius: 8px; padding: 10px 14px; font-weight: 500;"
             )
@@ -976,8 +1173,17 @@ class MuseAccountsPage(QWidget):
             )
         else:
             labels = ", ".join(str(value) for value in selected_ids)
-            count_label = f"{len(batch.source_paths)} ảnh" if batch.source_paths else "ảnh từ thư mục đã chọn"
-            message = f"Sẵn sàng chạy tài khoản {labels} với {count_label}."
+            if is_image_mode:
+                if batch.source_paths:
+                    count_label = f"{len(batch.source_paths)} ảnh mẫu"
+                elif self.image_folder.text().strip():
+                    count_label = "ảnh mẫu từ thư mục đã chọn"
+                else:
+                    count_label = f"{self.image_quantity.value()} lượt prompt (Text-to-Image)"
+                message = f"Sẵn sàng tạo ảnh cho tài khoản {labels} với {count_label}."
+            else:
+                count_label = f"{len(batch.source_paths)} ảnh" if batch.source_paths else "ảnh từ thư mục đã chọn"
+                message = f"Sẵn sàng chạy tài khoản {labels} với {count_label}."
             self.start_requirements.setStyleSheet(
                 "background: #f0fdf4; color: #166534; border: 1.5px solid #bbf7d0; border-radius: 8px; padding: 10px 14px; font-weight: 600;"
             )
@@ -997,16 +1203,22 @@ class MuseAccountsPage(QWidget):
             account_status = f"Mục tiêu: {session.email}"
         else:
             account_status = "Chưa chọn tài khoản"
+        is_image_mode = (self._current_task_mode() == "image")
+        worker_state_label = WORKER_LABELS[worker.state]
+        if worker.state == MuseVideoWorkerState.RUNNING and is_image_mode:
+            worker_state_label = "Đang tạo ảnh"
         widgets.login_state.setText(
-            f"{SESSION_LABELS[session.state]} — {account_status} • Worker: {WORKER_LABELS[worker.state]}"
+            f"{SESSION_LABELS[session.state]} — {account_status} • Worker: {worker_state_label}"
         )
         widgets.profile.setText(session.profile_dir)
-        widgets.assigned_count.setText(f"Được phân bổ: {len(worker.assigned)} ảnh")
-        allocation_text = "\n".join(Path(value).name for value in worker.assigned)
+        unit = "lượt" if (is_image_mode and not self.image_folder.text().strip()) else "ảnh"
+        widgets.assigned_count.setText(f"Được phân bổ: {len(worker.assigned)} {unit}")
+        allocation_text = "\n".join(Path(value).name if not str(value).startswith("Prompt #") else str(value) for value in worker.assigned)
         if widgets.allocation.toPlainText() != allocation_text:
             widgets.allocation.setPlainText(allocation_text)
+        current_name = Path(worker.current_image).name if worker.current_image and not str(worker.current_image).startswith("Prompt #") else (worker.current_image or '—')
         widgets.current_image.setText(
-            f"Ảnh hiện tại: {Path(worker.current_image).name if worker.current_image else '—'}"
+            f"Tác vụ hiện tại: {current_name}"
         )
         widgets.progress.setValue(worker.progress)
         widgets.stats.setText(

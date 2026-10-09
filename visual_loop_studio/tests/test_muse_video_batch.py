@@ -30,6 +30,9 @@ from auth.muse_video_batch import (
     MuseVideoSelectors,
     MuseVideoWorkerState,
     create_muse_video_job_id,
+    _output_filename,
+    _valid_image,
+    _valid_artifact,
     get_muse_video_batch_manager,
 )
 
@@ -1725,6 +1728,56 @@ class MuseVideoBatchManagerTests(unittest.TestCase):
         self.assertEqual(Path(job["source_path"]).name, image.name)
         self.assertTrue(job["output_path"].endswith(".mp4"))
 
+    def test_image_mode_allocate_text_jobs(self):
+        allocations = self.batch.allocate_text_jobs(5, worker_ids=[1, 2, 3])
+        # 5 prompts distributed across 3 workers: 2, 2, 1
+        counts = [len(items) for items in allocations]
+        self.assertEqual(counts, [2, 2, 1])
+        self.assertEqual(allocations[0], ("Prompt #1", "Prompt #4"))
+        self.assertEqual(allocations[1], ("Prompt #2", "Prompt #5"))
+        self.assertEqual(allocations[2], ("Prompt #3",))
+
+    def test_image_mode_output_filename_and_job_id(self):
+        settings = MuseVideoSettings(task_mode="image")
+        job_id = create_muse_video_job_id("", "a beautiful sunset", settings, index=1)
+        self.assertTrue(isinstance(job_id, str) and len(job_id) == 64)
+        out_name = _output_filename("", "worker_1", job_id, task_mode="image")
+        self.assertTrue(out_name.endswith(".png"))
+        self.assertIn("image_", out_name)
+
+        video_settings = MuseVideoSettings(task_mode="video")
+        out_video = _output_filename(Path("test.jpg"), "worker_1", job_id, task_mode="video")
+        self.assertTrue(out_video.endswith(".mp4"))
+
+    def test_valid_image_formats(self):
+        png_file = self.root / "test.png"
+        png_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+        self.assertTrue(_valid_image(png_file))
+        self.assertTrue(_valid_artifact(png_file, task_mode="image"))
+
+        jpg_file = self.root / "test.jpg"
+        jpg_file.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+        self.assertTrue(_valid_image(jpg_file))
+
+        webp_file = self.root / "test.webp"
+        webp_file.write_bytes(b"RIFF\x20\x00\x00\x00WEBPVP8 " + b"\x00" * 50)
+        self.assertTrue(_valid_image(webp_file))
+
+        empty_file = self.root / "empty.png"
+        empty_file.write_bytes(b"")
+        self.assertFalse(_valid_image(empty_file))
+
+    def test_settings_task_mode_serialization(self):
+        from dataclasses import asdict
+        img_settings = MuseVideoSettings(task_mode="image", quantity=3)
+        dict_data = asdict(img_settings)
+        self.assertEqual(dict_data["task_mode"], "image")
+        self.assertEqual(dict_data["quantity"], 3)
+        restored = MuseVideoSettings.from_dict(dict_data)
+        self.assertEqual(restored.task_mode, "image")
+        self.assertEqual(restored.quantity, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
+

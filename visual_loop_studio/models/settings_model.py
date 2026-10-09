@@ -29,6 +29,7 @@ class AppSettings:
     google_oauth_client_json: str = ""
     muse_start_url: str = "https://muse.ai/"
     muse_connection_mode: str = "manual_browser"
+    muse_task_mode: str = "video"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

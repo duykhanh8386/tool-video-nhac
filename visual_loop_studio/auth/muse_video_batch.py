@@ -156,6 +156,24 @@ class MuseVideoSelectors:
         "[data-testid*='result' i] video",
         "video",
     )
+    image_results: tuple[str, ...] = (
+        "[data-testid*='image-result' i] img",
+        "[data-testid*='result' i] img",
+        "img[src^='blob:']",
+        "img",
+    )
+    mode_switch_image: tuple[str, ...] = (
+        "button[data-testid*='image' i]",
+        "[role='tab'][aria-label*='image' i]",
+        "[role='button'][aria-label*='image' i]",
+        "button[aria-label*='image' i]",
+    )
+    mode_switch_video: tuple[str, ...] = (
+        "button[data-testid*='video' i]",
+        "[role='tab'][aria-label*='video' i]",
+        "[role='button'][aria-label*='video' i]",
+        "button[aria-label*='video' i]",
+    )
     download_buttons: tuple[str, ...] = (
         "button[aria-label='Download']",
         "button[data-testid*='download' i]",
@@ -191,17 +209,22 @@ class MuseVideoSettings:
     duration: str = ""
     resolution: str = ""
     quantity: int = 1
+    task_mode: str = "video"  # "video" | "image"
 
     def normalized(self) -> "MuseVideoSettings":
+        raw_mode = str(self.task_mode or "video").strip().casefold()
+        task_mode = "image" if raw_mode == "image" else "video"
         quantity = int(self.quantity or 1)
-        if quantity != 1:
+        if task_mode == "video" and quantity != 1:
             raise ValueError("Batch Muse hiện chỉ cho phép đúng một video cho mỗi ảnh.")
+        quantity = max(1, quantity)
         return MuseVideoSettings(
             model=str(self.model or "").strip(),
             aspect_ratio=str(self.aspect_ratio or "").strip(),
-            duration=str(self.duration or "").strip(),
+            duration="" if task_mode == "image" else str(self.duration or "").strip(),
             resolution=str(self.resolution or "").strip(),
-            quantity=1,
+            quantity=quantity,
+            task_mode=task_mode,
         )
 
     @classmethod
@@ -212,6 +235,7 @@ class MuseVideoSettings:
             duration=str(value.get("duration") or ""),
             resolution=str(value.get("resolution") or ""),
             quantity=int(value.get("quantity") or 1),
+            task_mode=str(value.get("task_mode") or "video"),
         ).normalized()
 
 
@@ -226,9 +250,11 @@ class MuseVideoJob:
     settings: MuseVideoSettings
     output_path: str
     state: MuseVideoJobState = MuseVideoJobState.PENDING
+    task_mode: str = "video"
     submitted: bool = False
     submission_attempted: bool = False
     baseline_videos: list[str] = field(default_factory=list)
+    baseline_images: list[str] = field(default_factory=list)
     submission_group_id: str = ""
     submission_index: int = 0
     submission_size: int = 1
@@ -254,6 +280,7 @@ class MuseVideoJob:
         value = asdict(self)
         value["settings"] = asdict(self.settings)
         value["state"] = self.state.value
+        value["task_mode"] = self.task_mode
         return value
 
     @classmethod
@@ -276,6 +303,8 @@ class MuseVideoJob:
             MuseVideoJobState.READY_TO_GENERATE,
         } and not attempted:
             state = MuseVideoJobState.PENDING
+        parsed_settings = MuseVideoSettings.from_dict(value.get("settings") or {})
+        task_mode = str(value.get("task_mode") or parsed_settings.task_mode or "video")
         return cls(
             job_id=str(value.get("job_id") or ""),
             source_path=str(value.get("source_path") or ""),
@@ -283,12 +312,14 @@ class MuseVideoJob:
             account_id=str(value.get("account_id") or ""),
             email=str(value.get("email") or ""),
             prompt=str(value.get("prompt") or ""),
-            settings=MuseVideoSettings.from_dict(value.get("settings") or {}),
+            settings=parsed_settings,
             output_path=str(value.get("output_path") or ""),
             state=state,
+            task_mode=task_mode,
             submitted=submitted,
             submission_attempted=attempted,
             baseline_videos=[str(item) for item in value.get("baseline_videos", [])],
+            baseline_images=[str(item) for item in value.get("baseline_images", [])],
             submission_group_id=str(value.get("submission_group_id") or ""),
             submission_index=max(0, int(value.get("submission_index") or 0)),
             submission_size=max(1, int(value.get("submission_size") or 1)),
@@ -438,10 +469,16 @@ class MuseVideoAutomation:
 
     def process(self, driver: Any, job: MuseVideoJob, context: MuseVideoRunContext) -> Path:
         existing = Path(job.output_path)
-        if existing.is_file() and _valid_mp4(existing):
-            context.log(f"Đã có MP4 hợp lệ cho job {job.job_id[:12]}; không gửi lại.")
+        if existing.is_file() and _valid_artifact(existing, job.settings.task_mode):
+            kind = "ảnh" if job.settings.task_mode == "image" else "MP4"
+            context.log(f"Đã có {kind} hợp lệ cho job {job.job_id[:12]}; không gửi lại.")
             return existing
         if job.submitted or job.submission_attempted:
+            if job.settings.task_mode == "image":
+                result = self.recover_image_batch(driver, [job], [context])[job.job_id]
+                if isinstance(result, BaseException):
+                    raise result
+                return result
             return self._recover_submitted(driver, job, context)
         result = self.process_batch(driver, [job], [context])[job.job_id]
         if isinstance(result, BaseException):
@@ -454,42 +491,58 @@ class MuseVideoAutomation:
         jobs: list[MuseVideoJob],
         contexts: list[MuseVideoRunContext],
     ) -> dict[str, Path | BaseException]:
-        """Submit up to three images, then download ordered MP4 artifacts from the new Summary."""
+        """Submit up to three inputs, then download ordered artifacts (MP4 or images)."""
         if not jobs or len(jobs) != len(contexts):
             raise MuseVideoBatchError("Nhóm Muse không có đủ job/context để xử lý.")
         if len(jobs) > MUSE_IMAGES_PER_REQUEST:
-            raise MuseVideoBatchError("Mỗi lượt Muse chỉ được gửi tối đa 3 ảnh.")
+            raise MuseVideoBatchError("Mỗi lượt Muse chỉ được gửi tối đa 3 tác vụ.")
         if any(job.submitted or job.submission_attempted for job in jobs):
             raise MuseVideoBatchError("Job đã gửi phải được khôi phục riêng, không được gửi lại theo nhóm.")
         prompt = jobs[0].prompt
         settings = jobs[0].settings
+        is_image_mode = (settings.task_mode == "image")
         if any(job.prompt != prompt or job.settings != settings for job in jobs):
-            raise MuseVideoBatchError("Ba ảnh trong cùng lượt phải dùng chung prompt và cài đặt.")
-        sources = [Path(job.source_path) for job in jobs]
+            raise MuseVideoBatchError("Các tác vụ trong cùng lượt phải dùng chung prompt và cài đặt.")
+        sources = [Path(job.source_path) for job in jobs if job.source_path]
+        if not is_image_mode and len(sources) != len(jobs):
+            raise MuseVideoBatchError("Tác vụ video bắt buộc phải có đủ ảnh nguồn.")
         if any(not source.is_file() for source in sources):
             raise MuseVideoBatchError("Một hoặc nhiều ảnh nguồn không còn tồn tại.")
+
         primary = contexts[0]
         self._check(driver, primary)
-        primary.log(f"Đang chuẩn bị một lượt gồm {len(jobs)} ảnh trên Muse…")
+        action_name = "ảnh" if is_image_mode else "video"
+        primary.log(f"Đang chuẩn bị một lượt tạo {action_name} gồm {len(jobs)} tác vụ trên Muse…")
         self._navigate_new_task(driver, primary)
-        baseline_previews = self._element_fingerprints(driver, self.selectors.previews)
-        for index, (job, source, context) in enumerate(zip(jobs, sources, contexts), start=1):
-            context.transition(MuseVideoJobState.UPLOADING, progress=5 + index * 3, error="")
-            context.log(f"Đang đính kèm ảnh {index}/{len(jobs)}: {source.name}")
-            self._upload(driver, source)
-            self._wait(
-                driver,
-                lambda expected=index: len(
-                    self._element_fingerprints(driver, self.selectors.previews) - baseline_previews
-                ) >= expected,
-                self.upload_timeout,
-                context,
-                f"Muse chưa hiển thị đủ preview cho ảnh thứ {index}.",
-            )
-        primary.log(f"Muse đã nhận đủ {len(jobs)} ảnh; đang điền một prompt chung…")
+        self._switch_mode_if_needed(driver, "image" if is_image_mode else "video")
+
+        if sources:
+            baseline_previews = self._element_fingerprints(driver, self.selectors.previews)
+            for index, (source, context) in enumerate(zip(sources, contexts), start=1):
+                context.transition(MuseVideoJobState.UPLOADING, progress=5 + index * 3, error="")
+                context.log(f"Đang đính kèm ảnh {index}/{len(sources)}: {source.name}")
+                self._upload(driver, source)
+                self._wait(
+                    driver,
+                    lambda expected=index: len(
+                        self._element_fingerprints(driver, self.selectors.previews) - baseline_previews
+                    ) >= expected,
+                    self.upload_timeout,
+                    context,
+                    f"Muse chưa hiển thị đủ preview cho ảnh thứ {index}.",
+                )
+            primary.log(f"Muse đã nhận đủ {len(sources)} ảnh tham chiếu; đang điền prompt…")
+        else:
+            primary.log("Tạo ảnh từ Prompt thuần (không kèm ảnh mẫu); đang điền prompt…")
+
         self._fill_prompt(driver, prompt, primary)
         self._apply_settings(driver, settings)
-        baseline_videos = sorted(self._video_fingerprints(driver))
+
+        if is_image_mode:
+            baseline_images = sorted(self._image_fingerprints(driver))
+        else:
+            baseline_videos = sorted(self._video_fingerprints(driver))
+
         message_snapshot = self._submission_messages(driver)
         baseline_message_ids = sorted(
             {
@@ -507,19 +560,30 @@ class MuseVideoAutomation:
         )
         group_id = hashlib.sha256("|".join(job.job_id for job in jobs).encode("utf-8")).hexdigest()[:24]
         watch_token = f"visual-loop-{group_id}"
-        watch_started_epoch_ms = self._install_video_watch(driver, watch_token)
+        if is_image_mode:
+            watch_started_epoch_ms = self._install_image_watch(driver, watch_token)
+        else:
+            watch_started_epoch_ms = self._install_video_watch(driver, watch_token)
         submission_started_epoch_ms = watch_started_epoch_ms or self._browser_epoch_ms(driver)
+
         for index, context in enumerate(contexts):
+            trans_kwargs = {
+                "progress": 18,
+                "submission_group_id": group_id,
+                "submission_index": index,
+                "submission_size": len(jobs),
+                "baseline_message_ids": baseline_message_ids,
+                "submission_message_floor": message_floor,
+                "baseline_session_fingerprints": baseline_session_fingerprints,
+            }
+            if is_image_mode:
+                trans_kwargs["baseline_images"] = baseline_images
+            else:
+                trans_kwargs["baseline_videos"] = baseline_videos
+
             context.transition(
                 MuseVideoJobState.READY_TO_GENERATE,
-                progress=18,
-                baseline_videos=baseline_videos,
-                submission_group_id=group_id,
-                submission_index=index,
-                submission_size=len(jobs),
-                baseline_message_ids=baseline_message_ids,
-                submission_message_floor=message_floor,
-                baseline_session_fingerprints=baseline_session_fingerprints,
+                **trans_kwargs,
             )
             context.transition(
                 MuseVideoJobState.SUBMITTING,
@@ -528,6 +592,9 @@ class MuseVideoAutomation:
                 submission_watch_token=watch_token,
                 submission_started_epoch_ms=submission_started_epoch_ms,
             )
+
+        images: list[Any] = []
+        videos: list[Any] = []
         try:
             self._click_generate_once(driver, primary)
             submitted_at = _utc_now()
@@ -565,20 +632,46 @@ class MuseVideoAutomation:
                     submission_message_index=anchor.dom_index,
                 )
             primary.log(
-                f"Đã gửi lúc {submitted_at}; đang chờ đủ {len(jobs)} video của đúng tin nhắn render xong."
+                f"Đã gửi lúc {submitted_at}; đang chờ đủ {len(jobs)} {action_name} của đúng tin nhắn hoàn tất."
             )
-            videos = self._wait_for_distinct_videos(
-                driver,
-                expected=len(jobs),
-                baseline=set(baseline_videos),
-                anchor=anchor,
-                context=primary,
-                baseline_sessions=set(baseline_session_fingerprints),
-            )
-            for context in contexts:
-                context.transition(MuseVideoJobState.GENERATING, progress=78)
+            if is_image_mode:
+                images = self._wait_for_distinct_images(
+                    driver,
+                    expected=len(jobs),
+                    baseline=set(baseline_images),
+                    anchor=anchor,
+                    context=primary,
+                    baseline_sessions=set(baseline_session_fingerprints),
+                )
+                for context in contexts:
+                    context.transition(MuseVideoJobState.GENERATING, progress=78)
+            else:
+                videos = self._wait_for_distinct_videos(
+                    driver,
+                    expected=len(jobs),
+                    baseline=set(baseline_videos),
+                    anchor=anchor,
+                    context=primary,
+                    baseline_sessions=set(baseline_session_fingerprints),
+                )
+                for context in contexts:
+                    context.transition(MuseVideoJobState.GENERATING, progress=78)
         finally:
-            self._stop_video_watch(driver, watch_token)
+            if is_image_mode:
+                self._stop_image_watch(driver, watch_token)
+            else:
+                self._stop_video_watch(driver, watch_token)
+
+        if is_image_mode:
+            if not images:
+                primary.log("Chưa thấy ảnh trực tiếp trong chat; đang chuyển sang kiểm tra khôi phục ảnh...")
+                return self.recover_image_batch(driver, jobs, contexts)
+            primary.log("Ảnh đã xuất hiện dưới đúng prompt; đang tải trực tiếp toàn bộ ảnh...")
+            direct_results = self._download_chat_images(driver, jobs, contexts, images)
+            if all(not isinstance(result, BaseException) for result in direct_results.values()):
+                primary.log("Đã tải đủ toàn bộ ảnh thành công!")
+                return direct_results
+            return self.recover_image_batch(driver, jobs, contexts)
 
         if not videos:
             primary.log(
@@ -634,6 +727,242 @@ class MuseVideoAutomation:
                 raise
             except BaseException as exc:
                 results[job.job_id] = exc
+        return results
+
+    def _download_chat_images(
+        self,
+        driver: Any,
+        jobs: list[MuseVideoJob],
+        contexts: list[MuseVideoRunContext],
+        images: list[Any],
+    ) -> dict[str, Path | BaseException]:
+        """Download only images found below the exact user message created by Send."""
+        results: dict[str, Path | BaseException] = {}
+        for index, (job, context, image) in enumerate(zip(jobs, contexts, images), start=1):
+            fingerprint = self._image_fingerprint(image)
+            context.log(f"Đang tải ảnh {index}/{len(jobs)} nằm dưới đúng prompt vừa gửi…")
+            context.transition(
+                MuseVideoJobState.DOWNLOADING,
+                progress=80 + round(index / len(jobs) * 15),
+                result_fingerprint=fingerprint,
+                download_attempts=job.download_attempts + 1,
+            )
+            try:
+                results[job.job_id] = self._download_image(
+                    driver,
+                    image,
+                    Path(job.output_path),
+                    context,
+                )
+            except (
+                MuseVideoStopped,
+                MuseVideoLoginRequired,
+                MuseVideoQuotaExhausted,
+                MuseVideoDriverError,
+            ):
+                raise
+            except BaseException as exc:
+                results[job.job_id] = exc
+        return results
+
+    def _download_image(
+        self,
+        driver: Any,
+        image: Any,
+        target: Path,
+        context: MuseVideoRunContext,
+    ) -> Path:
+        if target.is_file() and _valid_image(target):
+            return target
+        context.download_dir.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        # 1. Direct canvas/base64 extraction (fastest & reliable)
+        try:
+            b64_data = driver.execute_script(
+                "/* VISUAL_LOOP_EXTRACT_IMAGE_DATA */"
+                "const img=arguments[0];"
+                "if(!img)return null;"
+                "try{"
+                "  const canvas=document.createElement('canvas');"
+                "  canvas.width=img.naturalWidth||img.width||512;"
+                "  canvas.height=img.naturalHeight||img.height||512;"
+                "  const ctx=canvas.getContext('2d');"
+                "  ctx.drawImage(img,0,0);"
+                "  return canvas.toDataURL('image/png');"
+                "}catch(e){return null;}"
+            , image)
+            if b64_data and isinstance(b64_data, str) and "," in b64_data:
+                import base64
+                _header, encoded = b64_data.split(",", 1)
+                data = base64.b64decode(encoded)
+                if len(data) > 256:
+                    target.write_bytes(data)
+                    if _valid_image(target):
+                        return target
+                    target.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        # 2. Browser download anchor or card button
+        before = {
+            (item.resolve(), item.stat().st_mtime_ns)
+            for item in context.download_dir.iterdir()
+            if item.is_file()
+        }
+        clicked = False
+        try:
+            clicked = bool(
+                driver.execute_script(
+                    "/* VISUAL_LOOP_CLICK_IMAGE_DOWNLOAD */"
+                    "const img=arguments[0];"
+                    "if(!img)return false;"
+                    "const src=String(img.currentSrc||img.src||'').trim();"
+                    "if(src&&/^(blob:|https?:|data:)/i.test(src)){"
+                    "  const a=document.createElement('a');"
+                    "  a.href=src;"
+                    "  a.download='muse-image.png';"
+                    "  a.style.display='none';"
+                    "  document.body.appendChild(a);"
+                    "  a.click();"
+                    "  a.remove();"
+                    "  return true;"
+                    "}"
+                    "const card=img.closest('[data-testid*=\"card\" i],div.relative,div');"
+                    "if(card){"
+                    "  const btn=card.querySelector('button[aria-label*=\"download\" i],button[title*=\"download\" i],[data-testid*=\"download\" i]');"
+                    "  if(btn){btn.click();return true;}"
+                    "}"
+                    "return false;"
+                , image)
+            )
+        except Exception:
+            clicked = False
+
+        if not clicked:
+            raise MuseVideoDownloadError("Không thể tải ảnh: không trích xuất được URL ảnh từ giao diện Muse.")
+
+        previous: tuple[Path, int] | None = None
+        stable = 0
+
+        def completed_download():
+            nonlocal previous, stable
+            self._check(driver, context)
+            partials = [
+                item for item in context.download_dir.iterdir()
+                if item.is_file() and item.name.casefold().endswith((".crdownload", ".tmp", ".part"))
+                and (item.resolve(), item.stat().st_mtime_ns) not in before
+            ]
+            candidates = []
+            for item in context.download_dir.iterdir():
+                if not item.is_file() or item.suffix.casefold() not in SUPPORTED_IMAGE_SUFFIXES:
+                    continue
+                marker = (item.resolve(), item.stat().st_mtime_ns)
+                if marker not in before and item.stat().st_size > 0:
+                    candidates.append(item)
+            if not candidates or partials:
+                return False
+            newest = max(candidates, key=lambda item: item.stat().st_mtime_ns)
+            current = (newest, newest.stat().st_size)
+            stable = stable + 1 if current == previous else 0
+            previous = current
+            return newest if stable >= 2 else False
+
+        downloaded = Path(
+            self._wait(
+                driver,
+                completed_download,
+                self.download_timeout,
+                context,
+                "Ảnh Muse đã hoàn tất nhưng download chưa xong.",
+            )
+        )
+        if not _valid_image(downloaded):
+            raise MuseVideoDownloadError("File tải từ Muse không phải ảnh hợp lệ hoặc rỗng.")
+        if target.exists():
+            if _valid_image(target):
+                downloaded.unlink(missing_ok=True)
+                return target
+            raise MuseVideoDownloadError("File output đích đã tồn tại nhưng không hợp lệ; tool không ghi đè.")
+        shutil.move(str(downloaded), str(target))
+        if not _valid_image(target):
+            raise MuseVideoDownloadError("File output ảnh không hợp lệ sau khi di chuyển.")
+        return target
+
+    def recover_image_batch(
+        self,
+        driver: Any,
+        jobs: list[MuseVideoJob],
+        contexts: list[MuseVideoRunContext],
+        *,
+        claimed_fingerprints: set[str] | None = None,
+        claimed_sessions: set[str] | None = None,
+    ) -> dict[str, Path | BaseException]:
+        """Recover a submitted image group without sending the prompt again."""
+        if not jobs or len(jobs) != len(contexts):
+            raise MuseVideoDownloadError("Nhóm khôi phục ảnh Muse không hợp lệ.")
+        primary = contexts[0]
+        self._check(driver, primary)
+        expected = max(job.submission_size for job in jobs)
+        primary.log(f"Khôi phục lượt ảnh đã gửi gồm {expected} ảnh; không bấm Send lần hai.")
+        results: dict[str, Path | BaseException] = {}
+        pending: list[tuple[MuseVideoJob, MuseVideoRunContext]] = []
+        for job, context in zip(jobs, contexts):
+            target = Path(job.output_path)
+            if target.is_file() and _valid_image(target):
+                results[job.job_id] = target
+            else:
+                pending.append((job, context))
+        if not pending:
+            return results
+
+        claimed_fps = set(claimed_fingerprints or set())
+        images = []
+        try:
+            images = self._wait_for_distinct_images(
+                driver,
+                expected=expected,
+                baseline=set(jobs[0].baseline_images),
+                anchor=self._anchor_from_job(jobs[0]),
+                context=primary,
+                claimed_fingerprints=claimed_fps,
+            )
+        except Exception:
+            images = []
+        if isinstance(images, list) and images:
+            if len(jobs) == 1 and len(images) > 1:
+                target_idx = min(max(0, jobs[0].submission_index), len(images) - 1)
+                img_by_job_id = {jobs[0].job_id: images[target_idx]}
+            else:
+                img_by_job_id = {
+                    job.job_id: img for job, img in zip(jobs, images)
+                }
+            direct_pairs = [
+                (job, context, img_by_job_id[job.job_id])
+                for job, context in pending
+                if job.job_id in img_by_job_id
+            ]
+            if direct_pairs:
+                direct_results = self._download_chat_images(
+                    driver,
+                    [job for job, _context, _img in direct_pairs],
+                    [context for _job, context, _img in direct_pairs],
+                    [img for _job, _context, img in direct_pairs],
+                )
+                results.update(direct_results)
+                pending = [
+                    (job, context)
+                    for job, context in pending
+                    if not (Path(job.output_path).is_file() and _valid_image(Path(job.output_path)))
+                ]
+                if not pending:
+                    primary.log("Đã tải đủ ảnh trực tiếp từ đoạn chat.")
+                    return results
+
+        for job, context in pending:
+            results[job.job_id] = MuseVideoDownloadError(
+                "Không khôi phục được ảnh Muse; ảnh chưa hoàn tất hoặc giao diện đã thay đổi."
+            )
         return results
 
     def _summary_lock_for(self, driver: Any) -> threading.Lock:
@@ -925,9 +1254,12 @@ class MuseVideoAutomation:
 
     def _wait_and_download(self, driver: Any, job: MuseVideoJob, context: MuseVideoRunContext) -> Path:
         target = Path(job.output_path)
-        if target.is_file() and _valid_mp4(target):
+        if target.is_file() and _valid_artifact(target, job.settings.task_mode):
             return target
-        result = self.recover_batch(driver, [job], [context])[job.job_id]
+        if job.settings.task_mode == "image":
+            result = self.recover_image_batch(driver, [job], [context])[job.job_id]
+        else:
+            result = self.recover_batch(driver, [job], [context])[job.job_id]
         if isinstance(result, BaseException):
             raise result
         return result
@@ -1951,6 +2283,100 @@ class MuseVideoAutomation:
         except Exception:
             pass
 
+    def _images(self, driver: Any) -> list[Any]:
+        return [item for item in self._elements(driver, self.selectors.image_results) if _visible(item)]
+
+    def _image_fingerprints(self, driver: Any) -> set[str]:
+        return {self._image_fingerprint(item) for item in self._all_images(driver)}
+
+    def _all_images(self, driver: Any) -> list[Any]:
+        return self._elements(driver, self.selectors.image_results)
+
+    @staticmethod
+    def _image_fingerprint(element: Any) -> str:
+        raw = "|".join(
+            (
+                str(getattr(element, "id", "") or ""),
+                _attr(element, "src"),
+                _attr(element, "currentSrc"),
+                _attr(element, "alt"),
+            )
+        )
+        return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+    @staticmethod
+    def _install_image_watch(driver: Any, token: str) -> int:
+        """Start a page-local clocked watch for new images immediately before Send is clicked."""
+        try:
+            value = driver.execute_script(
+                "/* VISUAL_LOOP_INSTALL_IMAGE_WATCH */"
+                "const token=arguments[0];"
+                "window.__visualLoopImageWatches=window.__visualLoopImageWatches||{};"
+                "const previous=window.__visualLoopImageWatches[token];"
+                "if(previous){try{previous.observer.disconnect();}catch(e){}"
+                "try{document.removeEventListener('load',previous.onMedia,true);}catch(e){}}"
+                "const source=img=>String(img.currentSrc||img.src||'');"
+                "const baseline=new Set(document.querySelectorAll('img'));"
+                "const baselineSources=new Map([...baseline].map(img=>[img,source(img)]));"
+                "const touched=new Map(),startedAt=Date.now();"
+                "const mark=node=>{if(!node||node.nodeType!==1)return;"
+                "const img=String(node.tagName||'').toLowerCase()==='img'?node:null;"
+                "if(img)touched.set(img,Date.now());"
+                "if(node.querySelectorAll)for(const item of node.querySelectorAll('img'))touched.set(item,Date.now());};"
+                "const observer=new MutationObserver(records=>{for(const record of records){"
+                "mark(record.target);for(const node of record.addedNodes||[])mark(node);}});"
+                "observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['src']});"
+                "const onMedia=event=>mark(event.target);document.addEventListener('load',onMedia,true);"
+                "window.__visualLoopImageWatches[token]={startedAt,baseline,baselineSources,touched,observer,onMedia,source};"
+                "return startedAt;",
+                token,
+            )
+            return max(0, int(value or 0))
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _stop_image_watch(driver: Any, token: str) -> None:
+        if not token:
+            return
+        try:
+            driver.execute_script(
+                "/* VISUAL_LOOP_STOP_IMAGE_WATCH */"
+                "const root=window.__visualLoopImageWatches||{},state=root[arguments[0]];"
+                "if(!state)return;try{state.observer.disconnect();}catch(e){}"
+                "try{document.removeEventListener('load',state.onMedia,true);}catch(e){}"
+                "delete root[arguments[0]];",
+                token,
+            )
+        except Exception:
+            pass
+
+    def _switch_mode_if_needed(self, driver: Any, target_mode: str) -> None:
+        """Switch between Video and Image tabs/modes on Muse web interface if supported."""
+        try:
+            driver.execute_script(
+                "/* VISUAL_LOOP_SWITCH_MODE */"
+                "const targetMode=String(arguments[0]||'video').toLowerCase();"
+                "const visible=e=>{if(!e)return false;const r=e.getBoundingClientRect();return r.width>0&&r.height>0;};"
+                "const norm=s=>(s||'').replace(/\\s+/g,' ').trim().toLowerCase();"
+                "const tabs=[...document.querySelectorAll('[role=\"tab\"],button,[data-testid*=\"mode\" i],[data-testid*=\"tab\" i]')].filter(visible);"
+                "for(const tab of tabs){"
+                "  const t=norm(tab.innerText||tab.textContent);"
+                "  const aria=norm(tab.getAttribute('aria-label')||'');"
+                "  const val=norm(tab.getAttribute('data-value')||'');"
+                "  const isMatch=(targetMode==='image'&&(/\\bimage\\b|\\bảnh\\b/i.test(t)||/image/i.test(aria)||val==='image'))||"
+                "                (targetMode==='video'&&(/\\bvideo\\b/i.test(t)||/video/i.test(aria)||val==='video'));"
+                "  if(isMatch){"
+                "    const isSelected=tab.getAttribute('aria-selected')==='true'||tab.getAttribute('data-state')==='active'||tab.classList.contains('active');"
+                "    if(!isSelected){try{tab.click();}catch(e){}}"
+                "    break;"
+                "  }"
+                "}",
+                target_mode,
+            )
+        except Exception:
+            pass
+
     def _submission_messages(self, driver: Any) -> list[dict[str, Any]]:
         """Read stable identities for user messages currently present in the chat DOM."""
         try:
@@ -2188,6 +2614,146 @@ class MuseVideoAutomation:
         except Exception:
             return False
 
+    def _images_after_submission(self, driver: Any, anchor: MuseSubmissionAnchor) -> list[Any]:
+        """Return images observed after Send, prioritising the exact message/group."""
+        try:
+            values = driver.execute_script(
+                "/* VISUAL_LOOP_IMAGES_AFTER_MESSAGE */"
+                "const live=arguments[0],wantedId=arguments[1],wantedGroup=arguments[2],"
+                "wantedIndex=arguments[3],wantedText=(arguments[4]||'').replace(/\\s+/g,' ').trim(),"
+                "baselineIds=new Set(arguments[5]||[]),floor=arguments[6]||0,"
+                "watchToken=arguments[7]||'',sentAt=Number(arguments[8]||0);"
+                "const mediaSrc=img=>String(img.currentSrc||img.src||'').trim();"
+                "const isBotOrAvatar=img=>{"
+                "if(!img)return true;"
+                "const s=mediaSrc(img).toLowerCase();"
+                "if(/(avatar|mascot|muse[-_]?bot|icon|reaction|subagent|status[-_]?anim|thinking|loading[-_]anim|placeholders?|animations?|logo|favicon)/i.test(s))return true;"
+                "const bad='header,nav,aside,[data-testid*=\"avatar\" i],[class*=\"avatar\" i],[data-testid*=\"mascot\" i],[class*=\"mascot\" i],[data-testid*=\"loading\" i],[class*=\"loading\" i],[class*=\"thinking\" i],[class*=\"reaction\" i],[class*=\"badge\" i],[class*=\"status\" i],[class*=\"indicator\" i],[data-testid*=\"subagent\" i],[class*=\"subagent\" i],[data-testid*=\"placeholder\" i],[class*=\"placeholder\" i]';"
+                "if(img.matches&&img.matches(bad))return true;"
+                "if(img.closest&&img.closest(bad))return true;"
+                "const r=img.getBoundingClientRect?img.getBoundingClientRect():null;"
+                "if(r&&r.width>0&&r.height>0&&(r.width<80||r.height<80))return true;"
+                "if(img.naturalWidth>0&&img.naturalHeight>0&&(img.naturalWidth<80||img.naturalHeight<80))return true;"
+                "return false;};"
+                "const isMediaImage=img=>{"
+                "const s=mediaSrc(img);return Boolean(s&&/^(blob:|https?:|data:image)/i.test(s)&&!isBotOrAvatar(img));};"
+                "const users=[...document.querySelectorAll("
+                "'[data-message-role=\\\"user\\\"],[data-role=\\\"user\\\"],"
+                "[data-author=\\\"user\\\"],[data-message-author=\\\"user\\\"],[data-testid*=\\\"user-message\\\" i]')];"
+                "const norm=e=>(e&&(e.innerText||e.textContent)||'').replace(/\\s+/g,' ').trim();"
+                "const all=[...document.querySelectorAll('img')].filter(isMediaImage);"
+                "const root=window.__visualLoopImageWatches||{},watch=watchToken?root[watchToken]:null;"
+                "const appearedAt=img=>{"
+                "if(!watch)return 0;const touched=Number(watch.touched.get(img)||0);if(touched)return touched;"
+                "if(!watch.baseline.has(img))return Date.now();"
+                "const currentSrc=watch.source(img);const oldSrc=watch.baselineSources.get(img);"
+                "return (currentSrc&&currentSrc!==oldSrc)?Date.now():0;};"
+                "const images=watch?all.filter(img=>appearedAt(img)>=Math.max(0,sentAt-1000)):all;"
+                "let message=(live&&live.isConnected)?live:null;"
+                "if(!message&&wantedId)message=users.find(e=>e.getAttribute('data-message-id')===wantedId)||"
+                "document.querySelector(`[data-message-id=\"${wantedId}\"]`)||null;"
+                "if(!message&&wantedGroup)message=users.find(e=>e.getAttribute('data-message-group-id')===wantedGroup&&(!wantedText||norm(e).includes(wantedText)))||null;"
+                "if(!message&&wantedIndex>=0&&users[wantedIndex]&&(!wantedText||norm(users[wantedIndex]).includes(wantedText)))message=users[wantedIndex];"
+                "if(!message)message=users.find((e,index)=>index>=floor&&!baselineIds.has(e.getAttribute('data-message-id')||'')&&(!wantedText||norm(e).includes(wantedText)))||null;"
+                "if(!message)return watch?images:[];"
+                "const following=(a,b)=>!!(a.compareDocumentPosition(b)&Node.DOCUMENT_POSITION_FOLLOWING);"
+                "const nextUser=users.find(e=>e!==message&&following(message,e))||null;"
+                "const candidates=images.filter(img=>following(message,img)&&(!nextUser||following(img,nextUser)));"
+                "const group=message.getAttribute('data-message-group-id')||wantedGroup;"
+                "const grouped=group?candidates.filter(img=>{"
+                "const item=img.closest('[data-message-group-id]');return item&&item.getAttribute('data-message-group-id')===group;}):[];"
+                "const result=[],seen=new Set();"
+                "for(const img of [...grouped,...candidates]){"
+                "if(!seen.has(img)){seen.add(img);result.push(img);}}return result;",
+                anchor.element,
+                anchor.message_id,
+                anchor.message_group_id,
+                anchor.dom_index,
+                anchor.prompt,
+                list(anchor.baseline_message_ids),
+                anchor.message_floor,
+                anchor.watch_token,
+                anchor.started_epoch_ms,
+            )
+        except Exception:
+            return []
+        if not isinstance(values, (list, tuple)):
+            return []
+        return [item for item in values if item is not None]
+
+    @staticmethod
+    def _image_ready(driver: Any, image: Any) -> bool:
+        try:
+            return bool(
+                driver.execute_script(
+                    "const img=arguments[0];if(!img)return false;"
+                    "const s=String(img.currentSrc||img.src||'').trim();"
+                    "if(!s||!/^(blob:|https?:|data:image)/i.test(s))return false;"
+                    "if(img.complete&&img.naturalWidth>60&&img.naturalHeight>60)return true;"
+                    "const r=img.getBoundingClientRect?img.getBoundingClientRect():null;"
+                    "return (r&&r.width>60&&r.height>60);",
+                    image,
+                )
+            )
+        except Exception:
+            return False
+
+    def _wait_for_distinct_images(
+        self,
+        driver: Any,
+        *,
+        expected: int,
+        baseline: set[str],
+        anchor: MuseSubmissionAnchor,
+        context: MuseVideoRunContext,
+        baseline_sessions: set[str] | None = None,
+        claimed_fingerprints: set[str] | None = None,
+    ) -> list[Any]:
+        transient_retries = 0
+        claimed = set(claimed_fingerprints or set())
+
+        def find_results():
+            nonlocal transient_retries
+            self._check(driver, context)
+            body = " ".join(_text(item) for item in _find(driver, "tag name", "body")).casefold()
+            if any(marker in body for marker in QUOTA_MARKERS):
+                raise MuseVideoQuotaExhausted(
+                    "Tài khoản Muse đã chạm quota/rate limit; tác vụ chưa gửi được giữ nguyên."
+                )
+            if any(marker in body for marker in TRANSIENT_NETWORK_MARKERS):
+                if transient_retries >= context.retry_limit:
+                    raise MuseVideoBatchError("Muse liên tục báo lỗi mạng sau số lần retry giới hạn.")
+                delay = context.backoff_base * (2 ** transient_retries)
+                transient_retries += 1
+                if self._wait_stop(context, delay):
+                    raise MuseVideoStopped("Đã dừng worker Muse.")
+                return False
+            values: list[Any] = []
+            seen: set[str] = set()
+            for image in self._images_after_submission(driver, anchor):
+                fingerprint = self._image_fingerprint(image)
+                if (
+                    fingerprint in baseline
+                    or fingerprint in seen
+                    or fingerprint in claimed
+                    or not self._image_ready(driver, image)
+                ):
+                    continue
+                seen.add(fingerprint)
+                values.append(image)
+            if len(values) >= expected:
+                return values
+            return False
+
+        result = self._wait(
+            driver,
+            find_results,
+            self.timeout,
+            context,
+            f"Muse chưa trả về đủ {expected} ảnh mới; lượt đã gửi sẽ không tự gửi lại.",
+        )
+        return list(result) if result else []
+
     def _new_visible_element(self, driver: Any, selectors: tuple[str, ...], baseline: set[str]):
         return next(
             (
@@ -2345,6 +2911,33 @@ class MuseVideoBatchManager:
             self._persist_locked()
             return tuple(tuple(worker.assigned_sources) for worker in self.workers.values())
 
+    def allocate_text_jobs(
+        self,
+        quantity: int = 1,
+        worker_ids: Iterable[int] | None = None,
+    ) -> tuple[tuple[str, ...], ...]:
+        """Allocate text-only jobs (no input images) across workers for Text-to-Image generation."""
+        quantity = max(1, int(quantity or 1))
+        with self._state_lock:
+            if self.busy:
+                raise MuseVideoBatchError("Không thể phân bổ khi batch Muse đang chạy.")
+            selected_ids = self._normalize_worker_ids(worker_ids)
+            self.enabled_worker_ids = list(selected_ids)
+            self.source_paths = []
+            self.current_job_ids = []
+            for worker in self.workers.values():
+                worker.assigned_sources = []
+                worker.queue = []
+                worker.current_job_id = ""
+                worker.progress = 0
+                worker.error = ""
+                worker.state = MuseVideoWorkerState.IDLE
+            for index in range(quantity):
+                worker_id = selected_ids[index % len(selected_ids)]
+                self.workers[worker_id].assigned_sources.append(f"Prompt #{index + 1}")
+            self._persist_locked()
+            return tuple(tuple(worker.assigned_sources) for worker in self.workers.values())
+
     def start_all(
         self,
         prompt: str,
@@ -2369,15 +2962,16 @@ class MuseVideoBatchManager:
     ) -> None:
         """Checkpoint the user's batch inputs before interactive login begins."""
         text = str(prompt or "").strip()
-        if not text:
-            raise ValueError("Prompt tạo video chung không được để trống.")
         normalized_settings = settings.normalized()
+        action_name = "ảnh" if normalized_settings.task_mode == "image" else "video"
+        if not text:
+            raise ValueError(f"Prompt tạo {action_name} chung không được để trống.")
         if not str(output_dir or "").strip():
-            raise ValueError("Hãy chọn thư mục lưu video đầu ra.")
+            raise ValueError(f"Hãy chọn thư mục lưu {action_name} đầu ra.")
         output = Path(output_dir).expanduser().resolve()
         output.mkdir(parents=True, exist_ok=True)
         with self._state_lock:
-            if not self.source_paths:
+            if not self.source_paths and normalized_settings.task_mode != "image":
                 raise ValueError("Hãy chọn và phân bổ ảnh trước khi bắt đầu.")
             if self.busy:
                 raise MuseVideoBatchError("Batch Muse đang chạy.")
@@ -2385,9 +2979,15 @@ class MuseVideoBatchManager:
             self.enabled_worker_ids = list(selected_ids)
             for worker in self.workers.values():
                 worker.assigned_sources = []
-            for index, source in enumerate(self.source_paths):
-                worker_id = selected_ids[index % len(selected_ids)]
-                self.workers[worker_id].assigned_sources.append(source)
+            if self.source_paths:
+                for index, source in enumerate(self.source_paths):
+                    worker_id = selected_ids[index % len(selected_ids)]
+                    self.workers[worker_id].assigned_sources.append(source)
+            else:
+                qty = max(1, int(normalized_settings.quantity or 1))
+                for index in range(qty):
+                    worker_id = selected_ids[index % len(selected_ids)]
+                    self.workers[worker_id].assigned_sources.append(f"Prompt #{index + 1}")
             self.prompt = text
             self.settings = normalized_settings
             self.output_dir = str(output)
@@ -2667,8 +3267,9 @@ class MuseVideoBatchManager:
                         job.attempts += 1
                         if not job.started_at:
                             job.started_at = _utc_now()
-                    names = ", ".join(Path(job.source_path).name for job in jobs)
-                    self._log_locked(worker, f"Đang xử lý lượt {len(jobs)} ảnh: {names}")
+                    names = ", ".join(Path(job.source_path).name if job.source_path else f"Prompt #{job.job_id[:6]}" for job in jobs)
+                    action_noun = "ảnh" if jobs[0].settings.task_mode == "image" else "video"
+                    self._log_locked(worker, f"Đang xử lý lượt {len(jobs)} tác vụ {action_noun}: {names}")
                     self._persist_locked()
                 contexts = [
                     MuseVideoRunContext(
@@ -2687,24 +3288,44 @@ class MuseVideoBatchManager:
 
                 def run_group() -> dict[str, Path | BaseException]:
                     self.session_manager.activate_selected_muse_tab(session.session_id)
+                    is_image_mode = (jobs[0].settings.task_mode == "image")
                     if jobs[0].submitted or jobs[0].submission_attempted:
-                        recover_batch = getattr(self.automation, "recover_batch", None)
-                        if callable(recover_batch):
-                            current_ids = {j.job_id for j in jobs}
-                            other_fps = {
-                                j.result_fingerprint for j in self.jobs.values()
-                                if j.result_fingerprint and j.job_id not in current_ids
-                                and (j.state == MuseVideoJobState.COMPLETED or (Path(j.output_path).is_file() and _valid_mp4(Path(j.output_path))))
-                            }
-                            try:
-                                return recover_batch(
-                                    session.driver,
-                                    jobs,
-                                    contexts,
-                                    claimed_fingerprints=other_fps,
-                                )
-                            except TypeError:
-                                return recover_batch(session.driver, jobs, contexts)
+                        if is_image_mode:
+                            recover_image_batch = getattr(self.automation, "recover_image_batch", None)
+                            if callable(recover_image_batch):
+                                current_ids = {j.job_id for j in jobs}
+                                other_fps = {
+                                    j.result_fingerprint for j in self.jobs.values()
+                                    if j.result_fingerprint and j.job_id not in current_ids
+                                    and (j.state == MuseVideoJobState.COMPLETED or (Path(j.output_path).is_file() and _valid_image(Path(j.output_path))))
+                                }
+                                try:
+                                    return recover_image_batch(
+                                        session.driver,
+                                        jobs,
+                                        contexts,
+                                        claimed_fingerprints=other_fps,
+                                    )
+                                except TypeError:
+                                    return recover_image_batch(session.driver, jobs, contexts)
+                        else:
+                            recover_batch = getattr(self.automation, "recover_batch", None)
+                            if callable(recover_batch):
+                                current_ids = {j.job_id for j in jobs}
+                                other_fps = {
+                                    j.result_fingerprint for j in self.jobs.values()
+                                    if j.result_fingerprint and j.job_id not in current_ids
+                                    and (j.state == MuseVideoJobState.COMPLETED or (Path(j.output_path).is_file() and _valid_mp4(Path(j.output_path))))
+                                }
+                                try:
+                                    return recover_batch(
+                                        session.driver,
+                                        jobs,
+                                        contexts,
+                                        claimed_fingerprints=other_fps,
+                                    )
+                                except TypeError:
+                                    return recover_batch(session.driver, jobs, contexts)
                         values: dict[str, Path | BaseException] = {}
                         for job, context in zip(jobs, contexts):
                             values[job.job_id] = self.automation.process(session.driver, job, context)
@@ -2817,33 +3438,38 @@ class MuseVideoBatchManager:
                         for job in jobs:
                             result = results.get(job.job_id)
                             if isinstance(result, BaseException) or result is None:
+                                name_label = Path(job.source_path).name if job.source_path else f"Prompt #{job.job_id[:6]}"
+                                kind = "ảnh" if job.settings.task_mode == "image" else "video"
                                 message = str(result) if isinstance(result, MuseVideoBatchError) else (
-                                    "Muse/Chrome không phản hồi khi tải video; có thể chạy lại bước download."
+                                    f"Muse/Chrome không phản hồi khi tải {kind}; có thể chạy lại bước download."
                                 )
                                 job.state = MuseVideoJobState.FAILED
                                 job.error = message
                                 worker.error = message
-                                self._log_locked(worker, f"Lỗi {Path(job.source_path).name}: {message}")
+                                self._log_locked(worker, f"Lỗi {name_label}: {message}")
                                 continue
                             try:
                                 result_path = Path(result)
                             except (TypeError, ValueError):
                                 result_path = Path()
-                            if not _valid_mp4(result_path):
+                            if not _valid_artifact(result_path, job.settings.task_mode):
+                                item_type = "ảnh" if job.settings.task_mode == "image" else "file MP4"
                                 message = (
-                                    "Muse đã trả kết quả nhưng chưa có file MP4 hợp lệ; "
+                                    f"Muse đã trả kết quả nhưng chưa có {item_type} hợp lệ; "
                                     "job chỉ được phép chạy lại bước download."
                                 )
                                 job.state = MuseVideoJobState.FAILED
                                 job.error = message
                                 worker.error = message
-                                self._log_locked(worker, f"Chưa tải xong {Path(job.source_path).name}: {message}")
+                                name_label = Path(job.source_path).name if job.source_path else f"Prompt #{job.job_id[:6]}"
+                                self._log_locked(worker, f"Chưa tải xong {name_label}: {message}")
                                 continue
                             job.output_path = str(result_path)
                             job.state = MuseVideoJobState.COMPLETED
                             job.completed_at = _utc_now()
                             job.error = ""
-                            self._log_locked(worker, f"Hoàn tất {Path(job.source_path).name}")
+                            name_label = Path(job.source_path).name if job.source_path else f"Prompt #{job.job_id[:6]}"
+                            self._log_locked(worker, f"Hoàn tất {name_label}")
                         worker.progress = 100
                         self._persist_locked()
             with self._state_lock:
@@ -2894,19 +3520,29 @@ class MuseVideoBatchManager:
             worker.error = ""
             worker.account_id = session.account_id
             worker.email = session.email
-        for index, source_value in enumerate(self.source_paths):
-            worker_id = selected_ids[index % len(selected_ids)]
-            source = Path(source_value)
+        is_image_mode = (self.settings.task_mode == "image")
+        items_to_generate: list[tuple[int, Path | None, int]] = []
+        if self.source_paths:
+            for index, source_value in enumerate(self.source_paths):
+                worker_id = selected_ids[index % len(selected_ids)]
+                items_to_generate.append((worker_id, Path(source_value), index))
+        elif is_image_mode:
+            qty = max(1, int(self.settings.quantity or 1))
+            for index in range(qty):
+                worker_id = selected_ids[index % len(selected_ids)]
+                items_to_generate.append((worker_id, None, index))
+
+        for worker_id, source, index in items_to_generate:
             session = self.session_manager.sessions[worker_id]
-            job_id = create_muse_video_job_id(source, self.prompt, self.settings)
-            output = Path(self.output_dir) / _output_filename(source, session.account_id, job_id)
-            if output.exists() and not _valid_mp4(output):
+            job_id = create_muse_video_job_id(source, self.prompt, self.settings, index=index)
+            output = Path(self.output_dir) / _output_filename(source, session.account_id, job_id, task_mode=self.settings.task_mode)
+            if output.exists() and not _valid_artifact(output, self.settings.task_mode):
                 output = _available_output_path(output)
             job = self.jobs.get(job_id)
             if job is None:
                 job = MuseVideoJob(
                     job_id=job_id,
-                    source_path=str(source),
+                    source_path=str(source) if source else "",
                     worker_id=worker_id,
                     account_id=session.account_id,
                     email=session.email,
@@ -2918,14 +3554,9 @@ class MuseVideoBatchManager:
             else:
                 current_output = Path(job.output_path)
                 if job.state == MuseVideoJobState.COMPLETED:
-                    if _valid_mp4(output):
-                        # The requested output folder already contains the
-                        # exact completed file, so keep the job terminal.
+                    if _valid_artifact(output, self.settings.task_mode):
                         job.output_path = str(output)
-                    elif _valid_mp4(current_output):
-                        # A checkpoint can point at an older output folder.
-                        # Copy the verified MP4 to the folder selected now;
-                        # never submit the image to Muse a second time.
+                    elif _valid_artifact(current_output, self.settings.task_mode):
                         if _path_key(current_output) != _path_key(output):
                             try:
                                 if output.exists():
@@ -2935,19 +3566,16 @@ class MuseVideoBatchManager:
                             except OSError:
                                 job.state = MuseVideoJobState.FAILED
                                 job.error = (
-                                    "Không thể chép MP4 đã hoàn tất sang thư mục output hiện tại; "
+                                    "Không thể chép file kết quả đã hoàn tất sang thư mục output hiện tại; "
                                     "tool không ghi đè file có sẵn."
                                 )
                             else:
-                                if _valid_mp4(output):
+                                if _valid_artifact(output, self.settings.task_mode):
                                     job.output_path = str(output)
                                 else:
                                     job.state = MuseVideoJobState.FAILED
-                                    job.error = "Bản sao MP4 trong thư mục output hiện tại không hợp lệ."
+                                    job.error = "Bản sao file trong thư mục output hiện tại không hợp lệ."
                     else:
-                        # Do not trust a terminal checkpoint when its artifact
-                        # has disappeared. A submitted job stays bound to its
-                        # original account and resumes download only.
                         job.output_path = str(output)
                         job.state = (
                             MuseVideoJobState.DOWNLOADING
@@ -2955,11 +3583,10 @@ class MuseVideoBatchManager:
                             else MuseVideoJobState.PENDING
                         )
                         job.completed_at = ""
-                        job.error = "File MP4 không còn tồn tại; đang khôi phục bước download."
+                        kind = "ảnh" if self.settings.task_mode == "image" else "MP4"
+                        job.error = f"File {kind} không còn tồn tại; đang khôi phục bước download."
                 elif job.submitted or job.submission_attempted:
-                    # A submitted result may safely be downloaded into a newly
-                    # selected folder, but it must never change account/worker.
-                    if not _valid_mp4(current_output):
+                    if not _valid_artifact(current_output, self.settings.task_mode):
                         job.output_path = str(output)
                     if job.state in {
                         MuseVideoJobState.FAILED,
@@ -2970,7 +3597,7 @@ class MuseVideoBatchManager:
                         job.state = MuseVideoJobState.DOWNLOADING
                         job.error = ""
                 else:
-                    if not _valid_mp4(current_output):
+                    if not _valid_artifact(current_output, self.settings.task_mode):
                         job.output_path = str(output)
                     if job.state in {
                         MuseVideoJobState.FAILED,
@@ -3096,7 +3723,7 @@ class MuseVideoBatchManager:
     def _sync_assigned_from_queues_locked(self) -> None:
         for worker in self.workers.values():
             worker.assigned_sources = [
-                self.jobs[job_id].source_path
+                self.jobs[job_id].source_path or f"Prompt #{self.jobs[job_id].job_id[:6]}"
                 for job_id in worker.queue
                 if job_id in self.jobs
             ]
@@ -3189,7 +3816,7 @@ class MuseVideoBatchManager:
         for job in list(self.jobs.values()):
             if not job.result_fingerprint:
                 continue
-            has_valid_output = Path(job.output_path).is_file() and _valid_mp4(Path(job.output_path))
+            has_valid_output = Path(job.output_path).is_file() and _valid_artifact(Path(job.output_path), job.settings.task_mode)
             if job.state != MuseVideoJobState.COMPLETED and not has_valid_output:
                 continue
             fp = job.result_fingerprint
@@ -3240,34 +3867,88 @@ class MuseVideoBatchManager:
         )
 
 
-def create_muse_video_job_id(source: str | Path, prompt: str, settings: MuseVideoSettings) -> str:
-    path = Path(source).expanduser().resolve()
-    stat = path.stat()
-    file_hash = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            file_hash.update(chunk)
+def create_muse_video_job_id(
+    source: str | Path,
+    prompt: str,
+    settings: MuseVideoSettings,
+    index: int = 0,
+) -> str:
+    path_str = str(source or "").strip()
+    norm_settings = settings.normalized()
+    if path_str:
+        path = Path(path_str).expanduser().resolve()
+        if path.is_file():
+            stat = path.stat()
+            file_hash = hashlib.sha256()
+            with path.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    file_hash.update(chunk)
+            payload = {
+                # This version deliberately invalidates checkpoints made by the old
+                # multi-image/card-download flow.  From this protocol onward, reruns
+                # with identical input reuse the verified MP4 and never submit again.
+                "protocol": MUSE_JOB_PROTOCOL,
+                "path": str(path).casefold(),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "image_sha256": file_hash.hexdigest(),
+                "prompt_sha256": hashlib.sha256(str(prompt).encode("utf-8")).hexdigest(),
+                "settings": asdict(norm_settings),
+                "task_mode": norm_settings.task_mode,
+            }
+            return hashlib.sha256(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+    # Prompt-only (Text-to-Image) job without reference image file
     payload = {
-        # This version deliberately invalidates checkpoints made by the old
-        # multi-image/card-download flow.  From this protocol onward, reruns
-        # with identical input reuse the verified MP4 and never submit again.
         "protocol": MUSE_JOB_PROTOCOL,
-        "path": str(path).casefold(),
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-        "image_sha256": file_hash.hexdigest(),
+        "path": "",
+        "index": index,
         "prompt_sha256": hashlib.sha256(str(prompt).encode("utf-8")).hexdigest(),
-        "settings": asdict(settings.normalized()),
+        "settings": asdict(norm_settings),
+        "task_mode": norm_settings.task_mode,
     }
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
 
 
-def _output_filename(source: Path, account_id: str, job_id: str) -> str:
-    stem = re.sub(r'[^A-Za-z0-9._-]+', "_", source.stem).strip("._") or "image"
+def _output_filename(source: Path | str, account_id: str, job_id: str, task_mode: str = "video") -> str:
+    path_obj = Path(source) if source else None
+    if path_obj and str(source).strip():
+        stem = re.sub(r'[^A-Za-z0-9._-]+', "_", path_obj.stem).strip("._") or "image"
+    else:
+        stem = f"image_{job_id[:8]}"
     safe_account = re.sub(r"[^A-Za-z0-9_-]+", "_", account_id).strip("_") or "account"
-    return f"{stem}__{safe_account}__{job_id[:16]}.mp4"
+    ext = "png" if task_mode == "image" else "mp4"
+    return f"{stem}__{safe_account}__{job_id[:16]}.{ext}"
+
+
+def _valid_image(path: Path) -> bool:
+    try:
+        if not path.is_file() or path.stat().st_size <= 0:
+            return False
+        with path.open("rb") as stream:
+            header = stream.read(32)
+        if header.startswith(b"\x89PNG\r\n\x1a\n"):
+            return True
+        if header.startswith(b"\xff\xd8\xff"):
+            return True
+        if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+            return True
+        if header.startswith(b"GIF87a") or header.startswith(b"GIF89a"):
+            return True
+        if path.suffix.casefold() in SUPPORTED_IMAGE_SUFFIXES and path.stat().st_size > 256:
+            return True
+        return False
+    except OSError:
+        return False
+
+
+def _valid_artifact(path: Path, task_mode: str = "video") -> bool:
+    if task_mode == "image":
+        return _valid_image(path)
+    return _valid_mp4(path)
 
 
 def _valid_mp4(path: Path) -> bool:
