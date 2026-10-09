@@ -58,8 +58,11 @@ from auth.muse_generation import (
     _body_text,
     _click_by_text,
     _clickable,
+    _dismiss_muse_popups,
+    _download_muse_video_file,
     _find,
     _hostname,
+    _query_muse_videos,
     _safe_url,
     _video_fingerprint,
     _visible,
@@ -457,6 +460,32 @@ class MuseCookieBatchRunnerThread(QThread):
                             current_acc.email = found_em
                             self.account_email_found_signal.emit(current_acc.account_id, found_em)
 
+                    _dismiss_muse_popups(driver)
+
+                    # Tập hợp các video URL đã thấy trên trang để tránh trùng lặp
+                    initial_vids = _query_muse_videos(driver)
+                    seen_video_srcs: set[str] = {v.get("src") for v in initial_vids if v.get("src")}
+
+                    # Recovery: Quét thu hoạch trước các video cũ đã có trên trang khớp mã Prompt mà chưa được lưu vào output_dir
+                    self.output_dir.mkdir(parents=True, exist_ok=True)
+                    recovered_count = 0
+                    for v in initial_vids:
+                        v_src = (v.get("src") or "").strip()
+                        if not v_src:
+                            continue
+                        v_name_lbl = (v.get("name") or "") + " " + (v.get("label") or "")
+                        m = re.search(r'(?<![a-z0-9])(?:v|prompt[-_]?)?0*(\d{1,6})(?!\d)', v_name_lbl, re.I)
+                        if m:
+                            p_id = int(m.group(1))
+                            already_saved = any(f.name.startswith(f"Prompt{p_id:04d}") for f in self.output_dir.iterdir() if f.is_file())
+                            if not already_saved:
+                                target_dest = self.output_dir / f"Prompt{p_id:04d}_recovered.mp4"
+                                if _download_muse_video_file(driver, v, target_dest, download_dir):
+                                    recovered_count += 1
+                                    self.log_signal.emit(f"📥 [Luồng {worker_id}] {acc_label}: Tự động cứu video cũ có sẵn trên trang: {target_dest.name}")
+                    if recovered_count > 0:
+                        self.log_signal.emit(f"🎉 [Luồng {worker_id}] {acc_label}: Đã tải về máy thành công {recovered_count} video có sẵn từ phiên trước!")
+
                     for chunk_idx, chunk in enumerate(assigned_chunks, 1):
                         if self._stopped:
                             break
@@ -468,6 +497,7 @@ class MuseCookieBatchRunnerThread(QThread):
                             try:
                                 driver.refresh()
                                 time.sleep(2.0)
+                                _dismiss_muse_popups(driver)
                             except Exception:
                                 pass
                             last_f5_time = time.monotonic()
@@ -480,7 +510,10 @@ class MuseCookieBatchRunnerThread(QThread):
                         self.log_signal.emit(f"🎬 [Luồng {worker_id}] {acc_label}: Bắt đầu gửi nhóm {n_prompts} prompt ({chunk_label})…")
 
                         try:
-                            # 1. Upload ảnh nếu có ảnh mẫu trong đợt này
+                            # 1. Đóng mọi dialog/overlay nếu có trước khi thao tác
+                            _dismiss_muse_popups(driver)
+
+                            # 2. Upload ảnh nếu có ảnh mẫu trong đợt này
                             if chunk.images:
                                 valid_imgs = [p for p in chunk.images if p and p.is_file()]
                                 if valid_imgs:
@@ -504,7 +537,7 @@ class MuseCookieBatchRunnerThread(QThread):
                                             break
                                     time.sleep(1.5)
 
-                            # 2. Xây dựng khung prompt chuẩn theo format yêu cầu
+                            # 3. Xây dựng khung prompt chuẩn theo format yêu cầu
                             chunk_prompt_text = build_muse_chunk_prompt(
                                 chunk.prompt_items,
                                 action_type=self.task_mode,
@@ -513,74 +546,140 @@ class MuseCookieBatchRunnerThread(QThread):
                                 style_suffix=self.style_suffix,
                             )
 
-                            # 3. Điền prompt gom vào ô chat Muse (1 lần duy nhất, nguyên khối)
+                            # 4. Điền prompt gom vào ô chat Muse (1 lần duy nhất, nguyên khối)
                             self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang điền prompt gom (1 lần duy nhất) vào Muse…")
                             filled = self._fill_chat_prompt(driver, chunk_prompt_text)
                             if not filled:
                                 self.log_signal.emit(f"⚠ [Luồng {worker_id}] Không thể điền prompt tự động vào selector chuẩn.")
                             time.sleep(0.8)
 
-                            # 4. Gửi yêu cầu Create (chỉ gửi 1 lần duy nhất sau khi đã điền đủ toàn bộ prompt gom)
+                            # 5. Gửi yêu cầu Create (chỉ gửi 1 lần duy nhất sau khi đã điền đủ toàn bộ prompt gom)
                             submitted = _click_by_text(driver, SUBMIT_TEXTS)
                             if not submitted:
                                 for btn in reversed(_find(driver, "css selector", "button[type='submit']")):
                                     if _clickable(btn):
-                                        btn.click()
-                                        submitted = True
-                                        break
+                                        try:
+                                            btn.click()
+                                            submitted = True
+                                            break
+                                        except Exception:
+                                            driver.execute_script("arguments[0].click();", btn)
+                                            submitted = True
+                                            break
 
-                            # 5. Chờ Muse hoàn thành tạo video / ảnh
+                            # 6. Chờ Muse hoàn thành tạo video (áp dụng cơ chế polling & detection của MuseStudio)
+                            self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang chờ Muse tạo {n_prompts} video ({chunk_label})…")
                             start_wait = time.monotonic()
-                            baseline_vids = {_video_fingerprint(v) for v in _find(driver, "css selector", "video")}
-                            video_found = False
-                            while time.monotonic() - start_wait < 240.0:
+                            fresh_videos: list[dict[str, str]] = []
+                            stable_cycles = 0
+                            last_found_count = 0
+
+                            while time.monotonic() - start_wait < 300.0:
                                 if self._stopped:
                                     break
                                 body = _body_text(driver).lower()
                                 if any(m in body for m in QUOTA_MARKERS):
                                     raise RuntimeError(f"Hết quota/credit trên tài khoản {acc_label}.")
 
-                                for v in reversed(_find(driver, "css selector", "video")):
-                                    if _visible(v) and _video_fingerprint(v) not in baseline_vids:
-                                        video_found = True
+                                # Tự động đóng dialog/overlay nếu Muse hiển thị popup trong lúc render
+                                _dismiss_muse_popups(driver)
+
+                                # Cuộn xuống dưới để kích hoạt render đầy đủ phần tử video DOM
+                                try:
+                                    driver.execute_script("""
+                                        const w = [...document.querySelectorAll('[data-hatch-video-wrapper],[data-hatch-video-src],video')].pop();
+                                        if (w) w.scrollIntoView({block: 'center'});
+                                    """)
+                                except Exception:
+                                    pass
+
+                                current_vids = _query_muse_videos(driver)
+                                new_candidates = [
+                                    v for v in current_vids
+                                    if v.get("src") and v.get("src") not in seen_video_srcs
+                                ]
+
+                                c_count = len(new_candidates)
+                                if c_count > 0:
+                                    if c_count >= n_prompts:
+                                        fresh_videos = new_candidates[:n_prompts]
                                         break
-                                if video_found:
-                                    break
-                                time.sleep(2.0)
+                                    if c_count == last_found_count:
+                                        stable_cycles += 1
+                                        if stable_cycles >= 6:  # Ổn định trong ~15s
+                                            fresh_videos = new_candidates
+                                            break
+                                    else:
+                                        stable_cycles = 0
+                                        last_found_count = c_count
 
-                            # 6. Yêu cầu tải xuống các video thành phẩm
-                            _click_by_text(driver, DOWNLOAD_TEXTS, reverse=True)
+                                time.sleep(2.5)
 
-                            # 7. Chờ file tải về download_dir
-                            start_dl_wait = time.monotonic()
-                            downloaded_files: list[Path] = []
-                            while time.monotonic() - start_dl_wait < 60.0:
+                            if not fresh_videos:
+                                # Thử fallback quét lại toàn bộ nếu chưa bắt được
+                                current_vids = _query_muse_videos(driver)
+                                fresh_videos = [v for v in current_vids if v.get("src") and v.get("src") not in seen_video_srcs]
+
+                            if not fresh_videos:
+                                raise RuntimeError(f"Hết thời gian chờ hoặc Muse không tạo video nào ({chunk_label}).")
+
+                            # 7. Ghép video với Prompt ID tương ứng (theo tên/label trước, sau đó theo thứ tự như MuseStudio)
+                            unassigned_prompts = list(chunk.prompt_items)
+                            unassigned_videos = list(fresh_videos)
+                            assignments: list[tuple[dict[str, str], tuple[int, str]]] = []
+
+                            for v_item in list(unassigned_videos):
+                                v_info_str = (v_item.get("name") or "") + " " + (v_item.get("label") or "")
+                                m = re.search(r'(?<![a-z0-9])(?:v|prompt[-_]?)?0*(\d{1,6})(?!\d)', v_info_str, re.I)
+                                if m:
+                                    matched_id = int(m.group(1))
+                                    target_p = next((p for p in unassigned_prompts if p[0] == matched_id), None)
+                                    if target_p:
+                                        assignments.append((v_item, target_p))
+                                        unassigned_videos.remove(v_item)
+                                        unassigned_prompts.remove(target_p)
+
+                            for v_item in list(unassigned_videos):
+                                if unassigned_prompts:
+                                    p_item = unassigned_prompts.pop(0)
+                                    assignments.append((v_item, p_item))
+                                    unassigned_videos.remove(v_item)
+
+                            # 8. Tiến hành tải từng video về output_dir (bằng JS fetch blob hoặc requests)
+                            batch_success_count = 0
+                            for v_item, (p_id, p_text) in assignments:
                                 if self._stopped:
                                     break
-                                current_files = [
-                                    p for p in download_dir.iterdir()
-                                    if p.is_file() and not p.name.endswith((".crdownload", ".tmp"))
-                                ]
-                                if current_files:
-                                    downloaded_files = current_files
-                                    time.sleep(1.0)
-                                    break
-                                time.sleep(1.0)
+                                slug_snippet = re.sub(r'[^\w\-\.]+', '_', p_text[:35].strip()).strip('_')
+                                if not slug_snippet:
+                                    slug_snippet = "video"
+                                target_filename = f"Prompt{p_id:04d}_{slug_snippet}.mp4"
+                                target_dest = self.output_dir / target_filename
+                                if target_dest.exists():
+                                    target_dest = self.output_dir / f"Prompt{p_id:04d}_{int(time.time())}_{slug_snippet}.mp4"
 
-                            self.output_dir.mkdir(parents=True, exist_ok=True)
-                            if downloaded_files:
-                                for df in downloaded_files:
-                                    target_dest = self.output_dir / f"Prompt{first_id:04d}_{int(time.time())}_{df.name}"
-                                    shutil.move(str(df), str(target_dest))
-                                    self.log_signal.emit(f"✔ [Luồng {worker_id}] {acc_label}: Đã lưu {target_dest.name}")
+                                self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang tải Prompt #{p_id:04d}…")
+                                dl_ok = _download_muse_video_file(driver, v_item, target_dest, download_dir)
+                                if dl_ok and target_dest.exists() and target_dest.stat().st_size > 10240:
+                                    batch_success_count += 1
+                                    seen_video_srcs.add(v_item.get("src"))
+                                    mb_size = target_dest.stat().st_size / (1024 * 1024)
+                                    self.log_signal.emit(f"✔ [Luồng {worker_id}] {acc_label}: Đã lưu {target_dest.name} ({mb_size:.2f} MB)")
+                                else:
+                                    self.log_signal.emit(f"⚠ [Luồng {worker_id}] {acc_label}: Không thể tải video cho Prompt #{p_id:04d}")
 
-                            completed_total += n_prompts
+                            batch_failed_count = n_prompts - batch_success_count
+                            completed_total += batch_success_count
+                            failed_total += batch_failed_count
+                            acc_completed += batch_success_count
                             remaining_total = max(0, total_items - (completed_total + failed_total))
-                            acc_completed += n_prompts
                             self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
                             pct = int(((completed_total + failed_total) / max(1, total_items)) * 100)
                             self.progress_signal.emit(pct, f"Đang xử lý: {completed_total}/{total_items} hoàn tất")
-                            self.log_signal.emit(f"✔ [Luồng {worker_id}] {acc_label}: Hoàn thành nhóm {n_prompts} prompt ({chunk_label}).")
+                            if batch_success_count > 0:
+                                self.log_signal.emit(f"✔ [Luồng {worker_id}] {acc_label}: Hoàn thành {batch_success_count}/{n_prompts} video ({chunk_label}).")
+                            else:
+                                self.log_signal.emit(f"❌ [Luồng {worker_id}] {acc_label}: Không lưu được video nào ({chunk_label}).")
 
                         except Exception as chunk_err:
                             failed_total += n_prompts

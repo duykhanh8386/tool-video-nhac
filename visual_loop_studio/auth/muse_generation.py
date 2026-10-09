@@ -330,8 +330,182 @@ def _click_by_text(driver: Any, texts: tuple[str, ...], *, reverse: bool = False
         )
         normalized = {" ".join(label.split()).casefold() for label in labels if label}
         if any(label == value or label.startswith(value + " ") for label in normalized for value in accepted):
-            element.click()
-            return True
+            try:
+                element.click()
+                return True
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].click();", element)
+                    return True
+                except Exception:
+                    continue
+    return False
+
+
+def _dismiss_muse_popups(driver: Any) -> None:
+    """Dong hop thoai/dialog/pop-up/overlay tren trang Muse tuong tu co che cua MuseStudio."""
+    try:
+        driver.execute_script("""
+            for (const d of document.querySelectorAll('[role=dialog],[role=alertdialog],[data-slot=dialog-overlay],[data-state=open]')) {
+                const b = [...d.querySelectorAll('button')].find(x => 
+                    /đóng|close|bỏ qua|skip|để sau|not now|ok|đã hiểu|got it/i.test(
+                        (x.getAttribute('aria-label') || '') + ' ' + (x.innerText || '')
+                    )
+                );
+                if (b) {
+                    try { b.click(); } catch(e) {}
+                }
+            }
+        """)
+    except Exception:
+        pass
+    try:
+        from selenium.webdriver.common.keys import Keys
+        body = driver.find_element("css selector", "body")
+        body.send_keys(Keys.ESCAPE)
+    except Exception:
+        pass
+
+
+def _query_muse_videos(driver: Any) -> list[dict[str, str]]:
+    """Trich xuat danh sach video tu DOM trang Muse theo co che chuan cua MuseStudio."""
+    try:
+        return driver.execute_script("""
+            window.__mavSeq = window.__mavSeq || 0;
+            const results = [];
+            // 1. Selector uu tien [data-hatch-video-src] cua Muse AI
+            document.querySelectorAll('[data-hatch-video-src]').forEach(w => {
+                if (!w.dataset.mavId) w.dataset.mavId = String(++window.__mavSeq);
+                const label = (w.getAttribute('aria-label') || '').trim();
+                const m = label.match(/[^\\s/\\\\]+\\.(mp4|webm|mov)/i);
+                const poster = (w.getAttribute('data-hatch-video-poster') || '').split('?')[0];
+                const src = (w.getAttribute('data-hatch-video-src') || '').trim();
+                if (src) {
+                    results.push({ id: w.dataset.mavId, src: src, name: m ? m[0] : '', label: label, poster: poster });
+                }
+            });
+            // 2. The <video> thong thuong tren trang
+            document.querySelectorAll('video').forEach(v => {
+                const src = (v.currentSrc || v.src || '').trim();
+                if (src && !results.some(r => r.src === src)) {
+                    if (!v.dataset.mavId) v.dataset.mavId = 'vid_' + (++window.__mavSeq);
+                    const parent = v.closest('[aria-label]');
+                    const parentLabel = (parent && parent.getAttribute) ? (parent.getAttribute('aria-label') || '') : '';
+                    const m = parentLabel.match(/[^\\s/\\\\]+\\.(mp4|webm|mov)/i);
+                    results.push({ id: v.dataset.mavId, src: src, name: m ? m[0] : '', label: parentLabel, poster: '' });
+                }
+            });
+            return results;
+        """) or []
+    except Exception:
+        return []
+
+
+def _download_muse_video_file(
+    driver: Any,
+    video_info: dict[str, str],
+    target_dest: Path,
+    download_dir: Path | None = None,
+) -> bool:
+    """Tai file video Muse ve may bang da tang: JS Blob Fetch (chuan MuseStudio) -> Requests CDN -> Dom Link -> UI Click."""
+    target_dest.parent.mkdir(parents=True, exist_ok=True)
+    video_src = (video_info.get("src") or "").strip()
+    if not video_src:
+        return False
+
+    # Tang 1: Fetch Base64 truc tiep qua JavaScript trong session cua browser (Cực kỳ mạnh, không lo overlay hay download bar)
+    try:
+        b64_data = driver.execute_async_script("""
+            var url = arguments[0];
+            var done = arguments[arguments.length - 1];
+            fetch(url)
+                .then(function(res) { return res.blob(); })
+                .then(function(blob) {
+                    var reader = new FileReader();
+                    reader.onload = function() { done(String(reader.result).split(',')[1]); };
+                    reader.onerror = function() { done(null); };
+                    reader.readAsDataURL(blob);
+                })
+                .catch(function(err) { done(null); });
+        """, video_src)
+        if b64_data:
+            import base64
+            raw_bytes = base64.b64decode(b64_data)
+            if len(raw_bytes) > 10240:
+                with open(target_dest, "wb") as f:
+                    f.write(raw_bytes)
+                return True
+    except Exception:
+        pass
+
+    # Tang 2: Direct HTTP download voi cookies cua browser neu la link https
+    if video_src.startswith("http"):
+        try:
+            import requests
+            session = requests.Session()
+            for cookie in driver.get_cookies():
+                session.cookies.set(cookie["name"], cookie["value"], domain=cookie.get("domain", ""))
+            resp = session.get(video_src, stream=True, timeout=60)
+            if resp.status_code == 200 and len(resp.content) > 10240:
+                with open(target_dest, "wb") as f:
+                    f.write(resp.content)
+                return True
+        except Exception:
+            pass
+
+    # Tang 3: DOM <a download> trigger (tao the a roi click trong DOM)
+    try:
+        driver.execute_script("""
+            var a = document.createElement('a');
+            a.href = arguments[0];
+            a.download = arguments[1];
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        """, video_src, target_dest.name)
+        if download_dir and download_dir.exists():
+            import time
+            st = time.monotonic()
+            while time.monotonic() - st < 25.0:
+                time.sleep(1.0)
+                candidates = [
+                    f for f in download_dir.iterdir()
+                    if f.is_file() and not f.name.endswith((".crdownload", ".tmp")) and f.stat().st_size > 10240
+                ]
+                if candidates:
+                    newest = max(candidates, key=lambda x: x.stat().st_mtime)
+                    import shutil
+                    shutil.move(str(newest), str(target_dest))
+                    return True
+    except Exception:
+        pass
+
+    # Tang 4: UI Download Button click bang JS (bo qua overlay)
+    try:
+        _dismiss_muse_popups(driver)
+        buttons = _find(driver, "css selector", "button[aria-label*='download' i], button[data-testid*='download' i], [role='button'][aria-label*='download' i], a[download]")
+        for b in reversed(buttons):
+            try:
+                driver.execute_script("arguments[0].click();", b)
+            except Exception:
+                pass
+        if download_dir and download_dir.exists():
+            import time
+            st = time.monotonic()
+            while time.monotonic() - st < 25.0:
+                time.sleep(1.0)
+                candidates = [
+                    f for f in download_dir.iterdir()
+                    if f.is_file() and not f.name.endswith((".crdownload", ".tmp")) and f.stat().st_size > 10240
+                ]
+                if candidates:
+                    newest = max(candidates, key=lambda x: x.stat().st_mtime)
+                    import shutil
+                    shutil.move(str(newest), str(target_dest))
+                    return True
+    except Exception:
+        pass
+
     return False
 
 

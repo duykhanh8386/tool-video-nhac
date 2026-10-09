@@ -716,8 +716,15 @@ class MuseLoginService:
             labels = (_element_text(element), _attribute(element, "aria-label"), _attribute(element, "title"))
             normalized = {_normalize_text(value) for value in labels if value}
             if any(_label_matches(label, accepted_values) for label in normalized):
-                element.click()
-                return True
+                try:
+                    element.click()
+                    return True
+                except Exception:
+                    try:
+                        driver.execute_script("arguments[0].click();", element)
+                        return True
+                    except Exception:
+                        continue
         return False
 
     def _has_clickable_text(self, driver: Any, accepted: tuple[str, ...]) -> bool:
