@@ -62,11 +62,13 @@ from auth.muse_generation import (
     _dismiss_muse_popups,
     _download_muse_video_file,
     _find,
+    _get_muse_recent_text,
     _hostname,
     _query_muse_videos,
     _safe_url,
     _video_fingerprint,
     _visible,
+    is_muse_quota_exhausted,
 )
 from auth.muse_login import (
     MUSE_ALLOWED_HOSTS,
@@ -666,8 +668,8 @@ class MuseCookieBatchRunnerThread(QThread):
                     _dismiss_muse_popups(driver)
 
                     # Kiểm tra xem tài khoản có bị hết credit/token ngay từ đầu không
-                    init_body = _body_text(driver).lower()
-                    if any(m in init_body for m in QUOTA_MARKERS):
+                    init_text = _get_muse_recent_text(driver)
+                    if is_muse_quota_exhausted(init_text):
                         self.log_signal.emit(
                             f"⚠ [{worker_tag}]: Tài khoản đã hết token/credit ngay từ đầu. "
                             f"Tự động chuyển sang tài khoản tiếp theo trong danh sách…"
@@ -825,8 +827,8 @@ class MuseCookieBatchRunnerThread(QThread):
 
                             # Kiểm tra ngay sau khi gửi xem có thông báo hết quota xuất hiện không
                             time.sleep(1.0)
-                            post_submit_body = _body_text(driver).lower()
-                            if any(m in post_submit_body for m in QUOTA_MARKERS):
+                            post_submit_text = _get_muse_recent_text(driver)
+                            if is_muse_quota_exhausted(post_submit_text):
                                 raise RuntimeError(f"Hết quota/credit trên tài khoản {acc_label}.")
 
                             self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang theo dõi và tải {n_prompts} video ({chunk_label})…")
@@ -839,8 +841,8 @@ class MuseCookieBatchRunnerThread(QThread):
                             while time.monotonic() - start_wait < 300.0:
                                 if self._stopped:
                                     break
-                                body = _body_text(driver).lower()
-                                if any(m in body for m in QUOTA_MARKERS):
+                                poll_text = _get_muse_recent_text(driver)
+                                if is_muse_quota_exhausted(poll_text):
                                     raise RuntimeError(f"Hết quota/credit trên tài khoản {acc_label}.")
 
                                 try:

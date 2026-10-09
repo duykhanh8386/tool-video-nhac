@@ -54,6 +54,20 @@ class TestMuseAccountsPage(unittest.TestCase):
         page.f5_spin.setValue(90)
         self.assertEqual(settings.muse_auto_refresh_minutes, 90)
 
+    def test_quota_exhaustion_detection(self):
+        from auth.muse_generation import is_muse_quota_exhausted
+
+        sample_user_msg = (
+            "Hiện quota đã dùng 97% hạn mức free tuần, sắp chạm giới hạn. Một batch 5 video cần khoảng 12-13%, "
+            "nên không đủ để chạy tiếp batch Prompt0026–Prompt0030 lúc này — có thể bị dừng giữa chừng.\n\n"
+            "Hạn mức sẽ reset vào ngày 11/10 lúc 08:09. Nếu muốn tiếp tục ngay, có thể nâng cấp lên gói trả phí.\n\n"
+            "Mình nên chờ reset hay bạn muốn làm gì khác?"
+        )
+        self.assertTrue(is_muse_quota_exhausted(sample_user_msg))
+        self.assertTrue(is_muse_quota_exhausted("You've reached your limit. Upgrade to continue."))
+        self.assertTrue(is_muse_quota_exhausted("Tài khoản đã hết lượt tạo video tuần này."))
+        self.assertFalse(is_muse_quota_exhausted("Video đang được tạo, vui lòng chờ trong giây lát..."))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import shutil
 import tempfile
 import time
@@ -55,7 +56,47 @@ QUOTA_MARKERS = (
     "hết token",
     "hết hạn mức",
     "vượt quá giới hạn",
+    "quota đã dùng",
+    "chạm giới hạn",
+    "sắp chạm giới hạn",
+    "hạn mức free",
+    "hạn mức tuần",
+    "hạn mức sẽ reset",
+    "chờ reset",
+    "không đủ để chạy tiếp",
+    "không đủ để chạy",
+    "không đủ để tạo",
+    "nâng cấp lên gói trả phí",
+    "gói trả phí",
+    "bị dừng giữa chừng",
+    "free weekly limit",
+    "upgrade to a paid plan",
+    "will reset on",
 )
+
+
+def is_muse_quota_exhausted(text: str) -> bool:
+    """Kiểm tra xem nội dung chat/trang web Muse có thông báo hết hoặc sắp hết quota/credit không."""
+    if not text:
+        return False
+    t = text.lower()
+    if any(m in t for m in QUOTA_MARKERS):
+        return True
+    patterns = [
+        r"quota\s+đã\s+dùng",
+        r"(sắp|đã)\s+chạm\s+giới\s+hạn",
+        r"không\s+đủ\s+(để\s+)?(chạy|tạo|tiếp\s+tục)",
+        r"hạn\s+mức\s+(sẽ\s+)?reset",
+        r"chờ\s+reset",
+        r"nâng\s+cấp\s+(lên\s+)?gói\s+trả\s+phí",
+        r"hạn\s+mức\s+free",
+        r"bị\s+dừng\s+giữa\s+chừng",
+        r"not\s+enough\s+(quota|credit|to\s+run|to\s+generate)",
+        r"(approaching|reached)\s+(the\s+)?limit",
+        r"upgrade\s+to\s+(a\s+)?paid\s+plan",
+        r"limit\s+will\s+reset",
+    ]
+    return any(re.search(pat, t) for pat in patterns)
 
 
 class MuseGenerationError(RuntimeError):
@@ -598,6 +639,30 @@ def _video_fingerprint(element: Any) -> str:
 
 def _body_text(driver: Any) -> str:
     return " ".join(_text(item) for item in _find(driver, "tag name", "body"))
+
+
+def _get_muse_recent_text(driver: Any) -> str:
+    """Lấy nội dung văn bản gần nhất từ trang Muse (bao gồm cả tin nhắn chat phản hồi, modal, body)."""
+    try:
+        js_text = driver.execute_script("""
+            const parts = [];
+            // 1. Tin nhắn gần nhất trong chat (Muse phản hồi cảnh báo hết quota tại đây)
+            const msgs = [...document.querySelectorAll('[data-message-item="true"],[data-message-role],[class*="message" i],[class*="bubble" i]')];
+            msgs.slice(-5).forEach(m => parts.push(m.innerText || ''));
+            // 2. Modals, alerts, popups
+            const modals = [...document.querySelectorAll('[role="dialog"],[role="alert"],.modal,[class*="dialog" i],[class*="modal" i],[class*="alert" i]')];
+            modals.forEach(m => parts.push(m.innerText || ''));
+            // 3. Fallback nếu không có phần tử chat
+            if (parts.length === 0 && document.body) {
+                parts.push(document.body.innerText || '');
+            }
+            return parts.filter(Boolean).join('\\n');
+        """)
+        if js_text:
+            return str(js_text)
+    except Exception:
+        pass
+    return _body_text(driver)
 
 
 def _find(driver: Any, by: str, selector: str) -> list[Any]:
