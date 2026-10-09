@@ -323,58 +323,94 @@ class MuseCookieBatchRunnerThread(QThread):
 
     @staticmethod
     def _fill_chat_prompt(driver: Any, text: str) -> bool:
-        """Safely fill multi-line prompt into Muse chat input as 1 single message without submitting on Enter."""
+        """Safely fill multi-line prompt into Muse chat input as 1 single message without submitting on Enter,
+        ensuring React internal state is updated so the Send button becomes enabled."""
         from selenium.webdriver.common.keys import Keys
 
-        for selector in PROMPT_SELECTORS:
+        selectors = (
+            "textarea[aria-label='Message']",
+            "textarea[placeholder='Message']",
+            "[data-testid='prompt-input']",
+            "[data-testid*='composer' i] textarea",
+            "textarea[aria-label*='prompt' i]",
+            "textarea[placeholder*='prompt' i]",
+            "[contenteditable='true'][role='textbox'][aria-label*='prompt' i]",
+            "textarea",
+            "[contenteditable='true'][role='textbox']",
+            "[contenteditable='true']",
+        )
+
+        for selector in selectors:
             fields = _find(driver, "css selector", selector)
-            for field in reversed(fields):
-                if not _visible(field):
+            valid_fields = []
+            for f in reversed(fields):
+                if not _visible(f):
                     continue
+                try:
+                    is_sidebar = driver.execute_script(
+                        "return !!arguments[0].closest('aside,nav,[data-testid*=\"sidebar\" i],[data-testid*=\"timeline\" i],[data-testid*=\"history\" i]');",
+                        f,
+                    )
+                    if not is_sidebar:
+                        valid_fields.append(f)
+                except Exception:
+                    valid_fields.append(f)
+
+            for field in valid_fields:
                 try:
                     field.click()
                     time.sleep(0.15)
-                    # 1. Thử chèn text trực tiếp bằng JavaScript để toàn bộ nội dung (kèm xuống dòng)
-                    # được dán nguyên khối vào ô chat 1 lần duy nhất mà không kích hoạt sự kiện phím Enter
-                    js_success = driver.execute_script(
+
+                    # Cách 1: Đưa text vào qua JavaScript với React native setter + execCommand
+                    js_res = driver.execute_script(
                         """
                         const el = arguments[0];
                         const val = arguments[1];
                         el.focus();
-                        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-                            el.value = val;
-                            el.dispatchEvent(new Event('input', { bubbles: true }));
-                            el.dispatchEvent(new Event('change', { bubbles: true }));
-                            return true;
-                        } else {
-                            // Cho contenteditable / rich-text editor
-                            document.execCommand('selectAll', false, null);
-                            const ok = document.execCommand('insertText', false, val);
-                            el.dispatchEvent(new Event('input', { bubbles: true }));
-                            if (ok && el.innerText && el.innerText.trim().length > 10) return true;
 
-                            try {
-                                const dt = new DataTransfer();
-                                dt.setData('text/plain', val);
-                                const pe = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt });
-                                el.dispatchEvent(pe);
-                            } catch(e) {}
-                            if (el.innerText && el.innerText.trim().length > 10) return true;
+                        // 1. Thử execCommand('insertText') để mô phỏng gõ/dán thật mà không kích hoạt phím Enter
+                        let inserted = false;
+                        try {
+                            if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                                el.select();
+                            } else {
+                                document.execCommand('selectAll', false, null);
+                            }
+                            inserted = document.execCommand('insertText', false, val);
+                        } catch(e) {}
 
-                            el.innerText = val;
-                            el.dispatchEvent(new Event('input', { bubbles: true }));
-                            return true;
+                        // 2. Prototype descriptor setter để kích hoạt React onChange
+                        const cur = (el.value || el.innerText || '').trim();
+                        if (!inserted || cur.length < 10) {
+                            if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                                const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+                                const setMethod = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                                if (setMethod) {
+                                    setMethod.call(el, val);
+                                } else {
+                                    el.value = val;
+                                }
+                                el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                                el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                            } else {
+                                el.innerText = val;
+                                el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                            }
                         }
+
+                        // Kiểm tra lại xem nội dung đã vào chưa
+                        const finalVal = (el.value || el.innerText || '').trim();
+                        return finalVal.length > 10;
                         """,
                         field,
                         text,
                     )
-                    if js_success:
+                    if js_res:
                         return True
 
-                    # 2. Dự phòng: Dùng Shift+Enter khi xuống dòng để TUYỆT ĐỐI KHÔNG kích hoạt gửi tin nhắn sớm
+                    # Cách 2: Dự phòng Shift+Enter
                     tag = str(field.tag_name or "").lower()
-                    if tag == "textarea":
+                    if tag in {"textarea", "input"}:
                         field.clear()
                     else:
                         field.send_keys("\ue009", "a")
@@ -388,6 +424,145 @@ class MuseCookieBatchRunnerThread(QThread):
                     return True
                 except Exception:
                     continue
+        return False
+
+    @staticmethod
+    def _submit_chat_prompt(driver: Any) -> bool:
+        """Gửi prompt trong chat Muse bằng cách bấm nút Send / Generate (hỗ trợ icon SVG) hoặc phím Enter trong composer."""
+        from selenium.webdriver.common.keys import Keys
+
+        # 1. Thử click nút Send / Generate qua JavaScript chuyên sâu (hỗ trợ cả nút SVG và composer buttons)
+        try:
+            clicked = bool(
+                driver.execute_script(
+                    """
+                    const isInsideSidebar = el => !!el.closest('aside,nav,[data-testid*="sidebar" i],[data-testid*="timeline" i],[data-testid*="history" i]');
+                    const isInsideChat = el => !!el.closest('[data-message-item="true"],[data-message-role],[data-message-group-id]');
+                    const triggerClick = el => {
+                        if (!el) return false;
+                        try { el.focus(); } catch(e) {}
+                        const opts = { bubbles: true, cancelable: true, view: window };
+                        try { el.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch(e) {}
+                        try { el.dispatchEvent(new MouseEvent('mousedown', opts)); } catch(e) {}
+                        try { el.dispatchEvent(new PointerEvent('pointerup', opts)); } catch(e) {}
+                        try { el.dispatchEvent(new MouseEvent('mouseup', opts)); } catch(e) {}
+                        el.click();
+                        return true;
+                    };
+
+                    // 1. Selector trực tiếp nút Send / Generate
+                    const selectors = [
+                        'button[aria-label="Send" i]',
+                        'button[aria-label*="send message" i]',
+                        'button[aria-label*="send" i]',
+                        'button[aria-label*="tạo" i]',
+                        'button[aria-label*="gửi" i]',
+                        'button[aria-label*="create" i]',
+                        'button[aria-label*="generate" i]',
+                        'button[type="submit"][aria-label*="send" i]',
+                        'button[type="submit"]',
+                        'button[data-testid*="send" i]',
+                        'button[data-testid*="generate" i]',
+                        'button[data-testid*="create" i]'
+                    ];
+                    for (const sel of selectors) {
+                        const btns = [...document.querySelectorAll(sel)].filter(b => {
+                            if (isInsideSidebar(b) || isInsideChat(b)) return false;
+                            const r = b.getBoundingClientRect();
+                            return r.width > 0 && r.height > 0 && !b.disabled && b.getAttribute('aria-disabled') !== 'true';
+                        });
+                        if (btns.length) {
+                            return triggerClick(btns[btns.length - 1]);
+                        }
+                    }
+
+                    // 2. Tìm nút trong container của textarea composer (kể cả nút chỉ có icon SVG)
+                    const textareas = [...document.querySelectorAll('textarea,[contenteditable="true"]')].filter(t => {
+                        if (isInsideSidebar(t) || isInsideChat(t)) return false;
+                        const r = t.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    });
+                    if (textareas.length) {
+                        const ta = textareas[textareas.length - 1];
+                        const container = ta.closest('form,[data-testid*="composer" i],div.relative,div') || ta.parentElement;
+                        if (container) {
+                            const btns = [...container.querySelectorAll('button,[role="button"]')].filter(b => {
+                                if (b === ta || isInsideSidebar(b) || isInsideChat(b)) return false;
+                                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                                if (/attach|upload|file|image|add|close|dismiss|preview/i.test(aria)) return false;
+                                const r = b.getBoundingClientRect();
+                                return r.width > 0 && r.height > 0 && !b.disabled && b.getAttribute('aria-disabled') !== 'true';
+                            });
+                            const sendBtn = btns.find(b => {
+                                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                                const type = (b.getAttribute('type') || '').toLowerCase();
+                                return /send|submit|create|generate|tạo|gửi/i.test(aria) || type === 'submit' || Boolean(b.querySelector('svg path,svg'));
+                            }) || btns.sort((a,b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)[0];
+                            if (sendBtn) {
+                                return triggerClick(sendBtn);
+                            }
+                        }
+                        // 3. Kích hoạt phím Enter trong JS
+                        try {
+                            ta.focus();
+                            const evt = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
+                            ta.dispatchEvent(evt);
+                            return true;
+                        } catch(e) {}
+                    }
+                    return false;
+                    """
+                )
+            )
+            if clicked:
+                return True
+        except Exception:
+            pass
+
+        # 2. Thử _click_by_text với tập nhãn mở rộng
+        extended_submit_texts = (
+            "send", "generate", "create video", "create", "gửi", "tạo video", "tạo"
+        )
+        if _click_by_text(driver, extended_submit_texts):
+            return True
+
+        # 3. Thử qua Selenium find elements
+        for sel in (
+            "button[aria-label*='send' i]",
+            "button[data-testid*='send' i]",
+            "button[type='submit']",
+        ):
+            for btn in reversed(_find(driver, "css selector", sel)):
+                if _clickable(btn):
+                    try:
+                        btn.click()
+                        return True
+                    except Exception:
+                        try:
+                            driver.execute_script("arguments[0].click();", btn)
+                            return True
+                        except Exception:
+                            pass
+
+        # 4. Fallback tối hậu: Focus vào ô textarea và gửi Keys.RETURN / Keys.ENTER bằng Selenium
+        try:
+            for sel in (
+                "textarea[aria-label='Message']",
+                "textarea[placeholder='Message']",
+                "[data-testid*='composer' i] textarea",
+                "textarea",
+                "[contenteditable='true']",
+            ):
+                for ta in reversed(_find(driver, "css selector", sel)):
+                    if _clickable(ta):
+                        try:
+                            ta.send_keys(Keys.RETURN)
+                            return True
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
         return False
 
     def stop(self) -> None:
@@ -452,7 +627,18 @@ class MuseCookieBatchRunnerThread(QThread):
                     driver.set_page_load_timeout(35)
                     self.worker_status_signal.emit(worker_id, f"Nạp cookie [{acc_label}]…")
                     inject_cookies_to_driver(driver, current_acc.cookies, target_url=MUSE_DEFAULT_URL)
-                    time.sleep(1.5)
+                    time.sleep(3.0)
+                    _dismiss_muse_popups(driver)
+
+                    # Cuộn nhẹ để DOM hydrate các video cũ nếu có
+                    try:
+                        driver.execute_script("""
+                            const w = [...document.querySelectorAll('[data-hatch-video-wrapper],[data-hatch-video-src],video')].pop();
+                            if (w) w.scrollIntoView({block: 'center'});
+                        """)
+                    except Exception:
+                        pass
+                    time.sleep(1.0)
 
                     # Tự động bắt email từ phiên Muse nếu chưa có
                     if not current_acc.email:
@@ -491,6 +677,27 @@ class MuseCookieBatchRunnerThread(QThread):
                         if self._stopped:
                             break
 
+                        n_prompts = len(chunk.prompt_items)
+                        first_id = chunk.prompt_items[0][0]
+                        last_id = chunk.prompt_items[-1][0]
+                        chunk_label = f"Đợt {chunk_idx}/{len(assigned_chunks)} (Prompt #{first_id:04d} - #{last_id:04d})"
+
+                        # Kiểm tra xem toàn bộ prompt trong chunk này đã có file hoàn tất trong output_dir chưa
+                        all_chunk_done = True
+                        for p_id, _ in chunk.prompt_items:
+                            if not any(f.name.startswith(f"Prompt{p_id:04d}") and f.stat().st_size > 10240 for f in self.output_dir.iterdir() if f.is_file()):
+                                all_chunk_done = False
+                                break
+                        if all_chunk_done:
+                            completed_total += n_prompts
+                            acc_completed += n_prompts
+                            remaining_total = max(0, total_items - (completed_total + failed_total))
+                            self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
+                            pct = int(((completed_total + failed_total) / max(1, total_items)) * 100)
+                            self.progress_signal.emit(pct, f"Đang xử lý: {completed_total}/{total_items} hoàn tất")
+                            self.log_signal.emit(f"⏩ [Luồng {worker_id}] {acc_label}: Đã có sẵn đủ {n_prompts} video trong thư mục ({chunk_label}), bỏ qua không gửi lại.")
+                            continue
+
                         # Kiểm tra chu kỳ tự động F5 ngầm
                         if self.auto_refresh_minutes > 0 and (time.monotonic() - last_f5_time) >= (self.auto_refresh_minutes * 60):
                             self.worker_status_signal.emit(worker_id, f"F5 ngầm [{acc_label}]…")
@@ -503,10 +710,6 @@ class MuseCookieBatchRunnerThread(QThread):
                                 pass
                             last_f5_time = time.monotonic()
 
-                        n_prompts = len(chunk.prompt_items)
-                        first_id = chunk.prompt_items[0][0]
-                        last_id = chunk.prompt_items[-1][0]
-                        chunk_label = f"Đợt {chunk_idx}/{len(assigned_chunks)} (Prompt #{first_id:04d} - #{last_id:04d})"
                         self.worker_status_signal.emit(worker_id, f"[{acc_label}] {chunk_label}…")
                         self.log_signal.emit(f"🎬 [Luồng {worker_id}] {acc_label}: Bắt đầu gửi nhóm {n_prompts} prompt ({chunk_label})…")
 
@@ -552,21 +755,53 @@ class MuseCookieBatchRunnerThread(QThread):
                             filled = self._fill_chat_prompt(driver, chunk_prompt_text)
                             if not filled:
                                 self.log_signal.emit(f"⚠ [Luồng {worker_id}] Không thể điền prompt tự động vào selector chuẩn.")
-                            time.sleep(0.8)
+                            time.sleep(1.0)
 
-                            # 5. Gửi yêu cầu Create (chỉ gửi 1 lần duy nhất sau khi đã điền đủ toàn bộ prompt gom)
-                            submitted = _click_by_text(driver, SUBMIT_TEXTS)
-                            if not submitted:
-                                for btn in reversed(_find(driver, "css selector", "button[type='submit']")):
-                                    if _clickable(btn):
-                                        try:
-                                            btn.click()
+                            # 5. Gửi yêu cầu Create / Send
+                            self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang bấm gửi prompt ({chunk_label})…")
+                            submitted = self._submit_chat_prompt(driver)
+
+                            # Kiểm tra xác nhận xem prompt đã được gửi hay còn kẹt trong composer
+                            time.sleep(1.0)
+                            still_in_composer = False
+                            try:
+                                still_in_composer = bool(
+                                    driver.execute_script(
+                                        """
+                                        const prompt = (arguments[0] || '').slice(0, 30).trim().toLowerCase();
+                                        if (!prompt) return false;
+                                        const tas = [...document.querySelectorAll('textarea,[contenteditable="true"]')].filter(
+                                            t => !t.closest('aside,nav,[data-testid*="sidebar" i],[data-testid*="history" i]')
+                                        );
+                                        return tas.some(t => {
+                                            const val = (t.value || t.innerText || '').trim().toLowerCase();
+                                            return val.length > 20 && val.includes(prompt);
+                                        });
+                                        """,
+                                        chunk_prompt_text,
+                                    )
+                                )
+                            except Exception:
+                                pass
+
+                            if still_in_composer:
+                                # Nếu vẫn còn kẹt trong ô nhập, gửi lại bằng phím Enter
+                                self.log_signal.emit(f"🔄 [Luồng {worker_id}] Prompt còn trong ô nhập, gửi lại bằng Enter…")
+                                try:
+                                    from selenium.webdriver.common.keys import Keys
+                                    for ta in reversed(_find(driver, "css selector", "textarea,[contenteditable='true']")):
+                                        if _clickable(ta):
+                                            ta.send_keys(Keys.RETURN)
                                             submitted = True
                                             break
-                                        except Exception:
-                                            driver.execute_script("arguments[0].click();", btn)
-                                            submitted = True
-                                            break
+                                except Exception:
+                                    pass
+                                time.sleep(1.0)
+
+                            if submitted:
+                                self.log_signal.emit(f"🚀 [Luồng {worker_id}] {acc_label}: Đã gửi thành công nhóm prompt ({chunk_label}) tới Muse!")
+                            else:
+                                self.log_signal.emit(f"⚠ [Luồng {worker_id}] {acc_label}: Đã kích hoạt lệnh gửi ({chunk_label}), đang theo dõi tạo video…")
 
                             # 6. Chờ Muse hoàn thành tạo video (áp dụng cơ chế polling & detection của MuseStudio)
                             self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang chờ Muse tạo {n_prompts} video ({chunk_label})…")
