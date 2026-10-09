@@ -317,6 +317,75 @@ class MuseCookieBatchRunnerThread(QThread):
         self.style_suffix = style_suffix
         self._stopped = False
 
+    @staticmethod
+    def _fill_chat_prompt(driver: Any, text: str) -> bool:
+        """Safely fill multi-line prompt into Muse chat input as 1 single message without submitting on Enter."""
+        from selenium.webdriver.common.keys import Keys
+
+        for selector in PROMPT_SELECTORS:
+            fields = _find(driver, "css selector", selector)
+            for field in reversed(fields):
+                if not _visible(field):
+                    continue
+                try:
+                    field.click()
+                    time.sleep(0.15)
+                    # 1. Thử chèn text trực tiếp bằng JavaScript để toàn bộ nội dung (kèm xuống dòng)
+                    # được dán nguyên khối vào ô chat 1 lần duy nhất mà không kích hoạt sự kiện phím Enter
+                    js_success = driver.execute_script(
+                        """
+                        const el = arguments[0];
+                        const val = arguments[1];
+                        el.focus();
+                        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                            el.value = val;
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                            return true;
+                        } else {
+                            // Cho contenteditable / rich-text editor
+                            document.execCommand('selectAll', false, null);
+                            const ok = document.execCommand('insertText', false, val);
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            if (ok && el.innerText && el.innerText.trim().length > 10) return true;
+
+                            try {
+                                const dt = new DataTransfer();
+                                dt.setData('text/plain', val);
+                                const pe = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt });
+                                el.dispatchEvent(pe);
+                            } catch(e) {}
+                            if (el.innerText && el.innerText.trim().length > 10) return true;
+
+                            el.innerText = val;
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            return true;
+                        }
+                        """,
+                        field,
+                        text,
+                    )
+                    if js_success:
+                        return True
+
+                    # 2. Dự phòng: Dùng Shift+Enter khi xuống dòng để TUYỆT ĐỐI KHÔNG kích hoạt gửi tin nhắn sớm
+                    tag = str(field.tag_name or "").lower()
+                    if tag == "textarea":
+                        field.clear()
+                    else:
+                        field.send_keys("\ue009", "a")
+
+                    lines = text.split("\n")
+                    for i, line in enumerate(lines):
+                        if line:
+                            field.send_keys(line)
+                        if i < len(lines) - 1:
+                            field.send_keys(Keys.SHIFT, Keys.ENTER)
+                    return True
+                except Exception:
+                    continue
+        return False
+
     def stop(self) -> None:
         self._stopped = True
 
@@ -444,30 +513,14 @@ class MuseCookieBatchRunnerThread(QThread):
                                 style_suffix=self.style_suffix,
                             )
 
-                            # 3. Điền prompt gom vào ô chat Muse
-                            for selector in PROMPT_SELECTORS:
-                                fields = _find(driver, "css selector", selector)
-                                filled = False
-                                for f in reversed(fields):
-                                    if not _visible(f):
-                                        continue
-                                    try:
-                                        f.click()
-                                        tag = str(f.tag_name or "").lower()
-                                        if tag == "textarea":
-                                            f.clear()
-                                        else:
-                                            f.send_keys("\ue009", "a")
-                                        f.send_keys(chunk_prompt_text)
-                                        filled = True
-                                        break
-                                    except Exception:
-                                        continue
-                                if filled:
-                                    break
-                            time.sleep(0.5)
+                            # 3. Điền prompt gom vào ô chat Muse (1 lần duy nhất, nguyên khối)
+                            self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang điền prompt gom (1 lần duy nhất) vào Muse…")
+                            filled = self._fill_chat_prompt(driver, chunk_prompt_text)
+                            if not filled:
+                                self.log_signal.emit(f"⚠ [Luồng {worker_id}] Không thể điền prompt tự động vào selector chuẩn.")
+                            time.sleep(0.8)
 
-                            # 4. Gửi yêu cầu Create
+                            # 4. Gửi yêu cầu Create (chỉ gửi 1 lần duy nhất sau khi đã điền đủ toàn bộ prompt gom)
                             submitted = _click_by_text(driver, SUBMIT_TEXTS)
                             if not submitted:
                                 for btn in reversed(_find(driver, "css selector", "button[type='submit']")):
@@ -769,49 +822,11 @@ class MuseAccountsPage(QWidget):
         cfg_row.addWidget(self.concurrency_spin)
         cfg_row.addWidget(lbl_conc_desc)
 
-        # Box F5 Muse mỗi X phút (Khớp ảnh 2)
-        f5_box = QWidget()
-        f5_box.setStyleSheet(
-            "QWidget { "
-            "background: #fffbeb; border: 1.5px solid #d97706; border-radius: 6px; "
-            "padding: 1px 4px; "
-            "}"
-        )
-        f5_layout = QHBoxLayout(f5_box)
-        f5_layout.setContentsMargins(6, 2, 6, 2)
-        f5_layout.setSpacing(6)
-
-        lbl_f5 = QLabel("🔄 F5 Muse mỗi")
-        lbl_f5.setStyleSheet("font-weight: 700; color: #9a3412; font-size: 12px; border: none; background: transparent;")
-
+        # F5 Muse chạy ngầm 60 phút hoàn toàn, ẩn khỏi UI theo yêu cầu của người dùng
         self.f5_spin = QSpinBox()
         self.f5_spin.setRange(0, 1440)
         self.f5_spin.setValue(int(getattr(self.settings, "muse_auto_refresh_minutes", 60) or 60))
-        self.f5_spin.setMinimumHeight(28)
-        self.f5_spin.setStyleSheet(
-            "font-weight: 700; color: #9a3412; background: #ffffff; border: 1px solid #d97706; border-radius: 4px; padding: 2px 4px;"
-        )
         self.f5_spin.valueChanged.connect(self._on_f5_interval_changed)
-
-        lbl_f5_unit = QLabel("phút (0 = tắt)")
-        lbl_f5_unit.setStyleSheet("font-weight: 600; color: #9a3412; font-size: 12px; border: none; background: transparent;")
-
-        btn_f5_help = QPushButton("❓ Tác dụng")
-        btn_f5_help.setCursor(Qt.PointingHandCursor)
-        btn_f5_help.setStyleSheet(
-            "QPushButton { "
-            "background: #fed7aa; color: #7c2d12; font-weight: 700; font-size: 11px; "
-            "border: 1px solid #f97316; border-radius: 4px; padding: 3px 8px; "
-            "} "
-            "QPushButton:hover { background: #fdba74; }"
-        )
-        btn_f5_help.clicked.connect(self._show_f5_help_dialog)
-
-        f5_layout.addWidget(lbl_f5)
-        f5_layout.addWidget(self.f5_spin)
-        f5_layout.addWidget(lbl_f5_unit)
-        f5_layout.addWidget(btn_f5_help)
-        cfg_row.addWidget(f5_box)
 
         cfg_row.addStretch()
         cfg_row.addWidget(self.btn_select_all)
