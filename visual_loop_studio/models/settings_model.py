@@ -32,6 +32,8 @@ class AppSettings:
     muse_task_mode: str = "video"
     muse_headless: bool = False
     muse_concurrency: int = 1
+    muse_auto_refresh_minutes: int = 60
+    muse_style_suffix: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

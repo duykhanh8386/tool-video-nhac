@@ -6,7 +6,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -38,11 +38,14 @@ from PySide6.QtWidgets import (
 )
 
 from auth.muse_cookies import (
+    DEFAULT_MUSE_STYLE_SUFFIX,
     MUSE_COOKIE_PROFILES_DIR,
     MUSE_DEFAULT_URL,
     MuseCookieAccount,
     MuseCookieAccountStore,
+    build_muse_chunk_prompt,
     check_single_cookie_account,
+    extract_email_from_muse_page,
     inject_cookies_to_driver,
     parse_muse_cookies,
 )
@@ -237,7 +240,7 @@ class InspectCookieDialog(QDialog):
 class MuseCookieCheckerThread(QThread):
     """Luồng kiểm tra cookie tài khoản Muse trong nền."""
 
-    account_checked = Signal(str, bool, str, str)  # account_id, is_active, message, time_str
+    account_checked = Signal(str, bool, str, str, str)  # account_id, is_active, message, time_str, detected_email
     all_finished = Signal(int, int)  # active_count, total_count
 
     def __init__(self, accounts: list[MuseCookieAccount], headless: bool = True, parent=None) -> None:
@@ -256,26 +259,35 @@ class MuseCookieCheckerThread(QThread):
             if self._stopped:
                 break
             try:
-                is_active, _detected_email, msg = check_single_cookie_account(acc, headless=self.headless)
+                is_active, detected_email, msg = check_single_cookie_account(acc, headless=self.headless)
             except Exception as exc:
                 is_active = False
+                detected_email = ""
                 msg = f"Lỗi: {exc}"
 
             if is_active:
                 active_count += 1
-            self.account_checked.emit(acc.account_id, is_active, msg, now_str)
+            self.account_checked.emit(acc.account_id, is_active, msg, now_str, detected_email or "")
 
         self.all_finished.emit(active_count, len(self.accounts))
 
 
+@dataclass
+class MuseBatchChunk:
+    chunk_index: int
+    prompt_items: list[tuple[int, str]]  # list of (1-based prompt_id, prompt_text)
+    images: list[Path] = field(default_factory=list)
+
+
 class MuseCookieBatchRunnerThread(QThread):
-    """Luồng chạy batch tạo video/ảnh qua danh sách tài khoản Cookie (Concurrency 1-5)."""
+    """Luồng chạy batch tạo video/ảnh qua danh sách tài khoản Cookie (gom 5 prompt/lần, Concurrency 1-5, tự F5 ngầm)."""
 
     progress_signal = Signal(int, str)
-    stats_signal = Signal(int, int, int, int)  # pending, completed, failed, quota
+    stats_signal = Signal(int, int, int, int)  # total, completed, failed, remaining
     log_signal = Signal(str)
     worker_status_signal = Signal(int, str)  # worker_idx (1-5), status_text
     account_completed_signal = Signal(str, int)  # account_id, count
+    account_email_found_signal = Signal(str, str)  # account_id, detected_email
     batch_finished_signal = Signal(bool, str)
 
     def __init__(
@@ -284,10 +296,12 @@ class MuseCookieBatchRunnerThread(QThread):
         concurrency: int,
         headless: bool,
         task_mode: str,
-        prompt: str,
+        chunks: list[MuseBatchChunk],
+        total_prompts: int,
         settings: MuseVideoSettings,
         output_dir: Path,
-        source_items: list[str],
+        auto_refresh_minutes: int = 60,
+        style_suffix: str = "",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -295,10 +309,12 @@ class MuseCookieBatchRunnerThread(QThread):
         self.concurrency = max(1, min(5, concurrency))
         self.headless = headless
         self.task_mode = task_mode
-        self.prompt = prompt
+        self.chunks = chunks
+        self.total_prompts = total_prompts
         self.settings = settings
         self.output_dir = output_dir
-        self.source_items = source_items
+        self.auto_refresh_minutes = max(0, auto_refresh_minutes)
+        self.style_suffix = style_suffix
         self._stopped = False
 
     def stop(self) -> None:
@@ -309,35 +325,33 @@ class MuseCookieBatchRunnerThread(QThread):
             self.batch_finished_signal.emit(False, "Không có tài khoản nào được tick để chạy.")
             return
 
-        total_items = len(self.source_items)
-        if total_items == 0:
-            self.batch_finished_signal.emit(False, "Không có mục nào để xử lý.")
+        if not self.chunks or self.total_prompts == 0:
+            self.batch_finished_signal.emit(False, "Không có prompt nào để xử lý.")
             return
 
         action_name = "ảnh" if self.task_mode == "image" else "video"
         self.log_signal.emit(
-            f"🚀 Bắt đầu batch {action_name}: {total_items} mục trên {len(self.accounts)} tài khoản "
-            f"(Chạy song song: {self.concurrency} tài khoản cùng lúc, Chạy ẩn: {self.headless})."
+            f"🚀 Bắt đầu batch {action_name}: {self.total_prompts} prompt ({len(self.chunks)} đợt gom 5 prompt/lần) "
+            f"trên {len(self.accounts)} tài khoản (Song song: {self.concurrency} tài khoản, Chạy ẩn: {self.headless}, "
+            f"F5 ngầm mỗi: {self.auto_refresh_minutes} phút)."
         )
 
-        # Phân bổ round-robin các source_items cho từng tài khoản
-        account_assignments: dict[str, list[str]] = {acc.account_id: [] for acc in self.accounts}
-        for idx, item in enumerate(self.source_items):
+        account_chunk_map: dict[str, list[MuseBatchChunk]] = {acc.account_id: [] for acc in self.accounts}
+        for idx, chunk in enumerate(self.chunks):
             target_acc = self.accounts[idx % len(self.accounts)]
-            account_assignments[target_acc.account_id].append(item)
+            account_chunk_map[target_acc.account_id].append(chunk)
 
-        pending_total = total_items
+        total_items = self.total_prompts
         completed_total = 0
         failed_total = 0
-        quota_total = 0
-        self.stats_signal.emit(pending_total, completed_total, failed_total, quota_total)
+        remaining_total = total_items
+        self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
 
-        # Worker pool execution
-        account_queue = [acc for acc in self.accounts if account_assignments[acc.account_id]]
+        account_queue = [acc for acc in self.accounts if account_chunk_map[acc.account_id]]
         queue_lock = threading.Lock()
 
         def worker_task(worker_id: int) -> None:
-            nonlocal pending_total, completed_total, failed_total, quota_total
+            nonlocal completed_total, failed_total, remaining_total
             while not self._stopped:
                 current_acc = None
                 with queue_lock:
@@ -347,10 +361,11 @@ class MuseCookieBatchRunnerThread(QThread):
                     self.worker_status_signal.emit(worker_id, "Sẵn sàng (Đã hết hàng đợi)")
                     break
 
-                assigned = account_assignments[current_acc.account_id]
+                assigned_chunks = account_chunk_map[current_acc.account_id]
                 acc_label = current_acc.combo_label
+                total_chunk_prompts = sum(len(c.prompt_items) for c in assigned_chunks)
                 self.worker_status_signal.emit(worker_id, f"Khởi tạo Chrome [{acc_label}]…")
-                self.log_signal.emit(f"⚙ [Luồng {worker_id}] Nhận tài khoản {acc_label}: {len(assigned)} {action_name}.")
+                self.log_signal.emit(f"⚙ [Luồng {worker_id}] Nhận tài khoản {acc_label}: {len(assigned_chunks)} đợt ({total_chunk_prompts} prompt {action_name}).")
 
                 profile_dir = MUSE_COOKIE_PROFILES_DIR / current_acc.account_id
                 profile_dir.mkdir(parents=True, exist_ok=True)
@@ -358,6 +373,7 @@ class MuseCookieBatchRunnerThread(QThread):
 
                 driver = None
                 acc_completed = 0
+                last_f5_time = time.monotonic()
                 try:
                     driver = create_muse_chrome_driver(profile_dir, download_dir=download_dir, headless=self.headless)
                     driver.set_page_load_timeout(35)
@@ -365,34 +381,70 @@ class MuseCookieBatchRunnerThread(QThread):
                     inject_cookies_to_driver(driver, current_acc.cookies, target_url=MUSE_DEFAULT_URL)
                     time.sleep(1.5)
 
-                    for item_idx, item in enumerate(assigned, 1):
+                    # Tự động bắt email từ phiên Muse nếu chưa có
+                    if not current_acc.email:
+                        found_em = extract_email_from_muse_page(driver)
+                        if found_em:
+                            current_acc.email = found_em
+                            self.account_email_found_signal.emit(current_acc.account_id, found_em)
+
+                    for chunk_idx, chunk in enumerate(assigned_chunks, 1):
                         if self._stopped:
                             break
 
-                        item_name = Path(item).name if not str(item).startswith("Prompt #") else str(item)
-                        self.worker_status_signal.emit(
-                            worker_id,
-                            f"[{acc_label}] Đang tạo {action_name} ({item_idx}/{len(assigned)}): {item_name}",
-                        )
-                        self.log_signal.emit(f"🎬 [Luồng {worker_id}] {acc_label}: Bắt đầu xử lý {item_name}…")
+                        # Kiểm tra chu kỳ tự động F5 ngầm
+                        if self.auto_refresh_minutes > 0 and (time.monotonic() - last_f5_time) >= (self.auto_refresh_minutes * 60):
+                            self.worker_status_signal.emit(worker_id, f"F5 ngầm [{acc_label}]…")
+                            self.log_signal.emit(f"🔄 [Luồng {worker_id}] F5 Muse ngầm theo chu kỳ {self.auto_refresh_minutes} phút…")
+                            try:
+                                driver.refresh()
+                                time.sleep(2.0)
+                            except Exception:
+                                pass
+                            last_f5_time = time.monotonic()
+
+                        n_prompts = len(chunk.prompt_items)
+                        first_id = chunk.prompt_items[0][0]
+                        last_id = chunk.prompt_items[-1][0]
+                        chunk_label = f"Đợt {chunk_idx}/{len(assigned_chunks)} (Prompt #{first_id:04d} - #{last_id:04d})"
+                        self.worker_status_signal.emit(worker_id, f"[{acc_label}] {chunk_label}…")
+                        self.log_signal.emit(f"🎬 [Luồng {worker_id}] {acc_label}: Bắt đầu gửi nhóm {n_prompts} prompt ({chunk_label})…")
 
                         try:
-                            # 1. Upload ảnh nếu có ảnh mẫu
-                            source_path = Path(item) if not str(item).startswith("Prompt #") else None
-                            if source_path and source_path.is_file():
-                                inputs = _find(driver, "css selector", "input[type='file']")
-                                if not inputs:
-                                    _click_by_text(driver, ATTACH_TEXTS)
+                            # 1. Upload ảnh nếu có ảnh mẫu trong đợt này
+                            if chunk.images:
+                                valid_imgs = [p for p in chunk.images if p and p.is_file()]
+                                if valid_imgs:
+                                    self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang tải {len(valid_imgs)} ảnh mẫu lên Muse…")
                                     inputs = _find(driver, "css selector", "input[type='file']")
-                                for field in reversed(inputs):
-                                    try:
-                                        field.send_keys(str(source_path.resolve()))
-                                        break
-                                    except Exception:
-                                        continue
-                                time.sleep(1.0)
+                                    if not inputs:
+                                        _click_by_text(driver, ATTACH_TEXTS)
+                                        inputs = _find(driver, "css selector", "input[type='file']")
+                                    for field in reversed(inputs):
+                                        try:
+                                            joined = "\n".join(str(p.resolve()) for p in valid_imgs)
+                                            field.send_keys(joined)
+                                            break
+                                        except Exception:
+                                            for p in valid_imgs:
+                                                try:
+                                                    field.send_keys(str(p.resolve()))
+                                                    time.sleep(0.3)
+                                                except Exception:
+                                                    pass
+                                            break
+                                    time.sleep(1.5)
 
-                            # 2. Điền prompt
+                            # 2. Xây dựng khung prompt chuẩn theo format yêu cầu
+                            chunk_prompt_text = build_muse_chunk_prompt(
+                                chunk.prompt_items,
+                                action_type=self.task_mode,
+                                aspect_ratio=self.settings.aspect_ratio or "16:9",
+                                duration=self.settings.duration or "11s",
+                                style_suffix=self.style_suffix,
+                            )
+
+                            # 3. Điền prompt gom vào ô chat Muse
                             for selector in PROMPT_SELECTORS:
                                 fields = _find(driver, "css selector", selector)
                                 filled = False
@@ -406,7 +458,7 @@ class MuseCookieBatchRunnerThread(QThread):
                                             f.clear()
                                         else:
                                             f.send_keys("\ue009", "a")
-                                        f.send_keys(self.prompt)
+                                        f.send_keys(chunk_prompt_text)
                                         filled = True
                                         break
                                     except Exception:
@@ -415,7 +467,7 @@ class MuseCookieBatchRunnerThread(QThread):
                                     break
                             time.sleep(0.5)
 
-                            # 3. Gửi / Bấm Create
+                            # 4. Gửi yêu cầu Create
                             submitted = _click_by_text(driver, SUBMIT_TEXTS)
                             if not submitted:
                                 for btn in reversed(_find(driver, "css selector", "button[type='submit']")):
@@ -424,16 +476,15 @@ class MuseCookieBatchRunnerThread(QThread):
                                         submitted = True
                                         break
 
-                            # 4. Chờ tạo kết quả và tải xuống
+                            # 5. Chờ Muse hoàn thành tạo video / ảnh
                             start_wait = time.monotonic()
                             baseline_vids = {_video_fingerprint(v) for v in _find(driver, "css selector", "video")}
                             video_found = False
-                            while time.monotonic() - start_wait < 180.0:
+                            while time.monotonic() - start_wait < 240.0:
                                 if self._stopped:
                                     break
                                 body = _body_text(driver).lower()
                                 if any(m in body for m in QUOTA_MARKERS):
-                                    quota_total += 1
                                     raise RuntimeError(f"Hết quota/credit trên tài khoản {acc_label}.")
 
                                 for v in reversed(_find(driver, "css selector", "video")):
@@ -442,49 +493,51 @@ class MuseCookieBatchRunnerThread(QThread):
                                         break
                                 if video_found:
                                     break
-                                time.sleep(1.5)
+                                time.sleep(2.0)
 
-                            # 5. Yêu cầu tải xuống
+                            # 6. Yêu cầu tải xuống các video thành phẩm
                             _click_by_text(driver, DOWNLOAD_TEXTS, reverse=True)
 
-                            # 6. Chờ file tải về download_dir
-                            downloaded_file = None
+                            # 7. Chờ file tải về download_dir
                             start_dl_wait = time.monotonic()
+                            downloaded_files: list[Path] = []
                             while time.monotonic() - start_dl_wait < 60.0:
                                 if self._stopped:
                                     break
-                                files = [
+                                current_files = [
                                     p for p in download_dir.iterdir()
                                     if p.is_file() and not p.name.endswith((".crdownload", ".tmp"))
                                 ]
-                                if files:
-                                    downloaded_file = max(files, key=lambda p: p.stat().st_mtime)
-                                    time.sleep(0.5)
+                                if current_files:
+                                    downloaded_files = current_files
+                                    time.sleep(1.0)
                                     break
                                 time.sleep(1.0)
 
-                            if downloaded_file and downloaded_file.exists():
-                                self.output_dir.mkdir(parents=True, exist_ok=True)
-                                target_dest = self.output_dir / f"{Path(item_name).stem}_{int(time.time())}{downloaded_file.suffix}"
-                                shutil.move(str(downloaded_file), str(target_dest))
-                                completed_total += 1
-                                acc_completed += 1
-                                self.log_signal.emit(f"✔ [Luồng {worker_id}] {acc_label}: Đã lưu {target_dest.name}")
-                            else:
-                                completed_total += 1
-                                acc_completed += 1
-                                self.log_signal.emit(f"✔ [Luồng {worker_id}] {acc_label}: Đã gửi thành công {item_name}.")
+                            self.output_dir.mkdir(parents=True, exist_ok=True)
+                            if downloaded_files:
+                                for df in downloaded_files:
+                                    target_dest = self.output_dir / f"Prompt{first_id:04d}_{int(time.time())}_{df.name}"
+                                    shutil.move(str(df), str(target_dest))
+                                    self.log_signal.emit(f"✔ [Luồng {worker_id}] {acc_label}: Đã lưu {target_dest.name}")
 
-                        except Exception as item_err:
-                            failed_total += 1
-                            self.log_signal.emit(f"❌ [Luồng {worker_id}] {acc_label} lỗi khi xử lý {item_name}: {item_err}")
-                            if "quota" in str(item_err).lower():
+                            completed_total += n_prompts
+                            remaining_total = max(0, total_items - (completed_total + failed_total))
+                            acc_completed += n_prompts
+                            self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
+                            pct = int(((completed_total + failed_total) / max(1, total_items)) * 100)
+                            self.progress_signal.emit(pct, f"Đang xử lý: {completed_total}/{total_items} hoàn tất")
+                            self.log_signal.emit(f"✔ [Luồng {worker_id}] {acc_label}: Hoàn thành nhóm {n_prompts} prompt ({chunk_label}).")
+
+                        except Exception as chunk_err:
+                            failed_total += n_prompts
+                            remaining_total = max(0, total_items - (completed_total + failed_total))
+                            self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
+                            pct = int(((completed_total + failed_total) / max(1, total_items)) * 100)
+                            self.progress_signal.emit(pct, f"Lỗi nhóm {chunk_label}: {chunk_err}")
+                            self.log_signal.emit(f"❌ [Luồng {worker_id}] {acc_label} lỗi nhóm ({chunk_label}): {chunk_err}")
+                            if "quota" in str(chunk_err).lower():
                                 break
-
-                        pending_total = max(0, total_items - (completed_total + failed_total))
-                        pct = int(((completed_total + failed_total) / total_items) * 100)
-                        self.progress_signal.emit(pct, f"Đang xử lý: {completed_total}/{total_items} hoàn tất")
-                        self.stats_signal.emit(pending_total, completed_total, failed_total, quota_total)
 
                     self.account_completed_signal.emit(current_acc.account_id, acc_completed)
                 except Exception as acc_err:
@@ -499,7 +552,7 @@ class MuseCookieBatchRunnerThread(QThread):
 
             self.worker_status_signal.emit(worker_id, "Đã hoàn thành")
 
-        # Launch concurrent workers
+        # Khởi chạy các worker song song (1 - 5)
         threads = []
         for w_idx in range(1, self.concurrency + 1):
             t = threading.Thread(target=worker_task, args=(w_idx,), daemon=True)
@@ -510,8 +563,8 @@ class MuseCookieBatchRunnerThread(QThread):
             t.join()
 
         self.progress_signal.emit(100, f"Hoàn tất: {completed_total} thành công, {failed_total} lỗi")
-        self.log_signal.emit(f"🏁 Đã hoàn tất toàn bộ batch: {completed_total}/{total_items} thành công.")
-        self.batch_finished_signal.emit(True, f"Đã xử lý xong batch: {completed_total} thành công.")
+        self.log_signal.emit(f"🏁 Đã hoàn tất toàn bộ batch: {completed_total}/{total_items} thành công, {failed_total} lỗi.")
+        self.batch_finished_signal.emit(True, f"Đã xử lý xong: {completed_total} thành công, {failed_total} lỗi.")
 
 
 class MuseAccountsPage(QWidget):
@@ -715,6 +768,51 @@ class MuseAccountsPage(QWidget):
         cfg_row.addWidget(lbl_conc)
         cfg_row.addWidget(self.concurrency_spin)
         cfg_row.addWidget(lbl_conc_desc)
+
+        # Box F5 Muse mỗi X phút (Khớp ảnh 2)
+        f5_box = QWidget()
+        f5_box.setStyleSheet(
+            "QWidget { "
+            "background: #fffbeb; border: 1.5px solid #d97706; border-radius: 6px; "
+            "padding: 1px 4px; "
+            "}"
+        )
+        f5_layout = QHBoxLayout(f5_box)
+        f5_layout.setContentsMargins(6, 2, 6, 2)
+        f5_layout.setSpacing(6)
+
+        lbl_f5 = QLabel("🔄 F5 Muse mỗi")
+        lbl_f5.setStyleSheet("font-weight: 700; color: #9a3412; font-size: 12px; border: none; background: transparent;")
+
+        self.f5_spin = QSpinBox()
+        self.f5_spin.setRange(0, 1440)
+        self.f5_spin.setValue(int(getattr(self.settings, "muse_auto_refresh_minutes", 60) or 60))
+        self.f5_spin.setMinimumHeight(28)
+        self.f5_spin.setStyleSheet(
+            "font-weight: 700; color: #9a3412; background: #ffffff; border: 1px solid #d97706; border-radius: 4px; padding: 2px 4px;"
+        )
+        self.f5_spin.valueChanged.connect(self._on_f5_interval_changed)
+
+        lbl_f5_unit = QLabel("phút (0 = tắt)")
+        lbl_f5_unit.setStyleSheet("font-weight: 600; color: #9a3412; font-size: 12px; border: none; background: transparent;")
+
+        btn_f5_help = QPushButton("❓ Tác dụng")
+        btn_f5_help.setCursor(Qt.PointingHandCursor)
+        btn_f5_help.setStyleSheet(
+            "QPushButton { "
+            "background: #fed7aa; color: #7c2d12; font-weight: 700; font-size: 11px; "
+            "border: 1px solid #f97316; border-radius: 4px; padding: 3px 8px; "
+            "} "
+            "QPushButton:hover { background: #fdba74; }"
+        )
+        btn_f5_help.clicked.connect(self._show_f5_help_dialog)
+
+        f5_layout.addWidget(lbl_f5)
+        f5_layout.addWidget(self.f5_spin)
+        f5_layout.addWidget(lbl_f5_unit)
+        f5_layout.addWidget(btn_f5_help)
+        cfg_row.addWidget(f5_box)
+
         cfg_row.addStretch()
         cfg_row.addWidget(self.btn_select_all)
         cfg_row.addWidget(self.btn_deselect_all)
@@ -817,23 +915,87 @@ class MuseAccountsPage(QWidget):
         root.addWidget(self.source_group)
 
         # =========================================================================
-        # PROMPT BOX
+        # PROMPT BOX (KHỚP ẢNH 3 & 4)
         # =========================================================================
-        self.prompt_card = QGroupBox("✨ Prompt Tạo Video AI (Motion Prompt)")
+        self.prompt_card = QGroupBox("Prompt (mỗi dòng 1 prompt)")
         prompt_vbox = QVBoxLayout(self.prompt_card)
-        prompt_vbox.setSpacing(8)
+        prompt_vbox.setSpacing(10)
 
-        self.prompt_hint = QLabel("Mô tả chuyển động, góc máy, ánh sáng (áp dụng chung cho batch ảnh):")
-        self.prompt_hint.setStyleSheet("color: #475569; font-size: 12px; font-weight: 500;")
-        prompt_vbox.addWidget(self.prompt_hint)
+        # Thanh trên cùng: Nút NHẬP FILE .TXT + 4 badge thống kê
+        top_prompt_bar = QHBoxLayout()
+        top_prompt_bar.setSpacing(10)
+
+        self.btn_import_txt = QPushButton("📁 NHẬP FILE .TXT")
+        self.btn_import_txt.setCursor(Qt.PointingHandCursor)
+        self.btn_import_txt.setMinimumHeight(38)
+        self.btn_import_txt.setStyleSheet(
+            "QPushButton { "
+            "background: #1d4ed8; color: #ffffff; font-weight: 800; font-size: 13px; "
+            "border: none; border-radius: 6px; padding: 6px 18px; "
+            "} "
+            "QPushButton:hover { background: #1e40af; }"
+        )
+        self.btn_import_txt.clicked.connect(self._import_prompts_file)
+        top_prompt_bar.addWidget(self.btn_import_txt)
+
+        # 4 Badge Thống kê (Khớp ảnh 4):
+        # [ 📋 Tổng 0 ]   [ ✔ Done 0 ]   [ ✖ Lỗi 0 ]   [ ⏳ Còn 0 ]
+        self.badge_total = QLabel("📋 Tổng 0")
+        self.badge_total.setStyleSheet(
+            "background: #f8fafc; color: #1e293b; border: 1.5px solid #cbd5e1; border-radius: 6px; "
+            "padding: 5px 12px; font-weight: 800; font-size: 13px;"
+        )
+
+        self.badge_done = QLabel("✔ Done 0")
+        self.badge_done.setStyleSheet(
+            "background: #ecfdf5; color: #047857; border: 1.5px solid #a7f3d0; border-radius: 6px; "
+            "padding: 5px 12px; font-weight: 800; font-size: 13px;"
+        )
+
+        self.badge_error = QLabel("✖ Lỗi 0")
+        self.badge_error.setStyleSheet(
+            "background: #fef2f2; color: #b91c1c; border: 1.5px solid #fecaca; border-radius: 6px; "
+            "padding: 5px 12px; font-weight: 800; font-size: 13px;"
+        )
+
+        self.badge_remaining = QLabel("⏳ Còn 0")
+        self.badge_remaining.setStyleSheet(
+            "background: #f0f9ff; color: #0369a1; border: 1.5px solid #bae6fd; border-radius: 6px; "
+            "padding: 5px 12px; font-weight: 800; font-size: 13px;"
+        )
+
+        top_prompt_bar.addWidget(self.badge_total)
+        top_prompt_bar.addWidget(self.badge_done)
+        top_prompt_bar.addWidget(self.badge_error)
+        top_prompt_bar.addWidget(self.badge_remaining)
+        top_prompt_bar.addStretch()
+
+        prompt_vbox.addLayout(top_prompt_bar)
 
         self.prompt = QPlainTextEdit()
-        self.prompt.setPlaceholderText("✍️ Nhập prompt điều khiển cho AI Muse tại đây...")
-        self.prompt.setMinimumHeight(75)
+        self.prompt.setPlaceholderText("Nhập hoặc dán các prompt tại đây (mỗi dòng 1 prompt), hoặc bấm [📁 NHẬP FILE .TXT]...")
+        self.prompt.setMinimumHeight(120)
         self.prompt.setStyleSheet(
-            "QPlainTextEdit { background: #ffffff; border: 2px solid #3b82f6; border-radius: 8px; padding: 8px; font-size: 13px; }"
+            "QPlainTextEdit { background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 6px; padding: 8px; font-size: 13px; font-family: monospace; }"
         )
+        self.prompt.textChanged.connect(self._on_prompt_text_changed)
         prompt_vbox.addWidget(self.prompt)
+
+        # Style Footer / Phong cách áp dụng chung
+        style_box = QHBoxLayout()
+        style_box.setSpacing(8)
+        lbl_style = QLabel("🎨 Phong cách chân khung mặc định:")
+        lbl_style.setStyleSheet("color: #475569; font-size: 12px; font-weight: 600;")
+        self.style_suffix_edit = QLineEdit(getattr(self.settings, "muse_style_suffix", "") or DEFAULT_MUSE_STYLE_SUFFIX)
+        self.style_suffix_edit.setMinimumHeight(32)
+        self.style_suffix_edit.setStyleSheet(
+            "QLineEdit { background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 5px; padding: 4px 8px; font-size: 12px; }"
+        )
+        self.style_suffix_edit.editingFinished.connect(self._save_style_suffix)
+        style_box.addWidget(lbl_style)
+        style_box.addWidget(self.style_suffix_edit, 1)
+        prompt_vbox.addLayout(style_box)
+
         root.addWidget(self.prompt_card)
 
         # =========================================================================
@@ -1012,8 +1174,8 @@ class MuseAccountsPage(QWidget):
             self.source_group.setTitle("📁 Nguồn Ảnh Mẫu (Tùy chọn) & Thư Mục Xuất Ảnh")
             self.source_label.setText("Thư mục ảnh mẫu:")
             self.image_folder.setPlaceholderText("(Tùy chọn) Chọn ảnh mẫu để tạo Image-to-Image, hoặc để trống để tạo thuần từ Prompt...")
-            self.prompt_card.setTitle("🎨 Prompt Tạo Ảnh AI (Image Prompt)")
-            self.prompt_hint.setText("Mô tả nội dung, phong cách, chi tiết ảnh (áp dụng cho batch prompt):")
+            self.prompt_card.setTitle("Prompt (mỗi dòng 1 prompt)")
+            self.prompt.setPlaceholderText("Nhập hoặc dán các prompt tạo ảnh (mỗi dòng 1 prompt), hoặc bấm [📁 NHẬP FILE .TXT]...")
             self.duration_box_widget.setVisible(False)
             self.image_quantity_widget.setVisible(True)
             self.quantity_label.setText("🖼 Số lượng ảnh:")
@@ -1024,8 +1186,8 @@ class MuseAccountsPage(QWidget):
             self.source_group.setTitle("📁 Nguồn Ảnh Mẫu (Tùy chọn) & Thư Mục Xuất Video")
             self.source_label.setText("Thư mục ảnh mẫu:")
             self.image_folder.setPlaceholderText("(Tùy chọn) Chọn ảnh để tạo Video từ ảnh, hoặc để trống để tạo thuần từ Prompt...")
-            self.prompt_card.setTitle("✨ Prompt Tạo Video AI (Motion Prompt)")
-            self.prompt_hint.setText("Mô tả chuyển động, bối cảnh, góc máy, ánh sáng (áp dụng cho batch prompt):")
+            self.prompt_card.setTitle("Prompt (mỗi dòng 1 prompt)")
+            self.prompt.setPlaceholderText("Nhập hoặc dán các prompt tạo video (mỗi dòng 1 prompt), hoặc bấm [📁 NHẬP FILE .TXT]...")
             self.duration_box_widget.setVisible(True)
             self.image_quantity_widget.setVisible(True)
             self.quantity_label.setText("🎬 Số lượng video:")
@@ -1301,10 +1463,17 @@ class MuseAccountsPage(QWidget):
         self._active_checker.all_finished.connect(self._on_all_accounts_checked_summary)
         self._active_checker.start()
 
-    def _on_account_checked(self, account_id: str, is_active: bool, message: str, time_str: str) -> None:
+    def _on_account_checked(self, account_id: str, is_active: bool, message: str, time_str: str, detected_email: str = "") -> None:
         status_key = "active" if is_active else "expired"
         self.cookie_store.update_status(account_id, status_key, message, last_checked=time_str)
+        if detected_email:
+            self.cookie_store.update_email(account_id, detected_email)
         self._reload_accounts_table()
+
+    def _on_account_email_found(self, account_id: str, detected_email: str) -> None:
+        if detected_email:
+            self.cookie_store.update_email(account_id, detected_email)
+            self._reload_accounts_table()
 
     def _on_checking_finished(self) -> None:
         self.btn_check_account.setEnabled(True)
@@ -1324,7 +1493,74 @@ class MuseAccountsPage(QWidget):
         )
 
     # =========================================================================
-    # BATCH ALLOCATION & EXECUTION (CONCURRENCY 1-5)
+    # PROMPT FILE IMPORT & BADGE UPDATES
+    # =========================================================================
+
+    def _import_prompts_file(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Chọn file text chứa các prompt (.txt)",
+            "",
+            "Text files (*.txt);;All files (*.*)",
+        )
+        if not file_path:
+            return
+
+        try:
+            content = ""
+            for encoding in ("utf-8-sig", "utf-8", "utf-16", "cp1258", "latin-1"):
+                try:
+                    content = Path(file_path).read_text(encoding=encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+
+            if not content.strip():
+                QMessageBox.warning(self, "File rỗng", "File .txt đã chọn không có nội dung.")
+                return
+
+            self.prompt.setPlainText(content)
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
+            self._update_prompt_badges(len(lines), 0, 0, len(lines))
+            self.global_status.setText(f"Đã nhập {len(lines):,} prompt từ file: {Path(file_path).name}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Lỗi đọc file", f"Không thể đọc file .txt: {exc}")
+
+    def _on_prompt_text_changed(self) -> None:
+        if self._active_runner and self._active_runner.isRunning():
+            return
+        lines = [line.strip() for line in self.prompt.toPlainText().splitlines() if line.strip()]
+        total = len(lines)
+        self._update_prompt_badges(total, 0, 0, total)
+
+    def _update_prompt_badges(self, total: int, done: int, error: int, remaining: int) -> None:
+        self.badge_total.setText(f"📋 Tổng {total:,}")
+        self.badge_done.setText(f"✔ Done {done:,}")
+        self.badge_error.setText(f"✖ Lỗi {error:,}")
+        self.badge_remaining.setText(f"⏳ Còn {remaining:,}")
+
+    def _on_f5_interval_changed(self, value: int) -> None:
+        self.settings.muse_auto_refresh_minutes = value
+        self.settings_changed.emit()
+
+    def _show_f5_help_dialog(self) -> None:
+        QMessageBox.information(
+            self,
+            "Tác dụng của Tự Động F5 Muse Ngầm",
+            "🔄 <b>Tác dụng của tính năng F5 Muse định kỳ:</b><br><br>"
+            "1. <b>Tránh treo phiên (Session Timeout):</b> Muse AI và Google session có thể hết hạn hoặc bị đơ cache sau một thời gian dài tạo liên tục hàng trăm/nghìn video.<br>"
+            "2. <b>Giải phóng RAM trình duyệt:</b> Mỗi lần F5 ngầm sẽ dọn dẹp bộ nhớ đệm (garbage collection) của trang web Muse.<br>"
+            "3. <b>Chạy hoàn toàn ngầm:</b> Quá trình làm mới diễn ra bên trong phiên Chrome ẩn, không làm hiện cửa sổ ra màn hình hay gián đoạn trải nghiệm của bạn.<br><br>"
+            "<i>Mặc định là 60 phút. Bạn có thể tăng/giảm hoặc nhập 0 để tắt.</i>",
+        )
+
+    def _save_style_suffix(self) -> None:
+        text = self.style_suffix_edit.text().strip()
+        self.settings.muse_style_suffix = text
+        self.settings_changed.emit()
+
+    # =========================================================================
+    # BATCH ALLOCATION & EXECUTION (GOM 5 PROMPT/LẦN, CONCURRENCY 1-5)
     # =========================================================================
 
     def _get_enabled_accounts(self) -> list[MuseCookieAccount]:
@@ -1336,23 +1572,31 @@ class MuseAccountsPage(QWidget):
             QMessageBox.warning(self, "Chưa chọn tài khoản", "Hãy tick ít nhất một tài khoản Muse trong bảng để chạy.")
             return
 
+        lines = [line.strip() for line in self.prompt.toPlainText().splitlines() if line.strip()]
+        total_prompts = len(lines)
+        if total_prompts == 0:
+            QMessageBox.warning(self, "Thiếu Prompt", "Vui lòng nhập ít nhất 1 prompt hoặc nạp file .txt.")
+            return
+
+        num_chunks = (total_prompts + 4) // 5
         is_image = (self._current_task_mode() == "image")
         type_name = "ảnh" if is_image else "video"
         folder_text = self.image_folder.text().strip()
 
+        imgs: list[Path] = []
         if folder_text:
-            images = self._scan_images()
-            if images:
-                self.global_status.setText(
-                    f"Đã phân bổ {len(images)} {type_name} từ thư mục ảnh qua {len(active_accounts)} tài khoản được tick "
-                    f"(Trung bình ~{len(images)//len(active_accounts)} {type_name}/tài khoản)."
-                )
-                return
+            imgs = self._scan_images()
 
-        qty = self.image_quantity.value()
-        self.global_status.setText(
-            f"Đã phân bổ {qty} lượt tạo {type_name} (Prompt thuần) qua {len(active_accounts)} tài khoản được tick."
-        )
+        if imgs:
+            self.global_status.setText(
+                f"Đã phân bổ {total_prompts:,} prompt ({len(imgs)} ảnh mẫu, chia thành {num_chunks:,} đợt gom 5 prompt/lần) "
+                f"qua {len(active_accounts)} tài khoản được tick (Trung bình ~{max(1, num_chunks // len(active_accounts))} đợt/tài khoản)."
+            )
+        else:
+            self.global_status.setText(
+                f"Đã phân bổ {total_prompts:,} prompt thuần {type_name} (chia thành {num_chunks:,} đợt gom 5 prompt/lần) "
+                f"qua {len(active_accounts)} tài khoản được tick (Trung bình ~{max(1, num_chunks // len(active_accounts))} đợt/tài khoản)."
+            )
 
     def _start_batch(self) -> None:
         active_accounts = self._get_enabled_accounts()
@@ -1360,9 +1604,9 @@ class MuseAccountsPage(QWidget):
             QMessageBox.warning(self, "Chưa chọn tài khoản", "Hãy tick ít nhất một tài khoản Muse trong bảng để chạy.")
             return
 
-        prompt = self.prompt.toPlainText().strip()
-        if not prompt:
-            QMessageBox.warning(self, "Thiếu Prompt", "Prompt không được để trống.")
+        lines = [line.strip() for line in self.prompt.toPlainText().splitlines() if line.strip()]
+        if not lines:
+            QMessageBox.warning(self, "Thiếu Prompt", "Prompt không được để trống (nhập mỗi dòng 1 prompt hoặc bấm [📁 NHẬP FILE .TXT]).")
             return
 
         output_dir = Path(self.output_folder.text().strip())
@@ -1372,41 +1616,46 @@ class MuseAccountsPage(QWidget):
 
         is_image = (self._current_task_mode() == "image")
         folder_text = self.image_folder.text().strip()
-        source_items: list[str] = []
-
+        all_images: list[Path] = []
         if folder_text:
-            imgs = self._scan_images()
-            if imgs:
-                source_items = [str(p) for p in imgs]
-            else:
-                qty = self.image_quantity.value()
-                source_items = [f"Prompt #{idx + 1}" for idx in range(qty)]
-        else:
-            qty = self.image_quantity.value()
-            source_items = [f"Prompt #{idx + 1}" for idx in range(qty)]
+            all_images = self._scan_images()
 
-        if not source_items:
-            QMessageBox.warning(self, "Không có mục cần chạy", "Không tìm thấy mục ảnh/prompt nào để xử lý.")
-            return
+        # Chia thành các chunk gom 5 prompt/lần (và 5 ảnh tương ứng nếu có)
+        chunks: list[MuseBatchChunk] = []
+        chunk_size = 5
+        prompt_tuples = list(enumerate(lines, start=1))  # (1-based index, text)
+        for i in range(0, len(prompt_tuples), chunk_size):
+            chunk_items = prompt_tuples[i : i + chunk_size]
+            chunk_imgs = all_images[i : i + chunk_size] if all_images else []
+            chunks.append(
+                MuseBatchChunk(
+                    chunk_index=len(chunks) + 1,
+                    prompt_items=chunk_items,
+                    images=chunk_imgs,
+                )
+            )
 
-        # Settings
+        # Cài đặt Muse
         settings = MuseVideoSettings(
             task_mode="image" if is_image else "video",
             model="",
-            aspect_ratio=self.aspect_ratio.currentText().strip() if self.aspect_ratio.currentText() != "Muse mặc định" else "",
-            duration=self.duration.currentText().strip() if self.duration.currentText() != "Muse mặc định" else "",
+            aspect_ratio=self.aspect_ratio.currentText().strip() if self.aspect_ratio.currentText() != "Muse mặc định" else "16:9",
+            duration=self.duration.currentText().strip() if self.duration.currentText() != "Muse mặc định" else "11s",
             resolution=self.resolution.currentText().strip() if self.resolution.currentText() != "Muse mặc định" else "",
             quantity=self.image_quantity.value() if is_image else 1,
         )
 
         concurrency = self.concurrency_spin.value()
         headless = self.headless_check.isChecked()
+        auto_f5_mins = self.f5_spin.value()
+        style_suffix = self.style_suffix_edit.text().strip()
 
         # Update UI state
         self.start_all.setEnabled(False)
         self.stop_all.setEnabled(True)
         self.overall_progress.setValue(0)
         self.logs_edit.clear()
+        self._update_prompt_badges(len(lines), 0, 0, len(lines))
 
         # Start Runner Thread
         self._active_runner = MuseCookieBatchRunnerThread(
@@ -1414,10 +1663,12 @@ class MuseAccountsPage(QWidget):
             concurrency=concurrency,
             headless=headless,
             task_mode="image" if is_image else "video",
-            prompt=prompt,
+            chunks=chunks,
+            total_prompts=len(lines),
             settings=settings,
             output_dir=output_dir,
-            source_items=source_items,
+            auto_refresh_minutes=auto_f5_mins,
+            style_suffix=style_suffix,
             parent=self,
         )
         self._active_runner.progress_signal.connect(self._on_batch_progress)
@@ -1425,6 +1676,7 @@ class MuseAccountsPage(QWidget):
         self._active_runner.log_signal.connect(self._on_batch_log)
         self._active_runner.worker_status_signal.connect(self._on_worker_status)
         self._active_runner.account_completed_signal.connect(self._on_account_task_completed)
+        self._active_runner.account_email_found_signal.connect(self._on_account_email_found)
         self._active_runner.batch_finished_signal.connect(self._on_batch_finished)
         self._active_runner.start()
 
@@ -1438,9 +1690,10 @@ class MuseAccountsPage(QWidget):
         self.overall_progress.setValue(percent)
         self.global_status.setText(text)
 
-    def _on_batch_stats(self, pending: int, completed: int, failed: int, quota: int) -> None:
+    def _on_batch_stats(self, total: int, completed: int, failed: int, remaining: int) -> None:
+        self._update_prompt_badges(total, completed, failed, remaining)
         self.stats_label.setText(
-            f"Chờ: {pending} • Thành công: {completed} • Lỗi: {failed} • Quota: {quota}"
+            f"Tổng: {total:,} • Đã hoàn thành: {completed:,} • Lỗi: {failed:,} • Còn lại: {remaining:,}"
         )
 
     def _on_batch_log(self, message: str) -> None:
@@ -1476,5 +1729,6 @@ class MuseAccountsPage(QWidget):
         self.image_count.setText("Chưa quét ảnh")
         self.logs_edit.clear()
         self.overall_progress.setValue(0)
-        self.stats_label.setText("Chờ: 0 • Thành công: 0 • Lỗi: 0 • Quota: 0")
+        self._update_prompt_badges(0, 0, 0, 0)
+        self.stats_label.setText("Tổng: 0 • Đã hoàn thành: 0 • Lỗi: 0 • Còn lại: 0")
         self.global_status.setText("Đã xóa dữ liệu UI.")

@@ -7,8 +7,11 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from auth.muse_cookies import (
+    DEFAULT_MUSE_STYLE_SUFFIX,
     MuseCookieAccount,
     MuseCookieAccountStore,
+    build_muse_chunk_prompt,
+    extract_email_from_muse_page,
     extract_email_from_text_or_cookies,
     inject_cookies_to_driver,
     parse_muse_cookies,
@@ -142,6 +145,56 @@ class TestMuseCookies(unittest.TestCase):
         self.assertTrue(mock_driver.delete_all_cookies.called)
         self.assertEqual(mock_driver.add_cookie.call_count, 2)
         self.assertTrue(mock_driver.refresh.called)
+
+
+    def test_build_muse_chunk_prompt_format(self):
+        prompts = [
+            (1, "slow pan of a smartphone in Paris street"),
+            (2, "static shot of a laptop in Berlin tech lab"),
+            (3, "top-down view of a mechanical keyboard in Amsterdam"),
+            (4, "macro close-up of a gaming mouse in Zurich"),
+            (5, "cinematic dolly of a smartwatch in Stockholm"),
+        ]
+        result = build_muse_chunk_prompt(
+            prompts,
+            action_type="video",
+            aspect_ratio="16:9",
+            duration="11s",
+        )
+        self.assertIn("Tạo 5 video riêng biệt, mỗi dòng dưới đây là 1 video.", result)
+        self.assertIn("Chỉ gửi video sau khi hoàn thành cả 5.", result)
+        self.assertIn("Đặt tên file mỗi video bắt đầu bằng mã ở đầu dòng (ví dụ: Prompt0001-ten-canh.mp4).", result)
+        self.assertIn("Prompt0001: slow pan of a smartphone in Paris street", result)
+        self.assertIn("Prompt0002: static shot of a laptop in Berlin tech lab", result)
+        self.assertIn("Prompt0003: top-down view of a mechanical keyboard in Amsterdam", result)
+        self.assertIn("Prompt0004: macro close-up of a gaming mouse in Zurich", result)
+        self.assertIn("Prompt0005: cinematic dolly of a smartwatch in Stockholm", result)
+        self.assertIn("Áp dụng cho tất cả video: Tỉ lệ 16:9, dài 11s, phong cách: " + DEFAULT_MUSE_STYLE_SUFFIX, result)
+
+    def test_build_muse_chunk_prompt_custom_style(self):
+        prompts = [(10, "sunset ocean wave")]
+        result = build_muse_chunk_prompt(
+            prompts,
+            action_type="image",
+            aspect_ratio="9:16",
+            style_suffix="Cyberpunk neon style",
+        )
+        self.assertIn("Tạo 1 ảnh riêng biệt, mỗi dòng dưới đây là 1 ảnh.", result)
+        self.assertIn("Prompt0010: sunset ocean wave", result)
+        self.assertIn("Áp dụng cho tất cả ảnh: Tỉ lệ 9:16, phong cách: Cyberpunk neon style", result)
+
+    def test_extract_email_from_muse_page(self):
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = "myuser@gmail.com"
+        email = extract_email_from_muse_page(mock_driver)
+        self.assertEqual(email, "myuser@gmail.com")
+
+    def test_extract_email_from_muse_page_fallback(self):
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = ""
+        mock_driver.page_source = "<html><body>Welcome user_test99@gmail.com to Muse!</body></html>"
+        email = extract_email_from_muse_page(mock_driver)
+        self.assertEqual(email, "user_test99@gmail.com")
 
 
 if __name__ == "__main__":

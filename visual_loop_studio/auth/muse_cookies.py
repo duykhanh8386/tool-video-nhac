@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from utils.config import read_json, write_json
 from utils.paths import DATA_DIR, USER_DATA_ROOT
@@ -20,6 +20,13 @@ MUSE_COOKIE_PROFILES_DIR = USER_DATA_ROOT / "MuseCookieProfiles"
 MUSE_DEFAULT_URL = "https://muse.ai/"
 
 EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+DEFAULT_MUSE_STYLE_SUFFIX = (
+    "Cinematic, photorealistic,slow smooth camera movement, peaceful emotional atmosphere, "
+    "soft cinematic lighting, beautiful natural colors, elegant composition, subtle motion, "
+    "shallow depth of field, highly detailed, 4K HDR, no people, no animals, no text, no logo, "
+    "no sudden movement, no camera shak."
+)
 
 
 def _utc_now_formatted() -> str:
@@ -119,21 +126,159 @@ def extract_email_from_text_or_cookies(raw_text: str, cookies: list[dict[str, An
                     if candidate and "@" in candidate and "." in candidate:
                         return candidate.lower()
 
-    # 3. Check cookie values directly
+    # 3. Check cookie values directly and URL-unquoted values
     for item in cookies:
         name = str(item.get("name") or "").lower()
         val = str(item.get("value") or "")
+        unquoted = unquote(val)
+
+        match = EMAIL_REGEX.search(unquoted)
+        if match:
+            return match.group(0).lower()
+
         if "email" in name or "user" in name:
             match = EMAIL_REGEX.search(val)
             if match:
                 return match.group(0).lower()
 
-    # 4. Search raw text
+        # Check if value is JSON containing email
+        if unquoted.startswith("{") and unquoted.endswith("}"):
+            try:
+                data = json.loads(unquoted)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(v, str):
+                            m = EMAIL_REGEX.search(v)
+                            if m:
+                                return m.group(0).lower()
+            except Exception:
+                pass
+
+    # 4. Search raw text (both original and unquoted)
     match = EMAIL_REGEX.search(raw_text)
     if match:
         return match.group(0).lower()
 
+    unquoted_text = unquote(raw_text)
+    match = EMAIL_REGEX.search(unquoted_text)
+    if match:
+        return match.group(0).lower()
+
     return ""
+
+
+def extract_email_from_muse_page(driver: Any) -> str:
+    """Extract signed-in user's email from the live Muse AI web page via JavaScript & DOM."""
+    if driver is None:
+        return ""
+
+    js_code = """
+    try {
+        // 1. Check common global objects
+        const globals = [
+            window.__USER__,
+            window.user,
+            window.currentUser,
+            window.__INITIAL_STATE__,
+            window.__NEXT_DATA__,
+            window.__NUXT__,
+            window.__MUSE_USER__
+        ];
+        for (const g of globals) {
+            if (!g) continue;
+            const str = typeof g === 'string' ? g : JSON.stringify(g);
+            const m = str.match(/[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+/);
+            if (m) return m[0];
+        }
+
+        // 2. Check localStorage
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i) || '';
+            const v = localStorage.getItem(k) || '';
+            const m = (k + ' ' + v).match(/[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+/);
+            if (m) return m[0];
+        }
+
+        // 3. Check sessionStorage
+        for (let i = 0; i < sessionStorage.length; i++) {
+            const k = sessionStorage.key(i) || '';
+            const v = sessionStorage.getItem(k) || '';
+            const m = (k + ' ' + v).match(/[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+/);
+            if (m) return m[0];
+        }
+
+        // 4. Check DOM attributes & text
+        const nodes = document.querySelectorAll('button, a, div, span, img, [data-testid], [aria-label], [title]');
+        for (const el of nodes) {
+            const txt = [
+                el.innerText || '',
+                el.getAttribute('title') || '',
+                el.getAttribute('aria-label') || '',
+                el.getAttribute('alt') || '',
+                el.getAttribute('data-email') || '',
+                el.getAttribute('href') || ''
+            ].join(' ');
+            const m = txt.match(/[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+/);
+            if (m) return m[0];
+        }
+    } catch (e) {
+        return '';
+    }
+    return '';
+    """
+    try:
+        res = driver.execute_script(js_code)
+        if res and isinstance(res, str) and "@" in res:
+            match = EMAIL_REGEX.search(res)
+            if match:
+                return match.group(0).lower()
+    except Exception:
+        pass
+
+    try:
+        source = str(driver.page_source or "")
+        for match in EMAIL_REGEX.finditer(source):
+            em = match.group(0).lower()
+            if not any(skip in em for skip in ("support@", "help@", "info@", "contact@", "w3.org", "schema.org")):
+                return em
+    except Exception:
+        pass
+
+    return ""
+
+
+def build_muse_chunk_prompt(
+    prompts_with_indices: list[tuple[int, str]],
+    *,
+    action_type: str = "video",
+    aspect_ratio: str = "16:9",
+    duration: str = "11s",
+    style_suffix: str = "",
+) -> str:
+    """Build the standardized 5-prompt batch frame for Muse AI."""
+    n = len(prompts_with_indices)
+    type_name = "video" if action_type == "video" else "ảnh"
+    ext = ".mp4" if action_type == "video" else ".png"
+
+    header = (
+        f"Tạo {n} {type_name} riêng biệt, mỗi dòng dưới đây là 1 {type_name}. "
+        f"Chỉ gửi {type_name} sau khi hoàn thành cả {n}. "
+        f"Đặt tên file mỗi {type_name} bắt đầu bằng mã ở đầu dòng (ví dụ: Prompt0001-ten-canh{ext})."
+    )
+
+    lines = [header]
+    for idx, prompt_text in prompts_with_indices:
+        cleaned = str(prompt_text or "").strip()
+        lines.append(f"Prompt{idx:04d}: {cleaned}")
+
+    ratio_str = aspect_ratio.strip() if aspect_ratio.strip() else "16:9"
+    dur_str = f", dài {duration.strip()}" if action_type == "video" and duration.strip() else ""
+    style_str = style_suffix.strip() if style_suffix.strip() else DEFAULT_MUSE_STYLE_SUFFIX
+
+    footer = f"Áp dụng cho tất cả {type_name}: Tỉ lệ {ratio_str}{dur_str}, phong cách: {style_str}"
+    lines.append(footer)
+
+    return "\n".join(lines)
 
 
 def parse_muse_cookies(raw: str) -> list[dict[str, Any]]:
@@ -480,6 +625,8 @@ def check_single_cookie_account(
                     is_active = True
 
         if is_active:
+            if not detected_email:
+                detected_email = extract_email_from_muse_page(driver)
             return True, detected_email, "Đang hoạt động"
         else:
             return False, detected_email, "Hết hạn hoặc chưa đăng nhập"
