@@ -269,6 +269,7 @@ def build_muse_chunk_prompt(
     lines = [header]
     for idx, prompt_text in prompts_with_indices:
         cleaned = str(prompt_text or "").strip()
+        cleaned = re.sub(r"^(?:prompt\s*\d+\s*:\s*)", "", cleaned, flags=re.IGNORECASE).strip()
         lines.append(f"Prompt{idx:04d}: {cleaned}")
 
     ratio_str = aspect_ratio.strip() if aspect_ratio.strip() else "16:9"
