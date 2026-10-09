@@ -106,13 +106,34 @@ def _try_decode_jwt_payload(token: str) -> dict[str, Any] | None:
     return None
 
 
+def _is_valid_email(email: str) -> bool:
+    if not email or "@" not in email:
+        return False
+    em = email.strip().lower()
+    invalid_exts = (
+        ".webp", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".bmp",
+        ".css", ".js", ".html", ".woff", ".woff2", ".ttf", ".mp4", ".mp3"
+    )
+    if any(em.endswith(ext) for ext in invalid_exts):
+        return False
+    if "@2x." in em or "@3x." in em or em.startswith("icon-") or em.startswith("image-"):
+        return False
+    parts = em.split("@")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return False
+    domain_parts = parts[1].split(".")
+    if len(domain_parts) < 2 or not domain_parts[-1] or len(domain_parts[-1]) < 2:
+        return False
+    return True
+
+
 def extract_email_from_text_or_cookies(raw_text: str, cookies: list[dict[str, Any]], filename: str = "") -> str:
     """Best-effort extraction of user email from filename, cookie values, or raw text."""
     # 1. Check filename
     if filename:
         clean_stem = Path(filename).stem
         match = EMAIL_REGEX.search(clean_stem)
-        if match:
+        if match and _is_valid_email(match.group(0)):
             return match.group(0).lower()
 
     # 2. Check JWT tokens in cookie values
@@ -123,7 +144,7 @@ def extract_email_from_text_or_cookies(raw_text: str, cookies: list[dict[str, An
             if payload:
                 for email_key in ("email", "user_email", "mail", "sub"):
                     candidate = str(payload.get(email_key) or "")
-                    if candidate and "@" in candidate and "." in candidate:
+                    if candidate and _is_valid_email(candidate):
                         return candidate.lower()
 
     # 3. Check cookie values directly and URL-unquoted values
@@ -133,12 +154,12 @@ def extract_email_from_text_or_cookies(raw_text: str, cookies: list[dict[str, An
         unquoted = unquote(val)
 
         match = EMAIL_REGEX.search(unquoted)
-        if match:
+        if match and _is_valid_email(match.group(0)):
             return match.group(0).lower()
 
         if "email" in name or "user" in name:
             match = EMAIL_REGEX.search(val)
-            if match:
+            if match and _is_valid_email(match.group(0)):
                 return match.group(0).lower()
 
         # Check if value is JSON containing email
@@ -149,19 +170,19 @@ def extract_email_from_text_or_cookies(raw_text: str, cookies: list[dict[str, An
                     for k, v in data.items():
                         if isinstance(v, str):
                             m = EMAIL_REGEX.search(v)
-                            if m:
+                            if m and _is_valid_email(m.group(0)):
                                 return m.group(0).lower()
             except Exception:
                 pass
 
     # 4. Search raw text (both original and unquoted)
     match = EMAIL_REGEX.search(raw_text)
-    if match:
+    if match and _is_valid_email(match.group(0)):
         return match.group(0).lower()
 
     unquoted_text = unquote(raw_text)
     match = EMAIL_REGEX.search(unquoted_text)
-    if match:
+    if match and _is_valid_email(match.group(0)):
         return match.group(0).lower()
 
     return ""
@@ -230,7 +251,7 @@ def extract_email_from_muse_page(driver: Any) -> str:
         res = driver.execute_script(js_code)
         if res and isinstance(res, str) and "@" in res:
             match = EMAIL_REGEX.search(res)
-            if match:
+            if match and _is_valid_email(match.group(0)):
                 return match.group(0).lower()
     except Exception:
         pass
@@ -239,7 +260,7 @@ def extract_email_from_muse_page(driver: Any) -> str:
         source = str(driver.page_source or "")
         for match in EMAIL_REGEX.finditer(source):
             em = match.group(0).lower()
-            if not any(skip in em for skip in ("support@", "help@", "info@", "contact@", "w3.org", "schema.org")):
+            if _is_valid_email(em) and not any(skip in em for skip in ("support@", "help@", "info@", "contact@", "w3.org", "schema.org")):
                 return em
     except Exception:
         pass

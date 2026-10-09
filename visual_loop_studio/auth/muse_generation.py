@@ -374,25 +374,65 @@ def _dismiss_muse_popups(driver: Any) -> None:
 
 
 def _query_muse_videos(driver: Any) -> list[dict[str, str]]:
-    """Trich xuat danh sach video san sinh tu DOM trang Muse theo chuan MuseStudio (chi lay cac phan tu data-hatch-video-src)."""
+    """Trich xuat danh sach video san sinh tu DOM trang Muse theo chuan MuseStudio (lay ca data-hatch-video-src va the video chat, bo qua avatar mascot)."""
     try:
         return driver.execute_script("""
             window.__mavSeq = window.__mavSeq || 0;
             const results = [];
+            const seenIds = new Set();
+            const seenSrcs = new Set();
 
-            // Selector chuan 100% cua MuseStudio: chi lay cac container data-hatch-video-src sinh ra tu chat
-            document.querySelectorAll('[data-hatch-video-src]').forEach(w => {
-                const src = (w.getAttribute('data-hatch-video-src') || '').trim();
+            // Quet ca data-hatch-video-src, data-hatch-video-wrapper va the video trong message
+            const candidates = document.querySelectorAll(
+                '[data-hatch-video-src], [data-hatch-video-wrapper], [data-message-item="true"] video, [data-message-role] video, video'
+            );
+
+            candidates.forEach(w => {
+                // Bo qua cac video UI/avatar/mascot cua he thong
+                if (w.closest('[data-hatch-status-sidebar-avatar], [data-hatch-avatar-layer], [data-hatch-media-owner="avatar-layer"], aside, nav, header')) {
+                    return;
+                }
+
+                const vidEl = (w.tagName === 'VIDEO') ? w : w.querySelector('video');
+                let src = (
+                    w.getAttribute('data-hatch-video-src') ||
+                    (vidEl ? (vidEl.currentSrc || vidEl.src || vidEl.getAttribute('src')) : '') ||
+                    ''
+                ).trim();
+
+                if (!src) {
+                    const aLink = w.querySelector('a[href*=".mp4"], a[download]') ||
+                                  w.parentElement?.querySelector('a[href*=".mp4"]');
+                    if (aLink) src = (aLink.getAttribute('href') || '').trim();
+                }
+
                 if (!src) return;
 
-                if (!w.dataset.mavId) w.dataset.mavId = String(++window.__mavSeq);
-                const label = (w.getAttribute('aria-label') || '').trim();
+                // Gan mavId nhat quan cho ca container va video con
+                let mavId = w.dataset.mavId || (vidEl ? vidEl.dataset.mavId : '');
+                if (!mavId) {
+                    mavId = String(++window.__mavSeq);
+                    w.dataset.mavId = mavId;
+                    if (vidEl) vidEl.dataset.mavId = mavId;
+                }
+
+                if (seenIds.has(mavId) || seenSrcs.has(src)) return;
+                seenIds.add(mavId);
+                seenSrcs.add(src);
+
+                const label = (w.getAttribute('aria-label') || (vidEl ? vidEl.getAttribute('aria-label') : '') || '').trim();
                 const m = label.match(/[^\\s/\\\\]+\\.(mp4|webm|mov)/i);
-                const poster = (w.getAttribute('data-hatch-video-poster') || '').split('?')[0];
+                const poster = (
+                    w.getAttribute('data-hatch-video-poster') ||
+                    (vidEl ? (vidEl.getAttribute('poster') || '') : '') ||
+                    ''
+                ).split('?')[0];
+
                 const msg = w.closest('[data-message-item="true"],[data-message-role],[data-message-group-id],[class*="message" i]') || w.parentElement;
                 const txt = msg ? (msg.innerText || '') : '';
+
                 results.push({
-                    id: w.dataset.mavId,
+                    id: mavId,
                     src: src,
                     name: m ? m[0] : '',
                     label: label,
@@ -430,7 +470,8 @@ def _download_muse_video_file(
             var timer = setTimeout(function() { done(null); }, 18000);
 
             var w = vidId ? document.querySelector('[data-mav-id="' + vidId + '"]') : null;
-            var fetchUrl = (w && w.getAttribute('data-hatch-video-src')) ? w.getAttribute('data-hatch-video-src') : src;
+            var vidTag = w ? (w.tagName === 'VIDEO' ? w : w.querySelector('video')) : null;
+            var fetchUrl = (w && w.getAttribute('data-hatch-video-src')) || (vidTag && (vidTag.currentSrc || vidTag.src)) || src;
 
             fetch(fetchUrl, { credentials: 'include' })
                 .then(function(res) {
