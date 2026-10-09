@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import shutil
 import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
+
+import requests
 
 from auth.muse_login import (
     CLICKABLE_SELECTOR,
