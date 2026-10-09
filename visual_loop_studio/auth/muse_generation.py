@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-import requests
+import urllib.request
 
 from auth.muse_login import (
     CLICKABLE_SELECTOR,
@@ -444,15 +444,20 @@ def _download_muse_video_file(
     # Tang 2: Direct HTTP download voi cookies cua browser neu la link https
     if video_src.startswith("http"):
         try:
-            import requests
-            session = requests.Session()
+            cookie_parts = []
             for cookie in driver.get_cookies():
-                session.cookies.set(cookie["name"], cookie["value"], domain=cookie.get("domain", ""))
-            resp = session.get(video_src, stream=True, timeout=60)
-            if resp.status_code == 200 and len(resp.content) > 10240:
-                with open(target_dest, "wb") as f:
-                    f.write(resp.content)
-                return True
+                if "name" in cookie and "value" in cookie:
+                    cookie_parts.append(f"{cookie['name']}={cookie['value']}")
+            headers = {"User-Agent": "Mozilla/5.0"}
+            if cookie_parts:
+                headers["Cookie"] = "; ".join(cookie_parts)
+            req = urllib.request.Request(video_src, headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                content = resp.read()
+                if len(content) > 10240:
+                    with open(target_dest, "wb") as f:
+                        f.write(content)
+                    return True
         except Exception:
             pass
 
