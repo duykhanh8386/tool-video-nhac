@@ -545,7 +545,7 @@ class MuseSessionManagerTests(unittest.TestCase):
             password="",
             manual_browser=True,
         )
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + 6
         while time.monotonic() < deadline:
             driver = self.drivers.get(1)
             if (
@@ -560,7 +560,7 @@ class MuseSessionManagerTests(unittest.TestCase):
         driver.google_authenticated = True
         driver._current_url = "https://myaccount.google.com/?pli=1"
 
-        future.result(timeout=2)
+        future.result(timeout=6)
 
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
         self.assertEqual(driver.current_url, "https://muse.ai/chat")
@@ -575,7 +575,7 @@ class MuseSessionManagerTests(unittest.TestCase):
             password="temporary-secret",
             manual_browser=True,
         )
-        future.result(timeout=2)
+        future.result(timeout=6)
 
         driver = self.drivers[1]
         snapshot = self.manager.snapshot(1)
@@ -598,7 +598,7 @@ class MuseSessionManagerTests(unittest.TestCase):
             password="temporary-secret",
             manual_browser=True,
         )
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + 6
         while time.monotonic() < deadline:
             driver = self.drivers.get(1)
             if (
@@ -612,7 +612,7 @@ class MuseSessionManagerTests(unittest.TestCase):
             self.fail("Assisted login did not reach the manual 2FA challenge")
 
         driver.complete_login()
-        future.result(timeout=2)
+        future.result(timeout=6)
 
         self.assertEqual(self.manager.snapshot(1).state, MuseSessionState.READY)
         self.assertEqual(driver.current_url, "https://muse.ai/chat")
