@@ -38,6 +38,7 @@ from auth.muse_login import (
     launch_muse_native_browser,
     validate_muse_start_url,
 )
+from auth.muse_cookies import inject_cookies_to_driver
 from utils.config import read_json, write_json
 from utils.paths import CACHE_DIR, DATA_DIR
 
@@ -118,6 +119,7 @@ class MuseSessionOpenMode(str, Enum):
     AUTOMATIC = "automatic"
     MANUAL_BROWSER = "manual_browser"
     EXISTING_TAB = "existing_tab"
+    COOKIE = "cookie"
 
 
 class MuseSessionError(RuntimeError):
@@ -204,6 +206,8 @@ class MuseSession:
     selected_handle: str = ""
     open_mode: MuseSessionOpenMode = MuseSessionOpenMode.AUTOMATIC
     native_browser_process: Any = None
+    cookies: list[dict[str, Any]] = field(default_factory=list)
+    headless: bool = False
     executor: ThreadPoolExecutor = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -357,7 +361,17 @@ class MuseSessionManager:
         except Exception:
             for _email, secret in prepared.values():
                 _wipe_secret(secret)
-            raise
+    def open_cookie_sessions(
+        self,
+        accounts: dict[int, tuple[str, list[dict[str, Any]]]],
+        *,
+        headless: bool = False,
+    ) -> Future[Any]:
+        allowed = set(range(1, MUSE_SESSION_COUNT + 1))
+        selected = set(accounts)
+        if not selected or not selected.issubset(allowed):
+            raise ValueError("Hãy chọn ít nhất một tài khoản Muse hợp lệ để mở.")
+        return self._schedule(self._launch_open_cookie_all(accounts, headless=headless))
 
     def discover_muse_tabs(self) -> Future[Any]:
         """Return Muse tabs from the three tool-owned Chrome profiles.
@@ -509,6 +523,68 @@ class MuseSessionManager:
                 ),
             )
             for session_id in sorted(credentials)
+        ]
+        results = await asyncio.gather(
+            *(coroutine for _session_id, coroutine in ordered),
+            return_exceptions=True,
+        )
+        failures = [
+            f"Tài khoản {session_id}: {result}"
+            for (session_id, _coroutine), result in zip(ordered, results)
+            if isinstance(result, BaseException)
+        ]
+        if failures:
+            raise MuseSessionError("; ".join(failures))
+        return {
+            session_id: result
+            for (session_id, _coroutine), result in zip(ordered, results)
+        }
+
+    async def _launch_open_cookie(
+        self,
+        session_id: int,
+        email: str,
+        cookies: list[dict[str, Any]],
+        *,
+        headless: bool = False,
+    ) -> None:
+        session = self._require_session(session_id)
+        assert self._manager_lock is not None
+        task: asyncio.Task[Any] | None = None
+        async with self._manager_lock:
+            self._ensure_available(session)
+            self._bind_account(session, email)
+            session.cookies = list(cookies)
+            session.headless = headless
+            session.open_mode = MuseSessionOpenMode.COOKIE
+            session.stop_event.clear()
+            task = asyncio.create_task(
+                self._open(session, force_relogin=False, password=bytearray(), open_mode=MuseSessionOpenMode.COOKIE),
+                name=f"muse-open-cookie-{session_id}",
+            )
+            self._claim_task(session, task)
+        try:
+            await task
+        finally:
+            self._release_task(session, task)
+
+    async def _launch_open_cookie_all(
+        self,
+        accounts: dict[int, tuple[str, list[dict[str, Any]]]],
+        *,
+        headless: bool = False,
+    ) -> dict[int, Any]:
+        ordered = [
+            (
+                session_id,
+                self._launch_open_cookie(
+                    session_id,
+                    accounts[session_id][0],
+                    accounts[session_id][1],
+                    headless=headless,
+                ),
+            )
+            for session_id in sorted(accounts)
         ]
         results = await asyncio.gather(
             *(coroutine for _session_id, coroutine in ordered),
@@ -833,7 +909,14 @@ class MuseSessionManager:
             try:
                 MuseLoginService._acquire_profile(profile_key)
                 session.profile_acquired = True
-                session.driver = self._driver_factory(session.profile_dir)
+                try:
+                    session.driver = self._driver_factory(
+                        session.profile_dir,
+                        download_dir=MUSE_SESSION_DOWNLOADS_DIR / session.profile_dir.name,
+                        headless=session.headless,
+                    )
+                except TypeError:
+                    session.driver = self._driver_factory(session.profile_dir)
                 session.driver_open = True
                 session.known_handles = {str(handle) for handle in session.driver.window_handles}
                 session.owned_handles = set(session.known_handles)
@@ -851,6 +934,9 @@ class MuseSessionManager:
                     "Không thể mở Chrome profile Muse riêng; hãy đóng cửa sổ đang dùng cùng profile rồi thử lại."
                 ) from None
         helper = MuseLoginService(start_url=self.start_url, store=self.account_store)
+        if open_mode == MuseSessionOpenMode.COOKIE:
+            self._open_cookie_login(session, helper)
+            return
         if open_mode == MuseSessionOpenMode.MANUAL_BROWSER and not password:
             self._open_manual_browser_login(session, helper)
             return
@@ -1204,6 +1290,69 @@ class MuseSessionManager:
                 # A manual Google/Muse security step remains open until user action.
                 if not manual_mode and self._clock() - started >= self.login_timeout:
                     raise MuseSessionTimeout("Đăng nhập Muse đã hết thời gian chờ.") from None
+
+    def _open_cookie_login(self, session: MuseSession, helper: MuseLoginService) -> None:
+        """Inject cookie data into the session's driver and confirm the session is READY."""
+        self._check_stopped(session)
+        driver = session.driver
+        if not session.cookies:
+            raise MuseSessionError("Không có cookie nào để nạp cho tài khoản.")
+
+        self._set_state(
+            session,
+            MuseSessionState.OPENING,
+            progress=30,
+            status_message=f"Đang nạp cookie cho {session.email or 'tài khoản'}…",
+            error="",
+        )
+        try:
+            inject_cookies_to_driver(driver, session.cookies, target_url=self.start_url)
+        except Exception as exc:
+            raise MuseSessionError(f"Lỗi khi nạp cookie vào Chrome: {exc}") from exc
+
+        started = self._clock()
+        while self._clock() - started < 15.0:
+            self._check_stopped(session)
+            driver = session.driver
+            try:
+                handles = {str(handle) for handle in driver.window_handles}
+                session.known_handles.update(handles)
+                session.owned_handles.update(handles)
+            except Exception:
+                raise MuseSessionError("Chrome/driver của phiên Muse đã đóng bất ngờ.") from None
+
+            current_host = _hostname(_safe_url(driver))
+            if current_host == "muse.ai":
+                if helper._is_muse_logged_in(driver):
+                    session.google_verified_email = session.email
+                    session.selected_handle = driver.current_window_handle
+                    self._set_state(
+                        session,
+                        MuseSessionState.READY,
+                        progress=100,
+                        status_message=f"Sẵn sàng (Cookie: {session.email or 'tài khoản'})",
+                        error="",
+                    )
+                    self._set_account_status(session, "ready")
+                    return
+
+            self._sleep(self.poll_interval)
+
+        current_host = _hostname(_safe_url(driver))
+        if current_host == "muse.ai" and not helper._has_clickable_text(driver, MUSE_LOGIN_TEXT):
+            session.google_verified_email = session.email
+            session.selected_handle = driver.current_window_handle
+            self._set_state(
+                session,
+                MuseSessionState.READY,
+                progress=100,
+                status_message=f"Sẵn sàng (Cookie: {session.email or 'tài khoản'})",
+                error="",
+            )
+            self._set_account_status(session, "ready")
+            return
+
+        raise MuseSessionAuthenticationError("Cookie đã hết hạn hoặc không hợp lệ. Vui lòng cập nhật lại cookie mới.")
 
     def _open_manual_browser_login(self, session: MuseSession, helper: MuseLoginService) -> None:
         """Wait for a human-driven Muse login without typing or clicking Google UI."""
@@ -1978,9 +2127,10 @@ def get_muse_session_manager(*, start_url: str = MUSE_START_URL) -> MuseSessionM
         return _manager_singleton
 
 
-def _create_session_chrome_driver(profile: Path):
+def _create_session_chrome_driver(profile: Path, download_dir: Path | None = None, headless: bool = False):
     """Create a persistent session driver with an isolated download folder."""
-    return create_muse_chrome_driver(profile, MUSE_SESSION_DOWNLOADS_DIR / profile.name)
+    target_dl = download_dir or (MUSE_SESSION_DOWNLOADS_DIR / profile.name)
+    return create_muse_chrome_driver(profile, target_dl, headless=headless)
 
 
 def _wipe_secret(secret: bytearray) -> None:

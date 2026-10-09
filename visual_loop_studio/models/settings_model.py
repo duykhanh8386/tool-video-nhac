@@ -30,6 +30,8 @@ class AppSettings:
     muse_start_url: str = "https://muse.ai/"
     muse_connection_mode: str = "manual_browser"
     muse_task_mode: str = "video"
+    muse_headless: bool = False
+    muse_concurrency: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

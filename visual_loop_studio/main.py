@@ -88,7 +88,7 @@ class MainWindow(QMainWindow):
         self.navigation = QListWidget()
         self.navigation.addItems([
             "Trang chủ", "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh",
-            "Render hàng loạt", "AI Video hàng loạt", "Tài khoản YouTube", "Muse Batch — 3 tài khoản",
+            "Render hàng loạt", "AI Video hàng loạt", "Tài khoản YouTube", "Muse AI Studio (Cookie)",
         ])
         self.navigation.setCurrentRow(0)
         self.navigation.currentRowChanged.connect(self._navigate)
@@ -141,7 +141,7 @@ class MainWindow(QMainWindow):
         tools = self.menuBar().addMenu("Công cụ")
         for index, text in enumerate((
             "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh",
-            "Render hàng loạt", "AI Video hàng loạt", "Tài khoản YouTube", "Muse Batch — 3 tài khoản",
+            "Render hàng loạt", "AI Video hàng loạt", "Tài khoản YouTube", "Muse AI Studio (Cookie)",
         ), start=1):
             action = QAction(text, self)
             action.triggered.connect(lambda _checked=False, index=index: self.navigation.setCurrentRow(index))

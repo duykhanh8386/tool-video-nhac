@@ -776,7 +776,7 @@ def muse_profile_dir(account_id: str) -> Path:
     return MUSE_PROFILES_DIR / safe_id
 
 
-def create_muse_chrome_driver(profile: Path, download_dir: Path | None = None):
+def create_muse_chrome_driver(profile: Path, download_dir: Path | None = None, headless: bool = False):
     try:
         from selenium import webdriver
     except ModuleNotFoundError as exc:
@@ -785,7 +785,12 @@ def create_muse_chrome_driver(profile: Path, download_dir: Path | None = None):
     options.add_argument(f"--user-data-dir={profile}")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
-    options.add_argument("--start-maximized")
+    if headless:
+        options.add_argument("--headless=new")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+    else:
+        options.add_argument("--start-maximized")
     options.add_argument("--disable-session-crashed-bubble")
     options.add_argument("--force-renderer-accessibility")
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -1092,8 +1097,8 @@ def _native_browser_candidates() -> list[tuple[str, Path]]:
     return candidates
 
 
-def _create_chrome_driver(profile: Path):
-    return create_muse_chrome_driver(profile)
+def _create_chrome_driver(profile: Path, download_dir: Path | None = None, headless: bool = False):
+    return create_muse_chrome_driver(profile, download_dir=download_dir, headless=headless)
 
 
 def _close_owned_tabs(driver: Any, owned_handles: set[str]) -> None:
