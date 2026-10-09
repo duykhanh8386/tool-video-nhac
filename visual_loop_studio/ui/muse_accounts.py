@@ -750,6 +750,12 @@ class MuseCookieBatchRunnerThread(QThread):
                                 style_suffix=self.style_suffix,
                             )
 
+                            # Cập nhật danh sách video đã thấy ngay trước khi gửi đợt này để tuyệt đối không nhận nhầm video cũ / UI có sẵn
+                            pre_chunk_vids = _query_muse_videos(driver)
+                            for pv in pre_chunk_vids:
+                                if pv.get("src"):
+                                    seen_video_srcs.add(pv.get("src"))
+
                             # 4. Điền prompt gom vào ô chat Muse (1 lần duy nhất, nguyên khối)
                             self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang điền prompt gom (1 lần duy nhất) vào Muse…")
                             filled = self._fill_chat_prompt(driver, chunk_prompt_text)
@@ -840,11 +846,41 @@ class MuseCookieBatchRunnerThread(QThread):
                                     if c_count >= n_prompts:
                                         fresh_videos = new_candidates[:n_prompts]
                                         break
+
+                                    # Kiểm tra xem Muse có đang tiếp tục render các video còn lại không
+                                    is_rendering = False
+                                    try:
+                                        is_rendering = bool(driver.execute_script("""
+                                            const indicators = [
+                                                '[data-testid*="processing" i]',
+                                                '[data-testid*="progress" i]',
+                                                '[data-testid*="generating" i]',
+                                                '[aria-busy="true"]',
+                                                'button[aria-label*="stop" i]',
+                                                '[class*="spinner" i]',
+                                                '[class*="loading" i]',
+                                                '[class*="generating" i]'
+                                            ];
+                                            return indicators.some(sel => {
+                                                const els = [...document.querySelectorAll(sel)];
+                                                return els.some(e => {
+                                                    const r = e.getBoundingClientRect();
+                                                    return r.width > 0 && r.height > 0;
+                                                });
+                                            });
+                                        """))
+                                    except Exception:
+                                        pass
+
                                     if c_count == last_found_count:
-                                        stable_cycles += 1
-                                        if stable_cycles >= 6:  # Ổn định trong ~15s
-                                            fresh_videos = new_candidates
-                                            break
+                                        # Nếu Muse vẫn đang render thì tiếp tục kiên nhẫn chờ, không break vội
+                                        if not is_rendering:
+                                            stable_cycles += 1
+                                            if stable_cycles >= 12:  # Ổn định trong ~30s sau khi Muse không còn render
+                                                fresh_videos = new_candidates
+                                                break
+                                        else:
+                                            stable_cycles = 0
                                     else:
                                         stable_cycles = 0
                                         last_found_count = c_count

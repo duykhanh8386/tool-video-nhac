@@ -371,32 +371,76 @@ def _dismiss_muse_popups(driver: Any) -> None:
 
 
 def _query_muse_videos(driver: Any) -> list[dict[str, str]]:
-    """Trich xuat danh sach video tu DOM trang Muse theo co che chuan cua MuseStudio."""
+    """Trich xuat danh sach video san sinh tu DOM trang Muse, loai bo triet de video UI/mascot/onboarding."""
     try:
         return driver.execute_script("""
             window.__mavSeq = window.__mavSeq || 0;
             const results = [];
+
+            // Kiem tra loai bo video UI tinh, mascot (nhan vat đeo tai nghe), banner, demo, tutorial
+            const isUiMascotOrStatic = (el, src, poster) => {
+                if (!el) return true;
+                const url = String(src || '').toLowerCase();
+                const post = String(poster || '').toLowerCase();
+
+                // 1. Kiem tra URL tinh / asset / mascot / onboarding
+                const badPatterns = [
+                    '/static/', '/assets/', 'mascot', 'avatar', 'welcome', 'onboarding',
+                    'tutorial', 'hero', 'landing', 'promo', 'sample', 'intro', 'logo'
+                ];
+                if (badPatterns.some(p => url.includes(p) || post.includes(p))) {
+                    return true;
+                }
+
+                // 2. Kiem tra container cha (sidebar, header, nav, welcome banner, modal...)
+                const badContainer = el.closest(
+                    'aside, nav, header, footer, ' +
+                    '[data-testid*="sidebar" i], [class*="sidebar" i], ' +
+                    '[class*="welcome" i], [class*="onboarding" i], [class*="banner" i], ' +
+                    '[class*="mascot" i], [class*="avatar" i], [class*="intro" i], ' +
+                    '[class*="tutorial" i], [class*="hero" i], [class*="landing" i], ' +
+                    '[role="dialog"], [role="alertdialog"]'
+                );
+                if (badContainer) return true;
+
+                // 3. Neu la the <video> HTML5
+                if (el.tagName === 'VIDEO') {
+                    // Video loop ngan tu chay khong co controls thuong la animation mascot UI
+                    const isUiLoop = el.hasAttribute('loop') && el.hasAttribute('autoplay') && el.muted && !el.hasAttribute('controls');
+                    const isInsideGeneration = !!el.closest('[data-hatch-video-wrapper], [data-hatch-video-src], [data-message-role="assistant"], [data-testid*="result" i], [data-testid*="video-result" i]');
+                    if (isUiLoop && !isInsideGeneration) return true;
+
+                    // Kiem tra duration: Video mascot thuong la loop ngan < 3.5s, video Muse tao thuong >= 5s
+                    if (el.duration && el.duration > 0 && el.duration < 3.5) return true;
+                }
+
+                return false;
+            };
+
             // 1. Selector uu tien [data-hatch-video-src] cua Muse AI
             document.querySelectorAll('[data-hatch-video-src]').forEach(w => {
+                const src = (w.getAttribute('data-hatch-video-src') || '').trim();
+                const poster = (w.getAttribute('data-hatch-video-poster') || '').split('?')[0];
+                if (!src || isUiMascotOrStatic(w, src, poster)) return;
+
                 if (!w.dataset.mavId) w.dataset.mavId = String(++window.__mavSeq);
                 const label = (w.getAttribute('aria-label') || '').trim();
                 const m = label.match(/[^\\s/\\\\]+\\.(mp4|webm|mov)/i);
-                const poster = (w.getAttribute('data-hatch-video-poster') || '').split('?')[0];
-                const src = (w.getAttribute('data-hatch-video-src') || '').trim();
-                if (src) {
-                    results.push({ id: w.dataset.mavId, src: src, name: m ? m[0] : '', label: label, poster: poster });
-                }
+                results.push({ id: w.dataset.mavId, src: src, name: m ? m[0] : '', label: label, poster: poster });
             });
+
             // 2. The <video> thong thuong tren trang
             document.querySelectorAll('video').forEach(v => {
                 const src = (v.currentSrc || v.src || '').trim();
-                if (src && !results.some(r => r.src === src)) {
-                    if (!v.dataset.mavId) v.dataset.mavId = 'vid_' + (++window.__mavSeq);
-                    const parent = v.closest('[aria-label]');
-                    const parentLabel = (parent && parent.getAttribute) ? (parent.getAttribute('aria-label') || '') : '';
-                    const m = parentLabel.match(/[^\\s/\\\\]+\\.(mp4|webm|mov)/i);
-                    results.push({ id: v.dataset.mavId, src: src, name: m ? m[0] : '', label: parentLabel, poster: '' });
-                }
+                const poster = (v.poster || '').trim();
+                if (!src || results.some(r => r.src === src)) return;
+                if (isUiMascotOrStatic(v, src, poster)) return;
+
+                if (!v.dataset.mavId) v.dataset.mavId = 'vid_' + (++window.__mavSeq);
+                const parent = v.closest('[aria-label]');
+                const parentLabel = (parent && parent.getAttribute) ? (parent.getAttribute('aria-label') || '') : '';
+                const m = parentLabel.match(/[^\\s/\\\\]+\\.(mp4|webm|mov)/i);
+                results.push({ id: v.dataset.mavId, src: src, name: m ? m[0] : '', label: parentLabel, poster: poster });
             });
             return results;
         """) or []
