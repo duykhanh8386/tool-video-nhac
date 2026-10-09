@@ -1503,7 +1503,14 @@ class MuseAccountsPage(QWidget):
         self.overall_progress = QProgressBar()
         self.overall_progress.setRange(0, 100)
         self.overall_progress.setValue(0)
-        self.overall_progress.setMinimumHeight(20)
+        self.overall_progress.setMinimumHeight(24)
+        self.overall_progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.overall_progress.setTextVisible(True)
+        self.overall_progress.setFormat("0 / 0 (0.0%)")
+        self.overall_progress.setStyleSheet(
+            "QProgressBar { background-color: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 6px; text-align: center; font-weight: 700; font-size: 11px; color: #0f172a; height: 24px; }"
+            "QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #10b981); border-radius: 5px; }"
+        )
         progress_vbox.addWidget(self.overall_progress)
 
         self.stats_label = QLabel("Chờ: 0 • Thành công: 0 • Lỗi: 0 • Quota: 0")
@@ -1924,6 +1931,9 @@ class MuseAccountsPage(QWidget):
         lines = [line.strip() for line in self.prompt.toPlainText().splitlines() if line.strip()]
         total = len(lines)
         self._update_prompt_badges(total, 0, 0, total)
+        self.overall_progress.setRange(0, max(1, total))
+        self.overall_progress.setValue(0)
+        self.overall_progress.setFormat(f"0 / {total:,} video (0.0%)" if total > 0 else "0 / 0 (0.0%)")
 
     def _update_prompt_badges(self, total: int, done: int, error: int, remaining: int) -> None:
         self.badge_total.setText(f"📋 Tổng {total:,}")
@@ -2045,7 +2055,10 @@ class MuseAccountsPage(QWidget):
         # Update UI state
         self.start_all.setEnabled(False)
         self.stop_all.setEnabled(True)
+        total_prompts_count = len(lines)
+        self.overall_progress.setRange(0, max(1, total_prompts_count))
         self.overall_progress.setValue(0)
+        self.overall_progress.setFormat(f"0 / {total_prompts_count:,} video (0.0%)")
         self.logs_edit.clear()
         self._update_prompt_badges(len(lines), 0, 0, len(lines))
 
@@ -2079,14 +2092,23 @@ class MuseAccountsPage(QWidget):
             self.stop_all.setEnabled(False)
 
     def _on_batch_progress(self, percent: int, text: str) -> None:
-        self.overall_progress.setValue(percent)
         self.global_status.setText(text)
+        if percent >= 100:
+            max_v = self.overall_progress.maximum()
+            self.overall_progress.setValue(max_v)
+            self.overall_progress.setFormat(f"{max_v:,} / {max_v:,} video (100.0%)")
 
     def _on_batch_stats(self, total: int, completed: int, failed: int, remaining: int) -> None:
         self._update_prompt_badges(total, completed, failed, remaining)
         self.stats_label.setText(
             f"Tổng: {total:,} • Đã hoàn thành: {completed:,} • Lỗi: {failed:,} • Còn lại: {remaining:,}"
         )
+        done_count = completed + failed
+        max_total = max(1, total)
+        self.overall_progress.setRange(0, max_total)
+        self.overall_progress.setValue(min(done_count, max_total))
+        pct_float = (done_count / max_total) * 100
+        self.overall_progress.setFormat(f"{done_count:,} / {total:,} video ({pct_float:.1f}%)")
 
     def _on_batch_log(self, message: str) -> None:
         now_ts = time.strftime("%H:%M:%S")
@@ -2120,7 +2142,9 @@ class MuseAccountsPage(QWidget):
         self.prompt.clear()
         self.image_count.setText("Chưa quét ảnh")
         self.logs_edit.clear()
+        self.overall_progress.setRange(0, 100)
         self.overall_progress.setValue(0)
+        self.overall_progress.setFormat("0 / 0 (0.0%)")
         self._update_prompt_badges(0, 0, 0, 0)
         self.stats_label.setText("Tổng: 0 • Đã hoàn thành: 0 • Lỗi: 0 • Còn lại: 0")
         self.global_status.setText("Đã xóa dữ liệu UI.")
