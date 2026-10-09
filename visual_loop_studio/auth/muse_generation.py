@@ -374,77 +374,33 @@ def _dismiss_muse_popups(driver: Any) -> None:
 
 
 def _query_muse_videos(driver: Any) -> list[dict[str, str]]:
-    """Trich xuat danh sach video san sinh tu DOM trang Muse, loai bo triet de video UI/mascot/onboarding."""
+    """Trich xuat danh sach video san sinh tu DOM trang Muse theo chuan MuseStudio (chi lay cac phan tu data-hatch-video-src)."""
     try:
         return driver.execute_script("""
             window.__mavSeq = window.__mavSeq || 0;
             const results = [];
 
-            // Kiem tra loai bo video UI tinh, mascot (nhan vat đeo tai nghe), banner, demo, tutorial
-            const isUiMascotOrStatic = (el, src, poster) => {
-                if (!el) return true;
-                const url = String(src || '').toLowerCase();
-                const post = String(poster || '').toLowerCase();
-
-                // 1. Kiem tra URL tinh / asset / mascot / onboarding
-                const badPatterns = [
-                    '/static/', '/assets/', 'mascot', 'avatar', 'welcome', 'onboarding',
-                    'tutorial', 'hero', 'landing', 'promo', 'sample', 'intro', 'logo'
-                ];
-                if (badPatterns.some(p => url.includes(p) || post.includes(p))) {
-                    return true;
-                }
-
-                // 2. Kiem tra container cha (sidebar, header, nav, welcome banner, modal...)
-                const badContainer = el.closest(
-                    'aside, nav, header, footer, ' +
-                    '[data-testid*="sidebar" i], [class*="sidebar" i], ' +
-                    '[class*="welcome" i], [class*="onboarding" i], [class*="banner" i], ' +
-                    '[class*="mascot" i], [class*="avatar" i], [class*="intro" i], ' +
-                    '[class*="tutorial" i], [class*="hero" i], [class*="landing" i], ' +
-                    '[role="dialog"], [role="alertdialog"]'
-                );
-                if (badContainer) return true;
-
-                // 3. Neu la the <video> HTML5
-                if (el.tagName === 'VIDEO') {
-                    // Video loop ngan tu chay khong co controls thuong la animation mascot UI
-                    const isUiLoop = el.hasAttribute('loop') && el.hasAttribute('autoplay') && el.muted && !el.hasAttribute('controls');
-                    const isInsideGeneration = !!el.closest('[data-hatch-video-wrapper], [data-hatch-video-src], [data-message-role="assistant"], [data-testid*="result" i], [data-testid*="video-result" i]');
-                    if (isUiLoop && !isInsideGeneration) return true;
-
-                    // Kiem tra duration: Video mascot thuong la loop ngan < 3.5s, video Muse tao thuong >= 5s
-                    if (el.duration && el.duration > 0 && el.duration < 3.5) return true;
-                }
-
-                return false;
-            };
-
-            // 1. Selector uu tien [data-hatch-video-src] cua Muse AI
+            // Selector chuan 100% cua MuseStudio: chi lay cac container data-hatch-video-src sinh ra tu chat
             document.querySelectorAll('[data-hatch-video-src]').forEach(w => {
                 const src = (w.getAttribute('data-hatch-video-src') || '').trim();
-                const poster = (w.getAttribute('data-hatch-video-poster') || '').split('?')[0];
-                if (!src || isUiMascotOrStatic(w, src, poster)) return;
+                if (!src) return;
 
                 if (!w.dataset.mavId) w.dataset.mavId = String(++window.__mavSeq);
                 const label = (w.getAttribute('aria-label') || '').trim();
                 const m = label.match(/[^\\s/\\\\]+\\.(mp4|webm|mov)/i);
-                results.push({ id: w.dataset.mavId, src: src, name: m ? m[0] : '', label: label, poster: poster });
+                const poster = (w.getAttribute('data-hatch-video-poster') || '').split('?')[0];
+                const msg = w.closest('[data-message-item="true"],[data-message-role],[data-message-group-id],[class*="message" i]') || w.parentElement;
+                const txt = msg ? (msg.innerText || '') : '';
+                results.push({
+                    id: w.dataset.mavId,
+                    src: src,
+                    name: m ? m[0] : '',
+                    label: label,
+                    text: txt.slice(0, 1200),
+                    poster: poster
+                });
             });
 
-            // 2. The <video> thong thuong tren trang
-            document.querySelectorAll('video').forEach(v => {
-                const src = (v.currentSrc || v.src || '').trim();
-                const poster = (v.poster || '').trim();
-                if (!src || results.some(r => r.src === src)) return;
-                if (isUiMascotOrStatic(v, src, poster)) return;
-
-                if (!v.dataset.mavId) v.dataset.mavId = 'vid_' + (++window.__mavSeq);
-                const parent = v.closest('[aria-label]');
-                const parentLabel = (parent && parent.getAttribute) ? (parent.getAttribute('aria-label') || '') : '';
-                const m = parentLabel.match(/[^\\s/\\\\]+\\.(mp4|webm|mov)/i);
-                results.push({ id: v.dataset.mavId, src: src, name: m ? m[0] : '', label: parentLabel, poster: poster });
-            });
             return results;
         """) or []
     except Exception:
@@ -460,24 +416,38 @@ def _download_muse_video_file(
     """Tai file video Muse ve may bang da tang: JS Blob Fetch (chuan MuseStudio) -> Requests CDN -> Dom Link -> UI Click."""
     target_dest.parent.mkdir(parents=True, exist_ok=True)
     video_src = (video_info.get("src") or "").strip()
+    video_id = (video_info.get("id") or "").strip()
     if not video_src:
         return False
 
-    # Tang 1: Fetch Base64 truc tiep qua JavaScript trong session cua browser (Cực kỳ mạnh, không lo overlay hay download bar)
+    # Tang 1: Fetch Base64 truc tiep qua JavaScript trong session cua browser (Chuan MuseStudio JS_FETCH_VIDEO voi timeout an toan)
     try:
+        driver.set_script_timeout(20)
         b64_data = driver.execute_async_script("""
-            var url = arguments[0];
+            var src = arguments[0];
+            var vidId = arguments[1];
             var done = arguments[arguments.length - 1];
-            fetch(url)
-                .then(function(res) { return res.blob(); })
+            var timer = setTimeout(function() { done(null); }, 18000);
+
+            var w = vidId ? document.querySelector('[data-mav-id="' + vidId + '"]') : null;
+            var fetchUrl = (w && w.getAttribute('data-hatch-video-src')) ? w.getAttribute('data-hatch-video-src') : src;
+
+            fetch(fetchUrl, { credentials: 'include' })
+                .then(function(res) {
+                    if (!res.ok) throw new Error('status ' + res.status);
+                    return res.blob();
+                })
                 .then(function(blob) {
                     var reader = new FileReader();
-                    reader.onload = function() { done(String(reader.result).split(',')[1]); };
-                    reader.onerror = function() { done(null); };
+                    reader.onload = function() { clearTimeout(timer); done(String(reader.result).split(',')[1]); };
+                    reader.onerror = function() { clearTimeout(timer); done(null); };
                     reader.readAsDataURL(blob);
                 })
-                .catch(function(err) { done(null); });
-        """, video_src)
+                .catch(function(err) {
+                    clearTimeout(timer);
+                    done(null);
+                });
+        """, video_src, video_id)
         if b64_data:
             import base64
             raw_bytes = base64.b64decode(b64_data)
