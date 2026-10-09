@@ -41,7 +41,20 @@ QUOTA_MARKERS = (
     "insufficient credits",
     "out of credits",
     "weekly limit reached",
+    "daily limit reached",
+    "rate limit reached",
+    "credit limit reached",
     "upgrade to continue",
+    "upgrade plan",
+    "upgrade to pro",
+    "hết lượt",
+    "đạt giới hạn",
+    "hết credit",
+    "không đủ credit",
+    "nâng cấp gói",
+    "hết token",
+    "hết hạn mức",
+    "vượt quá giới hạn",
 )
 
 

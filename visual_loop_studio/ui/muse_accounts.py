@@ -665,6 +665,15 @@ class MuseCookieBatchRunnerThread(QThread):
 
                     _dismiss_muse_popups(driver)
 
+                    # Kiểm tra xem tài khoản có bị hết credit/token ngay từ đầu không
+                    init_body = _body_text(driver).lower()
+                    if any(m in init_body for m in QUOTA_MARKERS):
+                        self.log_signal.emit(
+                            f"⚠ [{worker_tag}]: Tài khoản đã hết token/credit ngay từ đầu. "
+                            f"Tự động chuyển sang tài khoản tiếp theo trong danh sách…"
+                        )
+                        continue
+
                     # Đánh dấu các video cũ đã có sẵn trên trang để tránh trùng lặp
                     initial_vids = _query_muse_videos(driver)
                     seen_video_srcs: set[str] = {v.get("src") for v in initial_vids if v.get("src")}
@@ -814,6 +823,12 @@ class MuseCookieBatchRunnerThread(QThread):
                             else:
                                 self.log_signal.emit(f"⚠ [{worker_tag}]: Đã kích hoạt lệnh gửi ({chunk_label}), đang theo dõi tạo video…")
 
+                            # Kiểm tra ngay sau khi gửi xem có thông báo hết quota xuất hiện không
+                            time.sleep(1.0)
+                            post_submit_body = _body_text(driver).lower()
+                            if any(m in post_submit_body for m in QUOTA_MARKERS):
+                                raise RuntimeError(f"Hết quota/credit trên tài khoản {acc_label}.")
+
                             self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang theo dõi và tải {n_prompts} video ({chunk_label})…")
                             start_wait = time.monotonic()
                             unassigned_prompts = list(chunk.prompt_items)
@@ -959,15 +974,58 @@ class MuseCookieBatchRunnerThread(QThread):
                             time.sleep(1.0)
 
                         except Exception as chunk_err:
-                            with stats_lock:
-                                failed_total += n_prompts
-                                remaining_total = max(0, total_items - (completed_total + failed_total))
-                                self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
-                                pct = int(((completed_total + failed_total) / max(1, total_items)) * 100)
-                                self.progress_signal.emit(pct, f"Lỗi nhóm {chunk_label}: {chunk_err}")
-                            self.log_signal.emit(f"❌ [{worker_tag}] lỗi nhóm ({chunk_label}): {chunk_err}")
-                            if "quota" in str(chunk_err).lower():
+                            err_str = str(chunk_err).lower()
+                            is_quota = any(
+                                marker in err_str
+                                for marker in (
+                                    "quota",
+                                    "credit",
+                                    "token",
+                                    "limit",
+                                    "giới hạn",
+                                    "hết lượt",
+                                    "hết token",
+                                    "hết credit",
+                                    "upgrade",
+                                )
+                            )
+
+                            if is_quota:
+                                # Lọc ra các prompt trong chunk mà CHƯA có file video hoàn tất trên ổ đĩa
+                                uncompleted_items = []
+                                for p_id, p_text in chunk.prompt_items:
+                                    has_file = any(
+                                        f.name.startswith(f"Prompt{p_id:04d}") and f.stat().st_size > 10240
+                                        for f in self.output_dir.iterdir()
+                                        if f.is_file()
+                                    )
+                                    if not has_file:
+                                        uncompleted_items.append((p_id, p_text))
+
+                                if uncompleted_items:
+                                    retry_chunk = MuseBatchChunk(
+                                        chunk_index=chunk.chunk_index,
+                                        prompt_items=uncompleted_items,
+                                        images=chunk.images[:len(uncompleted_items)] if chunk.images else [],
+                                    )
+                                    with chunks_lock:
+                                        shared_chunks.insert(0, retry_chunk)
+
+                                self.log_signal.emit(
+                                    f"🔄 [{worker_tag}]: Tài khoản đã hết token/credit! "
+                                    f"Đã tự động hoàn trả {len(uncompleted_items)} prompt chưa hoàn thành về hàng đợi. "
+                                    f"Đang tự động chuyển sang tài khoản tiếp theo trong danh sách…"
+                                )
+                                self.worker_status_signal.emit(worker_id, f"[{acc_label}] Hết token -> Đổi tài khoản…")
                                 break
+                            else:
+                                with stats_lock:
+                                    failed_total += n_prompts
+                                    remaining_total = max(0, total_items - (completed_total + failed_total))
+                                    self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
+                                    pct = int(((completed_total + failed_total) / max(1, total_items)) * 100)
+                                    self.progress_signal.emit(pct, f"Lỗi nhóm {chunk_label}: {chunk_err}")
+                                self.log_signal.emit(f"❌ [{worker_tag}] lỗi nhóm ({chunk_label}): {chunk_err}")
 
                     self.account_completed_signal.emit(current_acc.account_id, acc_completed)
                 except Exception as acc_err:
@@ -991,6 +1049,20 @@ class MuseCookieBatchRunnerThread(QThread):
 
         for t in threads:
             t.join()
+
+        # Nếu các tài khoản đã dừng hết nhưng vẫn còn prompt trong hàng đợi chung (do tất cả tài khoản đều hết token)
+        if shared_chunks:
+            with chunks_lock:
+                leftover_count = sum(len(c.prompt_items) for c in shared_chunks)
+                shared_chunks.clear()
+            with stats_lock:
+                failed_total += leftover_count
+                remaining_total = max(0, total_items - (completed_total + failed_total))
+                self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
+            self.log_signal.emit(
+                f"⚠ Tất cả các tài khoản đã chọn đều đã hết token/credit hoặc đã dừng! "
+                f"Còn {leftover_count} prompt chưa thể hoàn thành."
+            )
 
         self.progress_signal.emit(100, f"Hoàn tất: {completed_total} thành công, {failed_total} lỗi")
         self.log_signal.emit(f"🏁 Đã hoàn tất toàn bộ batch: {completed_total}/{total_items} thành công, {failed_total} lỗi.")
