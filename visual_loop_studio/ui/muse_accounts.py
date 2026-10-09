@@ -438,15 +438,16 @@ class MuseCookieBatchRunnerThread(QThread):
                     """
                     const isInsideSidebar = el => !!el.closest('aside,nav,[data-testid*="sidebar" i],[data-testid*="timeline" i],[data-testid*="history" i]');
                     const isInsideChat = el => !!el.closest('[data-message-item="true"],[data-message-role],[data-message-group-id]');
-                    const triggerClick = el => {
+                    const isStopOrCancel = el => {
                         if (!el) return false;
+                        const label = ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || '') + ' ' + (el.getAttribute('title') || '')).toLowerCase();
+                        return /stop|dừng|cancel|hủy|abort|delete|xóa/i.test(label);
+                    };
+
+                    const triggerClick = el => {
+                        if (!el || isStopOrCancel(el)) return false;
                         try { el.focus(); } catch(e) {}
-                        const opts = { bubbles: true, cancelable: true, view: window };
-                        try { el.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch(e) {}
-                        try { el.dispatchEvent(new MouseEvent('mousedown', opts)); } catch(e) {}
-                        try { el.dispatchEvent(new PointerEvent('pointerup', opts)); } catch(e) {}
-                        try { el.dispatchEvent(new MouseEvent('mouseup', opts)); } catch(e) {}
-                        el.click();
+                        try { el.click(); } catch(e) {}
                         return true;
                     };
 
@@ -467,7 +468,7 @@ class MuseCookieBatchRunnerThread(QThread):
                     ];
                     for (const sel of selectors) {
                         const btns = [...document.querySelectorAll(sel)].filter(b => {
-                            if (isInsideSidebar(b) || isInsideChat(b)) return false;
+                            if (isInsideSidebar(b) || isInsideChat(b) || isStopOrCancel(b)) return false;
                             const r = b.getBoundingClientRect();
                             return r.width > 0 && r.height > 0 && !b.disabled && b.getAttribute('aria-disabled') !== 'true';
                         });
@@ -487,18 +488,19 @@ class MuseCookieBatchRunnerThread(QThread):
                         const container = ta.closest('form,[data-testid*="composer" i],div.relative,div') || ta.parentElement;
                         if (container) {
                             const btns = [...container.querySelectorAll('button,[role="button"]')].filter(b => {
-                                if (b === ta || isInsideSidebar(b) || isInsideChat(b)) return false;
+                                if (b === ta || isInsideSidebar(b) || isInsideChat(b) || isStopOrCancel(b)) return false;
                                 const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                                if (/attach|upload|file|image|add|close|dismiss|preview/i.test(aria)) return false;
+                                if (/attach|upload|file|image|add|close|dismiss|preview|stop|dừng|cancel|hủy|xóa/i.test(aria)) return false;
                                 const r = b.getBoundingClientRect();
                                 return r.width > 0 && r.height > 0 && !b.disabled && b.getAttribute('aria-disabled') !== 'true';
                             });
                             const sendBtn = btns.find(b => {
+                                if (isStopOrCancel(b)) return false;
                                 const aria = (b.getAttribute('aria-label') || '').toLowerCase();
                                 const type = (b.getAttribute('type') || '').toLowerCase();
                                 return /send|submit|create|generate|tạo|gửi/i.test(aria) || type === 'submit' || Boolean(b.querySelector('svg path,svg'));
-                            }) || btns.sort((a,b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)[0];
-                            if (sendBtn) {
+                            });
+                            if (sendBtn && !isStopOrCancel(sendBtn)) {
                                 return triggerClick(sendBtn);
                             }
                         }
@@ -519,7 +521,7 @@ class MuseCookieBatchRunnerThread(QThread):
         except Exception:
             pass
 
-        # 2. Thử _click_by_text với tập nhãn mở rộng
+        # 2. Thử _click_by_text với tập nhãn mở rộng (tránh tuyệt đối nút dừng/hủy)
         extended_submit_texts = (
             "send", "generate", "create video", "create", "gửi", "tạo video", "tạo"
         )
@@ -534,6 +536,9 @@ class MuseCookieBatchRunnerThread(QThread):
         ):
             for btn in reversed(_find(driver, "css selector", sel)):
                 if _clickable(btn):
+                    lbl = (btn.get_attribute("aria-label") or "") + " " + (btn.text or "")
+                    if re.search(r"stop|dừng|cancel|hủy|xóa", lbl, re.I):
+                        continue
                     try:
                         btn.click()
                         return True
@@ -776,6 +781,14 @@ class MuseCookieBatchRunnerThread(QThread):
                                         """
                                         const prompt = (arguments[0] || '').slice(0, 30).trim().toLowerCase();
                                         if (!prompt) return false;
+
+                                        // Neu prompt da xuat hien trong tin nhan chat roi thi da gui thanh cong, khong phai con ket trong composer
+                                        const inChat = [...document.querySelectorAll('[data-message-item="true"],[data-message-role],[data-message-group-id],[class*="message" i]')].some(m => {
+                                            const txt = (m.innerText || '').toLowerCase();
+                                            return txt.includes(prompt);
+                                        });
+                                        if (inChat) return false;
+
                                         const tas = [...document.querySelectorAll('textarea,[contenteditable="true"]')].filter(
                                             t => !t.closest('aside,nav,[data-testid*="sidebar" i],[data-testid*="history" i]')
                                         );
@@ -822,9 +835,6 @@ class MuseCookieBatchRunnerThread(QThread):
                                 body = _body_text(driver).lower()
                                 if any(m in body for m in QUOTA_MARKERS):
                                     raise RuntimeError(f"Hết quota/credit trên tài khoản {acc_label}.")
-
-                                # Tự động đóng dialog/overlay nếu Muse hiển thị popup trong lúc render
-                                _dismiss_muse_popups(driver)
 
                                 # Cuộn xuống dưới để kích hoạt render đầy đủ phần tử video DOM
                                 try:

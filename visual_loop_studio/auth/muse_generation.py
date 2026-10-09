@@ -346,26 +346,29 @@ def _click_by_text(driver: Any, texts: tuple[str, ...], *, reverse: bool = False
 
 
 def _dismiss_muse_popups(driver: Any) -> None:
-    """Dong hop thoai/dialog/pop-up/overlay tren trang Muse tuong tu co che cua MuseStudio."""
+    """Dong hop thoai/dialog/pop-up/overlay tren trang Muse neu thuc su co modal chan man hinh, tuyet doi khong bam nut Dung/Xoa va khong gui phim ESC."""
     try:
         driver.execute_script("""
-            for (const d of document.querySelectorAll('[role=dialog],[role=alertdialog],[data-slot=dialog-overlay],[data-state=open]')) {
-                const b = [...d.querySelectorAll('button')].find(x => 
-                    /đóng|close|bỏ qua|skip|để sau|not now|ok|đã hiểu|got it/i.test(
-                        (x.getAttribute('aria-label') || '') + ' ' + (x.innerText || '')
-                    )
-                );
+            const dialogs = document.querySelectorAll('[role=dialog]:not([data-state=closed]),[role=alertdialog]');
+            for (const d of dialogs) {
+                // Bo qua neu dialog nay nam trong container chat hoac composer
+                if (d.closest('[data-message-role], [data-testid*="composer" i], [data-testid*="chat" i]')) continue;
+
+                const b = [...d.querySelectorAll('button')].find(x => {
+                    const aria = (x.getAttribute('aria-label') || '').trim().toLowerCase();
+                    const txt = (x.innerText || '').trim().toLowerCase();
+                    const combined = aria + ' ' + txt;
+                    // Tuyet doi khong bam cac nut Dung, Huy, Xoa
+                    if (/stop|dừng|cancel|hủy|xóa|delete|trash/i.test(combined)) return false;
+                    return /^(đóng|close|bỏ qua|skip|để sau|not now|got it|đã hiểu)$/i.test(txt) ||
+                           /^(đóng|close|skip)$/i.test(aria) ||
+                           (x.hasAttribute('data-slot') && x.getAttribute('data-slot') === 'dialog-close');
+                });
                 if (b) {
                     try { b.click(); } catch(e) {}
                 }
             }
         """)
-    except Exception:
-        pass
-    try:
-        from selenium.webdriver.common.keys import Keys
-        body = driver.find_element("css selector", "body")
-        body.send_keys(Keys.ESCAPE)
     except Exception:
         pass
 
