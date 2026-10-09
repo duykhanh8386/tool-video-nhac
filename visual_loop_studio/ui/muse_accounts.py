@@ -868,7 +868,8 @@ class MuseAccountsPage(QWidget):
         self.image_quantity_widget = QWidget()
         qty_box = QHBoxLayout(self.image_quantity_widget)
         qty_box.setContentsMargins(0, 0, 0, 0)
-        qty_box.addWidget(QLabel("🖼 Số lượng ảnh:"))
+        self.quantity_label = QLabel("🎬 Số lượng video:")
+        qty_box.addWidget(self.quantity_label)
         qty_box.addWidget(self.image_quantity)
         settings_layout.addWidget(self.image_quantity_widget)
 
@@ -1010,22 +1011,24 @@ class MuseAccountsPage(QWidget):
             self.btn_mode_video.setStyleSheet(INACTIVE_MODE_STYLE)
             self.source_group.setTitle("📁 Nguồn Ảnh Mẫu (Tùy chọn) & Thư Mục Xuất Ảnh")
             self.source_label.setText("Thư mục ảnh mẫu:")
-            self.image_folder.setPlaceholderText("(Tùy chọn) Chọn ảnh mẫu để tạo Image-to-Image, hoặc để trống...")
+            self.image_folder.setPlaceholderText("(Tùy chọn) Chọn ảnh mẫu để tạo Image-to-Image, hoặc để trống để tạo thuần từ Prompt...")
             self.prompt_card.setTitle("🎨 Prompt Tạo Ảnh AI (Image Prompt)")
-            self.prompt_hint.setText("Mô tả nội dung, phong cách, chi tiết ảnh:")
+            self.prompt_hint.setText("Mô tả nội dung, phong cách, chi tiết ảnh (áp dụng cho batch prompt):")
             self.duration_box_widget.setVisible(False)
             self.image_quantity_widget.setVisible(True)
+            self.quantity_label.setText("🖼 Số lượng ảnh:")
             self.start_all.setText("▶ Bắt đầu tạo ảnh")
         else:
             self.btn_mode_video.setStyleSheet(ACTIVE_MODE_STYLE)
             self.btn_mode_image.setStyleSheet(INACTIVE_MODE_STYLE)
-            self.source_group.setTitle("📁 Nguồn Ảnh & Thư Mục Xuất File")
-            self.source_label.setText("Thư mục ảnh:")
-            self.image_folder.setPlaceholderText("Chọn thư mục ảnh (JPG, PNG, WEBP)...")
+            self.source_group.setTitle("📁 Nguồn Ảnh Mẫu (Tùy chọn) & Thư Mục Xuất Video")
+            self.source_label.setText("Thư mục ảnh mẫu:")
+            self.image_folder.setPlaceholderText("(Tùy chọn) Chọn ảnh để tạo Video từ ảnh, hoặc để trống để tạo thuần từ Prompt...")
             self.prompt_card.setTitle("✨ Prompt Tạo Video AI (Motion Prompt)")
-            self.prompt_hint.setText("Mô tả chuyển động, góc máy, ánh sáng (áp dụng chung cho batch ảnh):")
+            self.prompt_hint.setText("Mô tả chuyển động, bối cảnh, góc máy, ánh sáng (áp dụng cho batch prompt):")
             self.duration_box_widget.setVisible(True)
-            self.image_quantity_widget.setVisible(False)
+            self.image_quantity_widget.setVisible(True)
+            self.quantity_label.setText("🎬 Số lượng video:")
             self.start_all.setText("▶ Bắt đầu tạo video")
 
     def _on_headless_toggled(self, checked: bool) -> None:
@@ -1334,30 +1337,22 @@ class MuseAccountsPage(QWidget):
             return
 
         is_image = (self._current_task_mode() == "image")
+        type_name = "ảnh" if is_image else "video"
         folder_text = self.image_folder.text().strip()
 
         if folder_text:
             images = self._scan_images()
-            if not images and not is_image:
-                QMessageBox.warning(self, "Không có ảnh", "Không tìm thấy ảnh hợp lệ trong thư mục đã chọn.")
-                return
             if images:
                 self.global_status.setText(
-                    f"Đã phân bổ {len(images)} ảnh qua {len(active_accounts)} tài khoản được tick "
-                    f"(Trung bình ~{len(images)//len(active_accounts)} ảnh/tài khoản)."
+                    f"Đã phân bổ {len(images)} {type_name} từ thư mục ảnh qua {len(active_accounts)} tài khoản được tick "
+                    f"(Trung bình ~{len(images)//len(active_accounts)} {type_name}/tài khoản)."
                 )
-            else:
-                qty = self.image_quantity.value()
-                self.global_status.setText(
-                    f"Đã phân bổ {qty} lượt tạo ảnh (Prompt thuần) qua {len(active_accounts)} tài khoản được tick."
-                )
-        elif is_image:
-            qty = self.image_quantity.value()
-            self.global_status.setText(
-                f"Đã phân bổ {qty} lượt tạo ảnh (Prompt thuần) qua {len(active_accounts)} tài khoản được tick."
-            )
-        else:
-            QMessageBox.warning(self, "Thiếu Thư Mục Ảnh", "Vui lòng chọn thư mục ảnh để phân bổ.")
+                return
+
+        qty = self.image_quantity.value()
+        self.global_status.setText(
+            f"Đã phân bổ {qty} lượt tạo {type_name} (Prompt thuần) qua {len(active_accounts)} tài khoản được tick."
+        )
 
     def _start_batch(self) -> None:
         active_accounts = self._get_enabled_accounts()
@@ -1381,13 +1376,14 @@ class MuseAccountsPage(QWidget):
 
         if folder_text:
             imgs = self._scan_images()
-            source_items = [str(p) for p in imgs]
-        elif is_image:
+            if imgs:
+                source_items = [str(p) for p in imgs]
+            else:
+                qty = self.image_quantity.value()
+                source_items = [f"Prompt #{idx + 1}" for idx in range(qty)]
+        else:
             qty = self.image_quantity.value()
             source_items = [f"Prompt #{idx + 1}" for idx in range(qty)]
-        else:
-            QMessageBox.warning(self, "Thiếu Thư Mục Ảnh", "Vui lòng chọn thư mục ảnh để bắt đầu tạo video.")
-            return
 
         if not source_items:
             QMessageBox.warning(self, "Không có mục cần chạy", "Không tìm thấy mục ảnh/prompt nào để xử lý.")
