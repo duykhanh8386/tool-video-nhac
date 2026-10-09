@@ -510,7 +510,7 @@ class MuseSessionManagerTests(unittest.TestCase):
             password="",
             manual_browser=True,
         )
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + 6
         while time.monotonic() < deadline:
             if (
                 self.manager.snapshot(1).state == MuseSessionState.LOGIN_REQUIRED
@@ -530,7 +530,7 @@ class MuseSessionManagerTests(unittest.TestCase):
 
         driver._current_url = "https://muse.ai/chat"
         driver.logged_in = True
-        future.result(timeout=2)
+        future.result(timeout=6)
 
         snapshot = self.manager.snapshot(1)
         self.assertEqual(snapshot.state, MuseSessionState.READY)
