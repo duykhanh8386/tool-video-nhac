@@ -38,40 +38,20 @@ QUOTA_MARKERS = (
     "usage limit reached",
     "you've reached your limit",
     "you have reached your limit",
-    "not enough credits",
-    "insufficient credits",
-    "out of credits",
-    "weekly limit reached",
-    "daily limit reached",
-    "rate limit reached",
-    "credit limit reached",
     "upgrade to continue",
-    "upgrade plan",
-    "upgrade to pro",
-    "hết lượt",
-    "đạt giới hạn",
-    "hết credit",
-    "không đủ credit",
-    "nâng cấp gói",
-    "hết token",
-    "hết hạn mức",
-    "vượt quá giới hạn",
+    "hết lượt tạo video",
+    "tài khoản đã hết lượt",
     "quota đã dùng",
-    "chạm giới hạn",
+    "hạn mức free tuần",
     "sắp chạm giới hạn",
-    "hạn mức free",
-    "hạn mức tuần",
     "hạn mức sẽ reset",
     "chờ reset",
-    "không đủ để chạy tiếp",
-    "không đủ để chạy",
-    "không đủ để tạo",
-    "nâng cấp lên gói trả phí",
-    "gói trả phí",
-    "bị dừng giữa chừng",
-    "free weekly limit",
-    "upgrade to a paid plan",
-    "will reset on",
+    "account suspended",
+    "account blocked",
+    "tài khoản bị khóa",
+    "bị tạm khóa",
+    "you have been blocked",
+    "tài khoản đã bị đình chỉ",
 )
 
 
@@ -85,16 +65,14 @@ def is_muse_quota_exhausted(text: str) -> bool:
     patterns = [
         r"quota\s+đã\s+dùng",
         r"(sắp|đã)\s+chạm\s+giới\s+hạn",
-        r"không\s+đủ\s+(để\s+)?(chạy|tạo|tiếp\s+tục)",
+        r"hết\s+lượt\s+tạo\s+video",
+        r"hạn\s+mức\s+(free\s+)?tuần",
         r"hạn\s+mức\s+(sẽ\s+)?reset",
         r"chờ\s+reset",
-        r"nâng\s+cấp\s+(lên\s+)?gói\s+trả\s+phí",
-        r"hạn\s+mức\s+free",
-        r"bị\s+dừng\s+giữa\s+chừng",
-        r"not\s+enough\s+(quota|credit|to\s+run|to\s+generate)",
-        r"(approaching|reached)\s+(the\s+)?limit",
-        r"upgrade\s+to\s+(a\s+)?paid\s+plan",
-        r"limit\s+will\s+reset",
+        r"you('ve|\s+have)\s+reached\s+your\s+limit",
+        r"upgrade\s+to\s+continue",
+        r"tài khoản\s+(đã\s+)?bị\s+(khóa|treo|đình\s+chỉ)",
+        r"account\s+(has\s+been\s+)?(suspended|blocked)",
     ]
     return any(re.search(pat, t) for pat in patterns)
 
@@ -428,7 +406,7 @@ def _dismiss_muse_popups(driver: Any) -> None:
 
 
 def _query_muse_videos(driver: Any) -> list[dict[str, str]]:
-    """Trich xuat danh sach video san sinh tu DOM trang Muse theo chuan MuseStudio (lay ca data-hatch-video-src va the video chat, bo qua avatar mascot)."""
+    """Trich xuat danh sach video san sinh tu DOM trang Muse theo chuan MuseStudio (lay ca data-hatch-video-src, source tag va the video chat, bo qua avatar mascot)."""
     try:
         return driver.execute_script("""
             window.__mavSeq = window.__mavSeq || 0;
@@ -448,16 +426,18 @@ def _query_muse_videos(driver: Any) -> list[dict[str, str]]:
                 }
 
                 const vidEl = (w.tagName === 'VIDEO') ? w : w.querySelector('video');
+                const srcTag = vidEl ? vidEl.querySelector('source') : null;
+                const sourceSrc = srcTag ? (srcTag.getAttribute('src') || srcTag.src || '') : '';
                 let src = (
                     w.getAttribute('data-hatch-video-src') ||
-                    (vidEl ? (vidEl.currentSrc || vidEl.src || vidEl.getAttribute('src')) : '') ||
+                    (vidEl ? (vidEl.currentSrc || vidEl.src || vidEl.getAttribute('src') || sourceSrc) : '') ||
                     ''
                 ).trim();
 
                 if (!src) {
                     const aLink = w.querySelector('a[href*=".mp4"], a[download]') ||
-                                  w.parentElement?.querySelector('a[href*=".mp4"]');
-                    if (aLink) src = (aLink.getAttribute('href') || '').trim();
+                                  w.parentElement?.querySelector('a[href*=".mp4"], a[download]');
+                    if (aLink) src = (aLink.getAttribute('href') || aLink.href || '').trim();
                 }
 
                 if (!src) return;
@@ -483,14 +463,15 @@ def _query_muse_videos(driver: Any) -> list[dict[str, str]]:
                 ).split('?')[0];
 
                 const msg = w.closest('[data-message-item="true"],[data-message-role],[data-message-group-id],[class*="message" i]') || w.parentElement;
-                const txt = msg ? (msg.innerText || '') : '';
+                const userMsg = msg ? (msg.previousElementSibling?.innerText || '') : '';
+                const txt = (userMsg + ' ' + (msg ? (msg.innerText || '') : '')).slice(0, 2500);
 
                 results.push({
                     id: mavId,
                     src: src,
                     name: m ? m[0] : '',
                     label: label,
-                    text: txt.slice(0, 1200),
+                    text: txt,
                     poster: poster
                 });
             });
@@ -516,16 +497,20 @@ def _download_muse_video_file(
 
     # Tang 1: Fetch Base64 truc tiep qua JavaScript trong session cua browser (Chuan MuseStudio JS_FETCH_VIDEO voi timeout an toan)
     try:
-        driver.set_script_timeout(20)
+        driver.set_script_timeout(60)
         b64_data = driver.execute_async_script("""
             var src = arguments[0];
             var vidId = arguments[1];
             var done = arguments[arguments.length - 1];
-            var timer = setTimeout(function() { done(null); }, 18000);
+            var timer = setTimeout(function() { done(null); }, 55000);
 
             var w = vidId ? document.querySelector('[data-mav-id="' + vidId + '"]') : null;
             var vidTag = w ? (w.tagName === 'VIDEO' ? w : w.querySelector('video')) : null;
-            var fetchUrl = (w && w.getAttribute('data-hatch-video-src')) || (vidTag && (vidTag.currentSrc || vidTag.src)) || src;
+            var srcTag = vidTag ? vidTag.querySelector('source') : null;
+            var fetchUrl = (w && w.getAttribute('data-hatch-video-src')) || 
+                           (vidTag && (vidTag.currentSrc || vidTag.src)) || 
+                           (srcTag && srcTag.getAttribute('src')) || 
+                           src;
 
             fetch(fetchUrl, { credentials: 'include' })
                 .then(function(res) {
@@ -573,7 +558,7 @@ def _download_muse_video_file(
         except Exception:
             pass
 
-    # Tang 3: DOM <a download> trigger (tao the a roi click trong DOM)
+    # Tang 3: DOM <a download> trigger (tao the a roi click trong DOM theo chuan MuseStudio)
     try:
         driver.execute_script("""
             var a = document.createElement('a');
@@ -586,7 +571,7 @@ def _download_muse_video_file(
         if download_dir and download_dir.exists():
             import time
             st = time.monotonic()
-            while time.monotonic() - st < 25.0:
+            while time.monotonic() - st < 35.0:
                 time.sleep(1.0)
                 candidates = [
                     f for f in download_dir.iterdir()

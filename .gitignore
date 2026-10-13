@@ -12,3 +12,5 @@ dist/
 visual_loop_studio/vendor/bin/*.exe
 build/version_info.txt
 visual_loop_studio/MuseCookieProfiles/
+MuseStudio.exe
+tool-video-nhac/
