@@ -673,6 +673,10 @@ class MuseCookieBatchRunnerThread(QThread):
 
         def worker_task(worker_id: int) -> None:
             nonlocal completed_total, failed_total, remaining_total
+            if worker_id > 1:
+                stagger_wait = round((worker_id - 1) * random.uniform(2.5, 4.0), 1)
+                self.worker_status_signal.emit(worker_id, f"Khởi động sau {stagger_wait}s…")
+                time.sleep(stagger_wait)
             while not self._stopped:
                 current_acc = None
                 with account_pool_lock:
@@ -850,7 +854,7 @@ class MuseCookieBatchRunnerThread(QThread):
                             self.log_signal.emit(f"🔄 [{worker_tag}]: F5 Muse ngầm theo chu kỳ {self.auto_refresh_minutes} phút…")
                             try:
                                 driver.refresh()
-                                time.sleep(2.0)
+                                time.sleep(random.uniform(3.5, 5.0))
                                 _dismiss_muse_popups(driver)
                                 refreshed_vids = _query_muse_videos(driver)
                                 for rv in refreshed_vids:
@@ -936,11 +940,11 @@ class MuseCookieBatchRunnerThread(QThread):
                                         self.log_signal.emit(f"❌ [{worker_tag}]: Không thể điền prompt 2 lần liên tiếp. Bỏ qua tài khoản {acc_label}…")
                                         break
                                     continue
-                            time.sleep(1.0)
+                            time.sleep(random.uniform(1.8, 3.0))
 
                             self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang bấm gửi prompt ({chunk_label})…")
                             submitted = self._submit_chat_prompt(driver)
-                            time.sleep(1.5)
+                            time.sleep(random.uniform(2.0, 3.5))
 
                             still_in_composer = False
                             try:
@@ -1151,7 +1155,7 @@ class MuseCookieBatchRunnerThread(QThread):
                                             self.log_signal.emit(f"⚠ [{worker_tag}]: Tải không thành công {prefix_msg}Prompt #{p_id:04d}")
 
                                 if not unassigned_prompts:
-                                    self.log_signal.emit(f"🎉 [{worker_tag}]: Đã tải đủ toàn bộ {n_prompts} video của {chunk_label}! Chuyển sang gửi prompt đợt tiếp theo ngay lập tức…")
+                                    self.log_signal.emit(f"🎉 [{worker_tag}]: Đã tải đủ toàn bộ {n_prompts} video của {chunk_label}! Chuẩn bị giãn cách trước đợt tiếp theo…")
                                     break
 
                                 if time.monotonic() - last_heartbeat >= 20.0:
@@ -1200,7 +1204,7 @@ class MuseCookieBatchRunnerThread(QThread):
                                     )
                                     break
 
-                                time.sleep(2.0)
+                                time.sleep(random.uniform(2.5, 3.5))
 
                             if unassigned_prompts:
                                 missed_count = len(unassigned_prompts)
@@ -1222,7 +1226,11 @@ class MuseCookieBatchRunnerThread(QThread):
                                     f"Video vẫn đang tạo ngầm trên Muse và sẽ tự động tải bù ở các đợt tiếp theo."
                                 )
 
-                            cooldown = random.uniform(3.0, 5.0)
+                            cooldown = round(random.uniform(8.0, 15.0), 1)
+                            self.worker_status_signal.emit(worker_id, f"[{acc_label}] Giãn cách an toàn ({cooldown}s)…")
+                            self.log_signal.emit(
+                                f"💤 [{worker_tag}]: Giãn cách nhẹ {cooldown}s trước đợt tiếp theo để tài khoản an toàn, tránh bị Muse giới hạn…"
+                            )
                             time.sleep(cooldown)
 
                         except Exception as chunk_err:
