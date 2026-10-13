@@ -134,6 +134,32 @@ class TestMuseCookies(unittest.TestCase):
         emails = {a.email for a in all_accounts}
         self.assertEqual(emails, {"user1@example.com", "user2@example.com"})
 
+    def test_import_from_files_and_filename_stem(self):
+        f1 = Path(self.temp_dir.name) / "cuongngocvu41647kick5@huta.pro.txt"
+        f1.write_text("session=val1; domain=.muse.ai", encoding="utf-8")
+        f2 = Path(self.temp_dir.name) / "my_custom_account.txt"
+        f2.write_text("token=val2; domain=.muse.ai", encoding="utf-8")
+
+        added = self.store.import_from_files([f1, f2])
+        self.assertEqual(len(added), 2)
+        self.assertEqual(added[0].email, "cuongngocvu41647kick5@huta.pro")
+        self.assertEqual(added[1].email, "my_custom_account")
+
+    def test_display_referral_code(self):
+        acc = MuseCookieAccount(
+            account_id="id1",
+            name="Muse 2",
+            email="cuongngocvu41647kick5@huta.pro",
+        )
+        # Should generate a 6-character code
+        code = acc.display_referral_code
+        self.assertEqual(len(code), 6)
+        self.assertTrue(code.isalnum())
+
+        # When explicitly set, should return that code
+        acc.referral_code = "5W4VKU"
+        self.assertEqual(acc.display_referral_code, "5W4VKU")
+
     def test_inject_cookies_to_driver(self):
         mock_driver = MagicMock()
         cookies = [

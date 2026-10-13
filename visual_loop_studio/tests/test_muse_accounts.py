@@ -82,5 +82,49 @@ class TestMuseAccountsPage(unittest.TestCase):
         self.assertFalse(is_muse_disconnected_text("Nhắn tin cho Muse để tạo video"))
 
 
+    def test_accounts_table_realtime_status_and_columns(self):
+        from auth.muse_cookies import MuseCookieAccount
+        settings = AppSettings()
+        page = MuseAccountsPage(settings)
+        # Verify 7 columns matching user screenshot
+        self.assertEqual(page.accounts_table.columnCount(), 7)
+        headers = [page.accounts_table.horizontalHeaderItem(i).text() for i in range(7)]
+        self.assertIn("☑ Chạy", headers[0])
+        self.assertIn("Tài khoản", headers[1])
+        self.assertIn("Email", headers[2])
+        self.assertIn("Mã mời", headers[3])
+        self.assertIn("Trạng thái", headers[5])
+
+        # Test real-time status row styling
+        fake_acc = MuseCookieAccount(
+            account_id="test_acc_99",
+            name="Muse 99",
+            email="cuongngocvu41647kick5@huta.pro",
+            referral_code="5W4VKU",
+        )
+        page.cookie_store.save(fake_acc)
+        page._reload_accounts_table()
+
+        # Update to running
+        page._update_account_realtime_row("test_acc_99", "running", "▶ Đang chạy tạo video")
+        row = 0
+        for r in range(page.accounts_table.rowCount()):
+            if page.accounts_table.item(r, 0).data(1) == "test_acc_99" or page.accounts_table.item(r, 0).data(32) == "test_acc_99":
+                row = r
+                break
+        status_item = page.accounts_table.item(row, 5)
+        self.assertIn("Đang chạy tạo video", status_item.text())
+        # Running background should be green tone #ecfdf5
+        self.assertEqual(status_item.background().color().name(), "#ecfdf5")
+
+        # Update to quota
+        page._update_account_realtime_row("test_acc_99", "quota", "⛔ Hết token – đã dừng lúc 12:00:00")
+        self.assertIn("Hết token", status_item.text())
+        self.assertEqual(status_item.background().color().name(), "#fee2e2")
+
+        # Cleanup
+        page.cookie_store.delete("test_acc_99")
+
+
 if __name__ == "__main__":
     unittest.main()

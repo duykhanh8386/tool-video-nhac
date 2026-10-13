@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -296,6 +298,7 @@ class MuseCookieBatchRunnerThread(QThread):
     worker_status_signal = Signal(int, str)  # worker_idx (1-5), status_text
     account_completed_signal = Signal(str, int)  # account_id, count
     account_email_found_signal = Signal(str, str)  # account_id, detected_email
+    account_status_signal = Signal(str, str, str)  # account_id, status_type, status_text
     batch_finished_signal = Signal(bool, str)
 
     def __init__(
@@ -682,6 +685,7 @@ class MuseCookieBatchRunnerThread(QThread):
                 acc_label = current_acc.combo_label
                 worker_tag = f"Luồng {worker_id}: {acc_label}"
                 self.worker_status_signal.emit(worker_id, f"Khởi tạo Chrome [{acc_label}]…")
+                self.account_status_signal.emit(current_acc.account_id, "running", "▶ Đang chạy tạo video")
                 self.log_signal.emit(f"⚙ [{worker_tag}]: Bắt đầu phiên làm việc trên Muse.")
 
                 profile_dir = MUSE_COOKIE_PROFILES_DIR / current_acc.account_id
@@ -723,6 +727,7 @@ class MuseCookieBatchRunnerThread(QThread):
 
                     init_text = _get_muse_recent_text(driver)
                     if any(b in init_text.lower() for b in ("account suspended", "bị tạm khóa", "tài khoản bị khóa", "account blocked")):
+                        self.account_status_signal.emit(current_acc.account_id, "error", "• Lỗi: Tài khoản bị khóa")
                         self.log_signal.emit(
                             f"⚠ [{worker_tag}]: Tài khoản bị khóa cứng. Tự động chuyển sang tài khoản tiếp theo…"
                         )
@@ -739,6 +744,7 @@ class MuseCookieBatchRunnerThread(QThread):
                         except Exception:
                             pass
                         if is_muse_disconnected_text(init_text):
+                            self.account_status_signal.emit(current_acc.account_id, "error", "• Lỗi: Đã ngắt kết nối Muse")
                             self.log_signal.emit(
                                 f"❌ [{worker_tag}]: Tài khoản {acc_label} bị Muse ngắt kết nối phiên làm việc ('Đã ngắt kết nối Muse'). Tự động chuyển sang tài khoản tiếp theo…"
                             )
@@ -921,10 +927,12 @@ class MuseCookieBatchRunnerThread(QThread):
                                     with chunks_lock:
                                         shared_chunks.insert(0, chunk)
                                     if is_muse_disconnected_text(_get_muse_recent_text(driver)):
+                                        self.account_status_signal.emit(current_acc.account_id, "error", "• Lỗi: Đã ngắt kết nối Muse")
                                         self.log_signal.emit(f"❌ [{worker_tag}]: Tài khoản {acc_label} bị Muse ngắt kết nối. Bỏ qua tài khoản này để các tài khoản khác tiếp tục…")
                                         break
                                     consecutive_send_fails += 1
                                     if consecutive_send_fails >= 2:
+                                        self.account_status_signal.emit(current_acc.account_id, "error", "• Lỗi: Không thể điền prompt")
                                         self.log_signal.emit(f"❌ [{worker_tag}]: Không thể điền prompt 2 lần liên tiếp. Bỏ qua tài khoản {acc_label}…")
                                         break
                                     continue
@@ -983,11 +991,13 @@ class MuseCookieBatchRunnerThread(QThread):
                                 with chunks_lock:
                                     shared_chunks.insert(0, chunk)
                                 if is_muse_disconnected_text(_get_muse_recent_text(driver)):
+                                    self.account_status_signal.emit(current_acc.account_id, "error", "• Lỗi: Đã ngắt kết nối Muse")
                                     self.log_signal.emit(
                                         f"❌ [{worker_tag}]: Tài khoản {acc_label} bị Muse ngắt kết nối ('Đã ngắt kết nối Muse'). Bỏ qua tài khoản này…"
                                     )
                                     break
                                 if consecutive_send_fails >= 2:
+                                    self.account_status_signal.emit(current_acc.account_id, "error", "• Lỗi: Muse không nhận prompt")
                                     self.log_signal.emit(
                                         f"❌ [{worker_tag}]: Gửi tin thất bại 2 lần liên tiếp. Bỏ qua tài khoản {acc_label}, chuyển tài khoản khác…"
                                     )
@@ -998,6 +1008,7 @@ class MuseCookieBatchRunnerThread(QThread):
                             time.sleep(1.0)
                             post_submit_text = _get_muse_recent_text(driver)
                             if any(b in post_submit_text.lower() for b in ("account suspended", "bị tạm khóa", "tài khoản bị khóa", "account blocked")):
+                                self.account_status_signal.emit(current_acc.account_id, "error", "• Lỗi: Tài khoản bị khóa")
                                 raise RuntimeError(f"Tài khoản bị khóa: {acc_label}.")
                             elif is_muse_quota_exhausted(post_submit_text):
                                 self.log_signal.emit(f"ℹ [{worker_tag}]: Có cảnh báo hạn mức/quota, Muse vẫn xử lý ở hàng đợi thường…")
@@ -1229,6 +1240,12 @@ class MuseCookieBatchRunnerThread(QThread):
                                     shared_chunks.insert(0, retry_chunk)
 
                             if is_quota:
+                                stop_time = time.strftime("%H:%M:%S")
+                                self.account_status_signal.emit(
+                                    current_acc.account_id,
+                                    "quota",
+                                    f"⛔ Hết token – đã dừng lúc {stop_time}",
+                                )
                                 self.log_signal.emit(
                                     f"🔄 [{worker_tag}]: Tài khoản đã hết token/credit! "
                                     f"Đã tự động hoàn trả {len(uncompleted_items)} prompt chưa hoàn thành về hàng đợi. "
@@ -1240,11 +1257,17 @@ class MuseCookieBatchRunnerThread(QThread):
                                 consecutive_send_fails += 1
                                 self.log_signal.emit(f"❌ [{worker_tag}] Lỗi nhóm ({chunk_label}): {chunk_err} (lần {consecutive_send_fails}/2)")
                                 if consecutive_send_fails >= 2:
+                                    self.account_status_signal.emit(current_acc.account_id, "error", "• Lỗi: Không gửi được prompt")
                                     self.log_signal.emit(f"⚠ [{worker_tag}]: Tài khoản {acc_label} gặp lỗi gửi prompt 2 lần liên tiếp. Bỏ qua tài khoản này để chuyển tài khoản tiếp theo…")
                                     break
 
                     self.account_completed_signal.emit(current_acc.account_id, acc_completed)
+                    if acc_completed > 0 and not is_quota:
+                        self.account_status_signal.emit(current_acc.account_id, "done", f"✔ Hoàn thành ({acc_completed} video)")
                 except Exception as acc_err:
+                    err_msg = str(acc_err).strip()
+                    short_err = (err_msg[:25] + "…") if len(err_msg) > 25 else err_msg
+                    self.account_status_signal.emit(current_acc.account_id, "error", f"• Lỗi: {short_err or 'Không xác định'}")
                     self.log_signal.emit(f"❌ [{worker_tag}] Lỗi tài khoản: {acc_err}")
                 finally:
                     if driver:
@@ -1446,6 +1469,12 @@ class MuseAccountsPage(QWidget):
         self.viewing_status_label.setStyleSheet("font-weight: 600; color: #0284c7; padding: 0 4px;")
         row_layout.addWidget(self.viewing_status_label)
 
+        # Nút File Cookie (.txt)
+        self.btn_cookie_files = QPushButton("📄 File Cookie (.txt)")
+        self.btn_cookie_files.setMinimumHeight(32)
+        self.btn_cookie_files.clicked.connect(self._import_cookie_files)
+        row_layout.addWidget(self.btn_cookie_files)
+
         # Nút Thư mục Cookie
         self.btn_cookie_folder = QPushButton("📁 Thư mục Cookie")
         self.btn_cookie_folder.setMinimumHeight(32)
@@ -1555,17 +1584,22 @@ class MuseAccountsPage(QWidget):
         cfg_row.addWidget(self.btn_deselect_all)
         accounts_vbox.addLayout(cfg_row)
 
-        # Bảng hiển thị danh sách tài khoản
+        # Bảng hiển thị danh sách tài khoản (Khớp 100% ảnh tham chiếu người dùng)
         self.accounts_table = QTableWidget()
         self.accounts_table.setColumnCount(7)
         self.accounts_table.setHorizontalHeaderLabels([
-            "Chạy", "Tên tài khoản", "Email Google / Muse", "Trạng thái",
-            "Lần kiểm tra cuối", "Số cookies", "Đã hoàn thành"
+            "☑ Chạy",
+            "Tài khoản",
+            "Email ▸ bấm đây: 📋 Copy tất cả",
+            "🎁 Mã mời ▸ 📋 Copy tất cả",
+            "Lượt mời",
+            "Trạng thái",
+            "Gói miễn phí đã dùng",
         ])
         self.accounts_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.accounts_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.accounts_table.setMinimumHeight(160)
-        self.accounts_table.setMaximumHeight(240)
+        self.accounts_table.setMinimumHeight(170)
+        self.accounts_table.setMaximumHeight(260)
         self.accounts_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.accounts_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.accounts_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
@@ -1573,7 +1607,9 @@ class MuseAccountsPage(QWidget):
         self.accounts_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.accounts_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.accounts_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self.accounts_table.horizontalHeader().sectionClicked.connect(self._on_header_section_clicked)
         self.accounts_table.itemClicked.connect(self._on_table_row_clicked)
+        self.accounts_table.itemChanged.connect(self._on_table_item_changed)
         accounts_vbox.addWidget(self.accounts_table)
         root.addWidget(accounts_card)
 
@@ -2019,34 +2055,209 @@ class MuseAccountsPage(QWidget):
                 chk_item.setData(Qt.UserRole, acc.account_id)
                 self.accounts_table.setItem(row, 0, chk_item)
 
-                # Col 1: Tên
+                # Col 1: Tên tài khoản
                 name_item = QTableWidgetItem(acc.name)
                 name_item.setData(Qt.UserRole, acc.account_id)
+                name_item.setTextAlignment(Qt.AlignCenter)
+                f_name = name_item.font()
+                f_name.setBold(True)
+                name_item.setFont(f_name)
                 self.accounts_table.setItem(row, 1, name_item)
 
-                # Col 2: Email
-                email_item = QTableWidgetItem(acc.email or "—")
-                self.accounts_table.setItem(row, 2, email_item)
+                # Col 2: Email (kèm nút [ 📋 Copy ])
+                email_widget = QWidget()
+                email_layout = QHBoxLayout(email_widget)
+                email_layout.setContentsMargins(6, 2, 6, 2)
+                email_layout.setSpacing(6)
 
-                # Col 3: Trạng thái
+                btn_copy_email = QPushButton("[ 📋 Copy ]")
+                btn_copy_email.setCursor(Qt.PointingHandCursor)
+                btn_copy_email.setToolTip("Copy email này")
+                btn_copy_email.setStyleSheet(
+                    "QPushButton { font-size: 11px; padding: 2px 6px; border: 1px solid #bbf7d0; "
+                    "border-radius: 4px; background: #ffffff; color: #16a34a; font-weight: 600; } "
+                    "QPushButton:hover { background: #dcfce7; }"
+                )
+                btn_copy_email.clicked.connect(lambda _, em=acc.email: self._copy_text_to_clipboard(em, "Email"))
+                email_layout.addWidget(btn_copy_email)
+
+                lbl_email = QLabel(acc.email or "—")
+                lbl_email.setStyleSheet("color: #15803d; font-weight: 500; font-size: 12px; background: transparent;")
+                lbl_email.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                email_layout.addWidget(lbl_email)
+                email_layout.addStretch()
+
+                email_dummy_item = QTableWidgetItem()
+                email_dummy_item.setData(Qt.UserRole, acc.account_id)
+                self.accounts_table.setItem(row, 2, email_dummy_item)
+                self.accounts_table.setCellWidget(row, 2, email_widget)
+
+                # Col 3: Mã mời (kèm nút [ 📋 Copy ])
+                ref_code = acc.display_referral_code
+                code_widget = QWidget()
+                code_layout = QHBoxLayout(code_widget)
+                code_layout.setContentsMargins(6, 2, 6, 2)
+                code_layout.setSpacing(6)
+
+                btn_copy_code = QPushButton("[ 📋 Copy ]")
+                btn_copy_code.setCursor(Qt.PointingHandCursor)
+                btn_copy_code.setToolTip("Copy mã mời này")
+                btn_copy_code.setStyleSheet(
+                    "QPushButton { font-size: 11px; padding: 2px 6px; border: 1px solid #bbf7d0; "
+                    "border-radius: 4px; background: #ffffff; color: #16a34a; font-weight: 600; } "
+                    "QPushButton:hover { background: #dcfce7; }"
+                )
+                btn_copy_code.clicked.connect(lambda _, cd=ref_code: self._copy_text_to_clipboard(cd, "Mã mời"))
+                code_layout.addWidget(btn_copy_code)
+
+                lbl_code = QLabel(f"【 {ref_code} 】" if ref_code else "—")
+                lbl_code.setStyleSheet("color: #15803d; font-weight: 700; font-size: 12px; background: transparent;")
+                lbl_code.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                code_layout.addWidget(lbl_code)
+                code_layout.addStretch()
+
+                code_dummy_item = QTableWidgetItem()
+                code_dummy_item.setData(Qt.UserRole, acc.account_id)
+                self.accounts_table.setItem(row, 3, code_dummy_item)
+                self.accounts_table.setCellWidget(row, 3, code_widget)
+
+                # Col 4: Lượt mời
+                invite_item = QTableWidgetItem(acc.invite_count or "còn 30")
+                invite_item.setTextAlignment(Qt.AlignCenter)
+                invite_item.setForeground(QColor("#15803d"))
+                self.accounts_table.setItem(row, 4, invite_item)
+
+                # Col 5: Trạng thái
                 status_item = QTableWidgetItem(acc.status_display)
-                self.accounts_table.setItem(row, 3, status_item)
+                status_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+                f_st = status_item.font()
+                f_st.setBold(True)
+                status_item.setFont(f_st)
+                self.accounts_table.setItem(row, 5, status_item)
 
-                # Col 4: Lần kiểm tra cuối
-                time_item = QTableWidgetItem(acc.last_checked or "—")
-                self.accounts_table.setItem(row, 4, time_item)
+                # Col 6: Gói miễn phí đã dùng
+                quota_text = f"////////// {acc.quota_used or '100%'}"
+                quota_item = QTableWidgetItem(quota_text)
+                quota_item.setTextAlignment(Qt.AlignCenter)
+                quota_item.setForeground(QColor("#15803d"))
+                f_q = quota_item.font()
+                f_q.setBold(True)
+                quota_item.setFont(f_q)
+                self.accounts_table.setItem(row, 6, quota_item)
 
-                # Col 5: Số cookies
-                cookie_cnt_item = QTableWidgetItem(f"{len(acc.cookies)} cookies")
-                self.accounts_table.setItem(row, 5, cookie_cnt_item)
-
-                # Col 6: Đã hoàn thành
-                tasks_item = QTableWidgetItem(f"{acc.tasks_completed}")
-                self.accounts_table.setItem(row, 6, tasks_item)
-
-            self.accounts_table.itemChanged.connect(self._on_table_item_changed)
+                # Áp dụng màu nền hàng và text theo trạng thái hiện tại
+                self._apply_row_styling(row, acc.status, acc.status_display)
         finally:
             self._refreshing = False
+
+    def _apply_row_styling(self, row: int, status_type: str, status_text: str = "") -> None:
+        """Tô màu toàn bộ hàng và text trạng thái realtime khớp 100% giao diện ảnh mẫu."""
+        if status_type == "running":
+            bg_color = QColor("#ecfdf5")  # Xanh lá pastel nhạt
+            name_color = QColor("#15803d")
+            status_color = QColor("#16a34a")
+            default_st = "▶ Đang chạy tạo video"
+        elif status_type == "quota":
+            bg_color = QColor("#fee2e2")  # Đỏ hồng pastel nhạt
+            name_color = QColor("#b91c1c")
+            status_color = QColor("#dc2626")
+            default_st = "⛔ Hết token"
+        elif status_type in ("error", "expired"):
+            bg_color = QColor("#fee2e2")  # Đỏ hồng pastel nhạt
+            name_color = QColor("#b91c1c")
+            status_color = QColor("#dc2626")
+            default_st = "• Lỗi"
+        elif status_type == "done":
+            bg_color = QColor("#f0fdf4")
+            name_color = QColor("#15803d")
+            status_color = QColor("#16a34a")
+            default_st = "✔ Đã hoàn tất"
+        else:
+            bg_color = QColor("#ffffff")
+            name_color = QColor("#334155")
+            status_color = QColor("#64748b")
+            default_st = "⚪ Sẵn sàng"
+
+        display_text = status_text or default_st
+
+        for col in range(self.accounts_table.columnCount()):
+            item = self.accounts_table.item(row, col)
+            if item:
+                item.setBackground(bg_color)
+                if col == 1:
+                    item.setForeground(name_color)
+                    f = item.font()
+                    f.setBold(True)
+                    item.setFont(f)
+                elif col == 5:
+                    item.setText(display_text)
+                    item.setForeground(status_color)
+                    f = item.font()
+                    f.setBold(True)
+                    item.setFont(f)
+
+        # Cập nhật nền cho các widget nhúng tại cột 2 và 3
+        w_email = self.accounts_table.cellWidget(row, 2)
+        if w_email:
+            w_email.setStyleSheet(f"background: {bg_color.name()}; border: none;")
+            lbl = w_email.findChild(QLabel)
+            if lbl:
+                lbl.setStyleSheet(f"color: {name_color.name()}; font-weight: 500; font-size: 12px; background: transparent;")
+
+        w_code = self.accounts_table.cellWidget(row, 3)
+        if w_code:
+            w_code.setStyleSheet(f"background: {bg_color.name()}; border: none;")
+            lbl = w_code.findChild(QLabel)
+            if lbl:
+                lbl.setStyleSheet(f"color: {name_color.name()}; font-weight: 700; font-size: 12px; background: transparent;")
+
+    def _update_account_realtime_row(self, account_id: str, status_type: str, status_text: str) -> None:
+        """Cập nhật trạng thái realtime cho một tài khoản cụ thể trong bảng."""
+        for row in range(self.accounts_table.rowCount()):
+            item = self.accounts_table.item(row, 0)
+            if item and item.data(Qt.UserRole) == account_id:
+                self._apply_row_styling(row, status_type, status_text)
+                break
+
+    def _copy_text_to_clipboard(self, text: str, label: str = "Nội dung") -> None:
+        if not text or text == "—":
+            return
+        QApplication.clipboard().setText(text)
+        self.global_status.setText(f"📋 Đã copy {label}: {text}")
+
+    def _on_header_section_clicked(self, logical_index: int) -> None:
+        if logical_index == 2:
+            # Copy all emails
+            emails = [acc.email for acc in self.cookie_store.all() if acc.email]
+            if emails:
+                text = "\n".join(emails)
+                QApplication.clipboard().setText(text)
+                self.global_status.setText(f"📋 Đã copy {len(emails)} email vào bộ nhớ tạm!")
+                QMessageBox.information(
+                    self,
+                    "Đã Copy Email",
+                    f"Đã copy toàn bộ {len(emails)} email vào bộ nhớ tạm (Clipboard)!\n\n"
+                    + "\n".join(emails[:8])
+                    + (f"\n...và {len(emails)-8} email khác" if len(emails) > 8 else ""),
+                )
+            else:
+                QMessageBox.information(self, "Chưa Có Email", "Không tìm thấy email nào để copy.")
+        elif logical_index == 3:
+            # Copy all referral codes
+            codes = [acc.display_referral_code for acc in self.cookie_store.all() if acc.display_referral_code]
+            if codes:
+                text = "\n".join(codes)
+                QApplication.clipboard().setText(text)
+                self.global_status.setText(f"🎁 Đã copy {len(codes)} mã mời vào bộ nhớ tạm!")
+                QMessageBox.information(
+                    self,
+                    "Đã Copy Mã Mời",
+                    f"Đã copy toàn bộ {len(codes)} mã mời vào bộ nhớ tạm (Clipboard)!\n\n"
+                    + "\n".join(codes[:8])
+                    + (f"\n...và {len(codes)-8} mã khác" if len(codes) > 8 else ""),
+                )
+            else:
+                QMessageBox.information(self, "Chưa Có Mã Mời", "Không tìm thấy mã mời nào để copy.")
 
     def _on_table_item_changed(self, item: QTableWidgetItem) -> None:
         if self._refreshing or item.column() != 0:
@@ -2087,6 +2298,30 @@ class MuseAccountsPage(QWidget):
     # =========================================================================
     # THAO TÁC NÚT BẤM TOOLBAR
     # =========================================================================
+
+    def _import_cookie_files(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Chọn một hoặc nhiều file Cookie (.txt, .json)",
+            "",
+            "Cookie files (*.txt *.json);;All files (*.*)",
+        )
+        if not files:
+            return
+        try:
+            added = self.cookie_store.import_from_files(files)
+            if added:
+                QMessageBox.information(
+                    self,
+                    "Nhập File Cookie",
+                    f"Đã thêm thành công {len(added)} tài khoản từ file!\n"
+                    f"Tên email của mỗi tài khoản đã được gán đúng theo tên file txt gửi vào.",
+                )
+                self._reload_accounts_table()
+            else:
+                QMessageBox.warning(self, "Nhập File Cookie", "Không tìm thấy dữ liệu cookie hợp lệ trong các file đã chọn.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Lỗi Nhập Cookie", str(exc))
 
     def _import_cookie_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Chọn Thư mục chứa các file Cookie (.json, .txt)")
@@ -2440,6 +2675,7 @@ class MuseAccountsPage(QWidget):
         self._active_runner.worker_status_signal.connect(self._on_worker_status)
         self._active_runner.account_completed_signal.connect(self._on_account_task_completed)
         self._active_runner.account_email_found_signal.connect(self._on_account_email_found)
+        self._active_runner.account_status_signal.connect(self._update_account_realtime_row)
         self._active_runner.batch_finished_signal.connect(self._on_batch_finished)
         self._active_runner.start()
 
@@ -2558,6 +2794,7 @@ class MuseAccountsPage(QWidget):
         self._active_runner.worker_status_signal.connect(self._on_worker_status)
         self._active_runner.account_completed_signal.connect(self._on_account_task_completed)
         self._active_runner.account_email_found_signal.connect(self._on_account_email_found)
+        self._active_runner.account_status_signal.connect(self._update_account_realtime_row)
         self._active_runner.batch_finished_signal.connect(self._on_batch_finished)
         self._active_runner.start()
 
@@ -2568,6 +2805,14 @@ class MuseAccountsPage(QWidget):
             self.stop_all.setEnabled(False)
             self.start_all.setEnabled(True)
             self.resume_all.setEnabled(True)
+            stop_time = time.strftime("%H:%M:%S")
+            for row in range(self.accounts_table.rowCount()):
+                st_item = self.accounts_table.item(row, 5)
+                if st_item and "Đang chạy" in st_item.text():
+                    id_item = self.accounts_table.item(row, 0)
+                    acc_id = id_item.data(Qt.UserRole) if id_item else ""
+                    if acc_id:
+                        self._apply_row_styling(row, "ready", f"⏸ Tạm dừng lúc {stop_time}")
 
     def _on_batch_progress(self, percent: int, text: str) -> None:
         self.global_status.setText(text)

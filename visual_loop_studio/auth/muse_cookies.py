@@ -52,6 +52,20 @@ class MuseCookieAccount:
     tasks_completed: int = 0
     created_at: str = ""
 
+    referral_code: str = ""
+    invite_count: str = "còn 30"
+    quota_used: str = "100%"
+
+    @property
+    def display_referral_code(self) -> str:
+        if self.referral_code:
+            return self.referral_code
+        seed = self.email or self.account_id or self.name
+        if seed:
+            h = hashlib.md5(seed.encode("utf-8")).hexdigest()
+            return h[:6].upper()
+        return ""
+
     @property
     def status_display(self) -> str:
         time_part = f" • {self.last_checked}" if self.last_checked else ""
@@ -61,6 +75,10 @@ class MuseCookieAccount:
             return f"🔴 Hết hạn{time_part}"
         elif self.status == "error":
             return f"🔴 Lỗi{time_part}"
+        elif self.status == "running":
+            return "▶ Đang chạy tạo video"
+        elif self.status == "quota":
+            return "⛔ Hết token"
         return f"⚪ Chưa kiểm tra{time_part}"
 
     @property
@@ -86,6 +104,9 @@ class MuseCookieAccount:
             enabled=bool(data.get("enabled", True)),
             tasks_completed=int(data.get("tasks_completed") or 0),
             created_at=str(data.get("created_at") or ""),
+            referral_code=str(data.get("referral_code") or ""),
+            invite_count=str(data.get("invite_count") or "còn 30"),
+            quota_used=str(data.get("quota_used") or "100%"),
         )
 
 
@@ -128,13 +149,17 @@ def _is_valid_email(email: str) -> bool:
 
 
 def extract_email_from_text_or_cookies(raw_text: str, cookies: list[dict[str, Any]], filename: str = "") -> str:
-    """Best-effort extraction of user email from filename, cookie values, or raw text."""
-    # 1. Check filename
+    """Best-effort extraction of user email from filename, cookie values, or raw text.
+    If the user imported a txt file with an email or custom name in the filename, that name is preserved.
+    """
+    # 1. Check filename first
     if filename:
-        clean_stem = Path(filename).stem
+        clean_stem = Path(filename).stem.strip()
         match = EMAIL_REGEX.search(clean_stem)
         if match and _is_valid_email(match.group(0)):
             return match.group(0).lower()
+        if _is_valid_email(clean_stem):
+            return clean_stem.lower()
 
     # 2. Check JWT tokens in cookie values
     for item in cookies:
@@ -184,6 +209,12 @@ def extract_email_from_text_or_cookies(raw_text: str, cookies: list[dict[str, An
     match = EMAIL_REGEX.search(unquoted_text)
     if match and _is_valid_email(match.group(0)):
         return match.group(0).lower()
+
+    # 5. Fallback: if filename was provided, use filename stem as email/account identifier
+    if filename:
+        clean_stem = Path(filename).stem.strip()
+        if clean_stem:
+            return clean_stem
 
     return ""
 
@@ -543,19 +574,26 @@ class MuseCookieAccountStore:
         if not folder.is_dir():
             raise ValueError(f"Thư mục không tồn tại: {folder}")
 
-        added: list[MuseCookieAccount] = []
         files = sorted(
             [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in {".json", ".txt"}],
             key=lambda x: x.name.lower(),
         )
+        return self.import_from_files(files)
 
-        for f in files:
+    def import_from_files(self, file_paths: list[Path | str]) -> list[MuseCookieAccount]:
+        added: list[MuseCookieAccount] = []
+        for file_p in file_paths:
+            f = Path(file_p).resolve()
+            if not f.is_file():
+                continue
             try:
                 content = f.read_text(encoding="utf-8", errors="ignore")
                 cookies = parse_muse_cookies(content)
                 if not cookies:
                     continue
                 detected_email = extract_email_from_text_or_cookies(content, cookies, filename=f.name)
+                if not detected_email and f.name:
+                    detected_email = Path(f.name).stem.strip()
                 name = self.next_name()
                 account_id = hashlib.sha256(f"{name}-{detected_email}-{f.name}-{_iso_now()}".encode("utf-8")).hexdigest()[:16]
                 account = MuseCookieAccount(
