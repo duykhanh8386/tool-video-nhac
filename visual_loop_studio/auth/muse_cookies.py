@@ -713,14 +713,6 @@ def check_single_cookie_account(
             except Exception:
                 pass
 
-            # 3. Kiểm tra hết token / hết hạn mức tuần
-            try:
-                from auth.muse_generation import is_muse_quota_exhausted
-                if is_muse_quota_exhausted(page_text):
-                    return False, detected_email, "⛔ Hết token (Hạn mức tuần)"
-            except Exception:
-                pass
-
             return True, detected_email, "Đang hoạt động"
         else:
             return False, detected_email, "Hết hạn hoặc chưa đăng nhập"

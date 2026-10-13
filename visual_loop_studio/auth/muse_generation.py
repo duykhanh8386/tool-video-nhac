@@ -486,13 +486,34 @@ def _query_muse_videos(driver: Any) -> list[dict[str, str]]:
                 const userMsg = msg ? (msg.previousElementSibling?.innerText || '') : '';
                 const txt = (userMsg + ' ' + (msg ? (msg.innerText || '') : '')).slice(0, 2500);
 
+                let cardIdx = 0;
+                let totalCards = 1;
+                if (msg) {
+                    const siblings = [...msg.querySelectorAll('[data-hatch-video-src], [data-hatch-video-wrapper], video')].filter(el => {
+                        return !el.closest('[data-hatch-status-sidebar-avatar], [data-hatch-avatar-layer], [data-hatch-media-owner="avatar-layer"], aside, nav, header');
+                    });
+                    const uniqueSiblings = [];
+                    siblings.forEach(el => {
+                        const sSrc = (el.getAttribute('data-hatch-video-src') || (el.tagName === 'VIDEO' ? (el.currentSrc || el.src || '') : (el.querySelector('video')?.src || '')) || '').trim();
+                        if (sSrc && !uniqueSiblings.some(u => u === el || (u.dataset && u.dataset.mavId && el.dataset && u.dataset.mavId === el.dataset.mavId))) {
+                            uniqueSiblings.push(el);
+                        }
+                    });
+                    cardIdx = uniqueSiblings.indexOf(w);
+                    if (cardIdx < 0 && vidEl) cardIdx = uniqueSiblings.indexOf(vidEl);
+                    if (cardIdx < 0) cardIdx = 0;
+                    totalCards = Math.max(1, uniqueSiblings.length);
+                }
+
                 results.push({
                     id: mavId,
                     src: src,
                     name: m ? m[0] : '',
                     label: label,
                     text: txt,
-                    poster: poster
+                    poster: poster,
+                    card_idx: String(cardIdx),
+                    total_cards: String(totalCards)
                 });
             });
 

@@ -1020,7 +1020,7 @@ class MuseCookieBatchRunnerThread(QThread):
                             stable_idle_cycles = 0
                             last_heartbeat = time.monotonic()
 
-                            while time.monotonic() - start_wait < 180.0:
+                            while time.monotonic() - start_wait < 260.0:
                                 if self._stopped:
                                     break
                                 poll_text = _get_muse_recent_text(driver)
@@ -1071,18 +1071,43 @@ class MuseCookieBatchRunnerThread(QThread):
                                             seen_video_srcs.add(v_src)
 
                                         v_info_str = (v_item.get("name") or "") + " " + (v_item.get("label") or "") + " " + (v_item.get("text") or "")
-                                        m = re.search(r'(?<![a-z0-9])(?:v|prompt[-_]?)?0*(\d{1,6})(?!\d)', v_info_str, re.I)
+                                        card_idx = int(v_item.get("card_idx", "0"))
                                         matched_p = None
                                         is_late_match = False
 
-                                        if m:
-                                            target_id = int(m.group(1))
-                                            matched_p = next((p for p in unassigned_prompts if p[0] == target_id), None)
+                                        # Ưu tiên 1: Bắt theo dải batch PromptXXXX - PromptYYYY trong tin nhắn
+                                        m_range = re.search(r'prompt\s*0*(\d{1,6})\s*[-–tođến~]+\s*prompt\s*0*(\d{1,6})', v_info_str, re.I)
+                                        if m_range:
+                                            r_start = int(m_range.group(1))
+                                            r_end = int(m_range.group(2))
+                                            if r_start > r_end:
+                                                r_start, r_end = r_end, r_start
+                                            target_by_card = r_start + card_idx
+                                            if target_by_card <= r_end:
+                                                matched_p = next((p for p in unassigned_prompts if p[0] == target_by_card), None)
+                                                if not matched_p:
+                                                    matched_p = next((p for p in late_pending_prompts if p[0] == target_by_card), None)
+                                                    if matched_p:
+                                                        is_late_match = True
                                             if not matched_p:
-                                                matched_p = next((p for p in late_pending_prompts if p[0] == target_id), None)
-                                                if matched_p:
-                                                    is_late_match = True
+                                                matched_p = next((p for p in unassigned_prompts if r_start <= p[0] <= r_end), None)
+                                                if not matched_p:
+                                                    matched_p = next((p for p in late_pending_prompts if r_start <= p[0] <= r_end), None)
+                                                    if matched_p:
+                                                        is_late_match = True
 
+                                        # Ưu tiên 2: Bắt theo số Prompt cụ thể
+                                        if not matched_p:
+                                            m = re.search(r'(?<![a-z0-9])(?:v|prompt[-_]?)?0*(\d{1,6})(?!\d)', v_info_str, re.I)
+                                            if m:
+                                                target_id = int(m.group(1))
+                                                matched_p = next((p for p in unassigned_prompts if p[0] == target_id), None)
+                                                if not matched_p:
+                                                    matched_p = next((p for p in late_pending_prompts if p[0] == target_id), None)
+                                                    if matched_p:
+                                                        is_late_match = True
+
+                                        # Ưu tiên 3: Nếu không bắt được số, gán lần lượt theo đợt hiện tại rồi tới đợt muộn
                                         if not matched_p:
                                             if unassigned_prompts:
                                                 matched_p = unassigned_prompts[0]
@@ -1116,8 +1141,6 @@ class MuseCookieBatchRunnerThread(QThread):
                                             with stats_lock:
                                                 completed_total += 1
                                                 acc_completed += 1
-                                                if is_late_match:
-                                                    failed_total = max(0, failed_total - 1)
                                                 remaining_total = max(0, total_items - (completed_total + failed_total))
                                                 self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
                                                 pct = int(((completed_total + failed_total) / max(1, total_items)) * 100)
@@ -1162,19 +1185,18 @@ class MuseCookieBatchRunnerThread(QThread):
 
                                 if not is_rendering:
                                     stable_idle_cycles += 1
-                                    if batch_success_count > 0 and stable_idle_cycles >= 12:
-                                        self.log_signal.emit(f"ℹ [{worker_tag}]: Muse đã ngừng tạo video ({batch_success_count}/{n_prompts} hoàn tất). Chuyển sang đợt tiếp theo.")
+                                    if batch_success_count >= n_prompts:
                                         break
-                                    if batch_success_count == 0 and stable_idle_cycles >= 25 and (time.monotonic() - start_wait) >= 120.0:
-                                        self.log_signal.emit(f"⚠ [{worker_tag}]: Đã chờ 120s nhưng chưa thấy video xuất hiện. Chuyển sang đợt tiếp theo (sẽ tự tải bù nếu video về muộn)…")
+                                    if batch_success_count > 0 and stable_idle_cycles >= 15:
+                                        self.log_signal.emit(f"ℹ [{worker_tag}]: Muse đã hoàn tất ({batch_success_count}/{n_prompts} video). Chuyển sang đợt tiếp theo.")
                                         break
                                 else:
                                     stable_idle_cycles = 0
 
-                                if (time.monotonic() - start_wait) >= 160.0:
+                                if (time.monotonic() - start_wait) >= 240.0:
                                     self.log_signal.emit(
-                                        f"⏱ [{worker_tag}]: Đã chờ tối đa 160s ({batch_success_count}/{n_prompts} xong). "
-                                        f"Chuyển đợt tiếp theo để các tài khoản quay vòng đều (video muộn sẽ tự tải bù)…"
+                                        f"⏱ [{worker_tag}]: Đã chờ 240s ({batch_success_count}/{n_prompts} xong). "
+                                        f"Chuyển đợt tiếp theo để các tài khoản quay vòng đều (video muộn sẽ tự động tải bù)…"
                                     )
                                     break
 
@@ -1185,19 +1207,18 @@ class MuseCookieBatchRunnerThread(QThread):
                                 for p in unassigned_prompts:
                                     late_pending_prompts.append(p)
                                 with stats_lock:
-                                    failed_total += missed_count
                                     remaining_total = max(0, total_items - (completed_total + failed_total))
                                     self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
                                     pct = int(((completed_total + failed_total) / max(1, total_items)) * 100)
                                     self.progress_signal.emit(pct, f"Đang xử lý: {completed_total}/{total_items} hoàn tất")
                                 missed_ids_str = ", ".join(f"#{p[0]:04d}" for p in unassigned_prompts)
-                                self.log_signal.emit(f"⚠ [{worker_tag}]: {missed_count} prompt chưa có video ngay ({missed_ids_str}) (vẫn sẽ tự tải nếu video tạo muộn).")
+                                self.log_signal.emit(f"ℹ [{worker_tag}]: {missed_count} video đang được Muse render ngầm ({missed_ids_str}), sẽ tự động tải bù ở các đợt tiếp theo.")
 
                             if batch_success_count > 0:
                                 self.log_signal.emit(f"✔ [{worker_tag}]: Hoàn tất đợt ({chunk_label}): Đã lưu {batch_success_count}/{n_prompts} video.")
                             else:
                                 self.log_signal.emit(
-                                    f"ℹ [{worker_tag}]: Đợt ({chunk_label}) chưa có video ngay trong 160s. "
+                                    f"ℹ [{worker_tag}]: Đợt ({chunk_label}) chưa có video ngay. "
                                     f"Video vẫn đang tạo ngầm trên Muse và sẽ tự động tải bù ở các đợt tiếp theo."
                                 )
 
@@ -1302,7 +1323,6 @@ class MuseCookieBatchRunnerThread(QThread):
                                                     with stats_lock:
                                                         completed_total += 1
                                                         acc_completed += 1
-                                                        failed_total = max(0, failed_total - 1)
                                                         remaining_total = max(0, total_items - (completed_total + failed_total))
                                                         self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
                                                     mb_sz = dest.stat().st_size / (1024 * 1024)
@@ -1311,6 +1331,11 @@ class MuseCookieBatchRunnerThread(QThread):
                                             seen_video_ids.add(v_id)
                                         if v_src:
                                             seen_video_srcs.add(v_src)
+                                if uncompleted_late:
+                                    with stats_lock:
+                                        failed_total += len(uncompleted_late)
+                                        remaining_total = max(0, total_items - (completed_total + failed_total))
+                                        self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
                         except Exception:
                             pass
                         try:
