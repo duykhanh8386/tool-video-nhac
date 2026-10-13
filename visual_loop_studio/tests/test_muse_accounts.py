@@ -68,6 +68,19 @@ class TestMuseAccountsPage(unittest.TestCase):
         self.assertTrue(is_muse_quota_exhausted("Tài khoản đã hết lượt tạo video tuần này."))
         self.assertFalse(is_muse_quota_exhausted("Video đang được tạo, vui lòng chờ trong giây lát..."))
 
+    def test_disconnected_detection(self):
+        from auth.muse_generation import is_muse_disconnected_text
+
+        sample_disconnect_msg = (
+            "Đã ngắt kết nối Muse\n"
+            "Chúng tôi đã ngắt kết nối Muse để bảo vệ thông tin của bạn. Hãy gửi phiếu yêu cầu hỗ trợ để kết nối lại.\n"
+            "Gửi phiếu yêu cầu hỗ trợ"
+        )
+        self.assertTrue(is_muse_disconnected_text(sample_disconnect_msg))
+        self.assertTrue(is_muse_disconnected_text("Disconnected from Muse"))
+        self.assertTrue(is_muse_disconnected_text("Đã ngắt kết nối"))
+        self.assertFalse(is_muse_disconnected_text("Nhắn tin cho Muse để tạo video"))
+
 
 if __name__ == "__main__":
     unittest.main()

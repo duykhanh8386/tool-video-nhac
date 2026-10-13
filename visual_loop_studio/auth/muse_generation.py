@@ -77,6 +77,26 @@ def is_muse_quota_exhausted(text: str) -> bool:
     return any(re.search(pat, t) for pat in patterns)
 
 
+DISCONNECTED_MARKERS = (
+    "ngắt kết nối muse",
+    "đã ngắt kết nối muse",
+    "disconnected from muse",
+    "gửi phiếu yêu cầu hỗ trợ",
+    "chúng tôi đã ngắt kết nối",
+    "đã ngắt kết nối",
+    "connection lost",
+    "reconnect to muse",
+)
+
+
+def is_muse_disconnected_text(text: str) -> bool:
+    """Kiểm tra xem trang Muse có bị ngắt kết nối phiên làm việc (Đã ngắt kết nối Muse) không."""
+    if not text:
+        return False
+    t = text.lower()
+    return any(m in t for m in DISCONNECTED_MARKERS)
+
+
 class MuseGenerationError(RuntimeError):
     pass
 

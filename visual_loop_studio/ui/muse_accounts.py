@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 import shutil
 import tempfile
@@ -68,6 +69,7 @@ from auth.muse_generation import (
     _safe_url,
     _video_fingerprint,
     _visible,
+    is_muse_disconnected_text,
     is_muse_quota_exhausted,
 )
 from auth.muse_login import (
@@ -725,6 +727,26 @@ class MuseCookieBatchRunnerThread(QThread):
                             f"⚠ [{worker_tag}]: Tài khoản bị khóa cứng. Tự động chuyển sang tài khoản tiếp theo…"
                         )
                         continue
+                    if is_muse_disconnected_text(init_text):
+                        self.log_signal.emit(
+                            f"⚠ [{worker_tag}]: Phát hiện màn hình 'Đã ngắt kết nối Muse'. Đang tự động làm mới trang (F5) để kết nối lại…"
+                        )
+                        try:
+                            driver.refresh()
+                            time.sleep(4.0)
+                            _dismiss_muse_popups(driver)
+                            init_text = _get_muse_recent_text(driver)
+                        except Exception:
+                            pass
+                        if is_muse_disconnected_text(init_text):
+                            self.log_signal.emit(
+                                f"❌ [{worker_tag}]: Tài khoản {acc_label} bị Muse ngắt kết nối phiên làm việc ('Đã ngắt kết nối Muse'). Tự động chuyển sang tài khoản tiếp theo…"
+                            )
+                            continue
+                        else:
+                            self.log_signal.emit(
+                                f"🎉 [{worker_tag}]: Đã kết nối lại Muse thành công sau F5!"
+                            )
                     elif is_muse_quota_exhausted(init_text):
                         self.log_signal.emit(
                             f"ℹ [{worker_tag}]: Tài khoản có thông báo giới hạn quota/credit, vẫn tiếp tục gửi prompt bình thường…"
@@ -885,7 +907,27 @@ class MuseCookieBatchRunnerThread(QThread):
                             self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang điền prompt vào Muse…")
                             filled = self._fill_chat_prompt(driver, chunk_prompt_text)
                             if not filled:
-                                self.log_signal.emit(f"⚠ [{worker_tag}]: Không thể điền prompt tự động vào selector chuẩn.")
+                                if is_muse_disconnected_text(_get_muse_recent_text(driver)):
+                                    self.log_signal.emit(f"⚠ [{worker_tag}]: Muse hiện thông báo 'Đã ngắt kết nối Muse'. Đang tự động F5 để kết nối lại…")
+                                    try:
+                                        driver.refresh()
+                                        time.sleep(4.0)
+                                        _dismiss_muse_popups(driver)
+                                        filled = self._fill_chat_prompt(driver, chunk_prompt_text)
+                                    except Exception:
+                                        pass
+                                if not filled:
+                                    self.log_signal.emit(f"⚠ [{worker_tag}]: Không thể điền prompt tự động vào selector chuẩn.")
+                                    with chunks_lock:
+                                        shared_chunks.insert(0, chunk)
+                                    if is_muse_disconnected_text(_get_muse_recent_text(driver)):
+                                        self.log_signal.emit(f"❌ [{worker_tag}]: Tài khoản {acc_label} bị Muse ngắt kết nối. Bỏ qua tài khoản này để các tài khoản khác tiếp tục…")
+                                        break
+                                    consecutive_send_fails += 1
+                                    if consecutive_send_fails >= 2:
+                                        self.log_signal.emit(f"❌ [{worker_tag}]: Không thể điền prompt 2 lần liên tiếp. Bỏ qua tài khoản {acc_label}…")
+                                        break
+                                    continue
                             time.sleep(1.0)
 
                             self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang bấm gửi prompt ({chunk_label})…")
@@ -938,13 +980,19 @@ class MuseCookieBatchRunnerThread(QThread):
                             else:
                                 consecutive_send_fails += 1
                                 self.log_signal.emit(f"⚠ [{worker_tag}]: Muse chưa hiện tin ({chunk_label}) sau 90s (lần {consecutive_send_fails}/2)…")
+                                with chunks_lock:
+                                    shared_chunks.insert(0, chunk)
+                                if is_muse_disconnected_text(_get_muse_recent_text(driver)):
+                                    self.log_signal.emit(
+                                        f"❌ [{worker_tag}]: Tài khoản {acc_label} bị Muse ngắt kết nối ('Đã ngắt kết nối Muse'). Bỏ qua tài khoản này…"
+                                    )
+                                    break
                                 if consecutive_send_fails >= 2:
                                     self.log_signal.emit(
                                         f"❌ [{worker_tag}]: Gửi tin thất bại 2 lần liên tiếp. Bỏ qua tài khoản {acc_label}, chuyển tài khoản khác…"
                                     )
-                                    with chunks_lock:
-                                        shared_chunks.insert(0, chunk)
                                     break
+                                continue
 
                             # Kiểm tra ngay sau khi gửi xem có thông báo tài khoản bị khóa không
                             time.sleep(1.0)
@@ -1135,31 +1183,15 @@ class MuseCookieBatchRunnerThread(QThread):
                                 self.log_signal.emit(f"⚠ [{worker_tag}]: {missed_count} prompt chưa có video ngay ({missed_ids_str}) (vẫn sẽ tự tải nếu video tạo muộn).")
 
                             if batch_success_count > 0:
-                                consecutive_zero_video_chunks = 0
                                 self.log_signal.emit(f"✔ [{worker_tag}]: Hoàn tất đợt ({chunk_label}): Đã lưu {batch_success_count}/{n_prompts} video.")
                             else:
-                                consecutive_zero_video_chunks += 1
-                                self.log_signal.emit(f"❌ [{worker_tag}]: Không lưu được video nào trong ({chunk_label}) (lần {consecutive_zero_video_chunks}/2).")
-                                if consecutive_zero_video_chunks >= 2:
-                                    self.log_signal.emit(f"⚠ [{worker_tag}]: Tài khoản {acc_label} liên tiếp 2 đợt không tạo được video. Bỏ qua tài khoản này để chuyển tài khoản tiếp theo…")
-                                    uncompleted_to_return = []
-                                    for p_id, p_text in late_pending_prompts:
-                                        if not any(f.name.startswith(f"Prompt{p_id:04d}") and f.stat().st_size > 10240 for f in self.output_dir.iterdir() if f.is_file()):
-                                            uncompleted_to_return.append((p_id, p_text))
-                                    if uncompleted_to_return:
-                                        with chunks_lock:
-                                            shared_chunks.insert(0, MuseBatchChunk(
-                                                chunk_index=chunk.chunk_index,
-                                                prompt_items=uncompleted_to_return,
-                                                images=chunk.images[:len(uncompleted_to_return)] if chunk.images else [],
-                                            ))
-                                        with stats_lock:
-                                            failed_total = max(0, failed_total - len(uncompleted_to_return))
-                                            remaining_total = max(0, total_items - (completed_total + failed_total))
-                                            self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
-                                    break
+                                self.log_signal.emit(
+                                    f"ℹ [{worker_tag}]: Đợt ({chunk_label}) chưa có video ngay trong 160s. "
+                                    f"Video vẫn đang tạo ngầm trên Muse và sẽ tự động tải bù ở các đợt tiếp theo."
+                                )
 
-                            time.sleep(1.0)
+                            cooldown = random.uniform(3.0, 5.0)
+                            time.sleep(cooldown)
 
                         except Exception as chunk_err:
                             err_str = str(chunk_err).lower()
@@ -1217,6 +1249,48 @@ class MuseCookieBatchRunnerThread(QThread):
                 finally:
                     if driver:
                         try:
+                            # Thu hồi lần cuối các video tạo muộn trước khi đóng phiên Chrome
+                            if late_pending_prompts and not self._stopped:
+                                uncompleted_late = [
+                                    p for p in late_pending_prompts
+                                    if not any(f.name.startswith(f"Prompt{p[0]:04d}") and f.stat().st_size > 10240 for f in self.output_dir.iterdir() if f.is_file())
+                                ]
+                                if uncompleted_late:
+                                    self.log_signal.emit(
+                                        f"⏳ [{worker_tag}]: Thu hồi lần cuối {len(uncompleted_late)} video tạo muộn trước khi đóng phiên…"
+                                    )
+                                    final_vids = _query_muse_videos(driver)
+                                    for v_item in final_vids:
+                                        v_src = (v_item.get("src") or "").strip()
+                                        v_id = v_item.get("id")
+                                        if (v_id and v_id in seen_video_ids) or (v_src and v_src in seen_video_srcs):
+                                            continue
+                                        v_info = (v_item.get("name") or "") + " " + (v_item.get("label") or "") + " " + (v_item.get("text") or "")
+                                        m_sub = re.search(r'(?<![a-z0-9])(?:v|prompt[-_]?)?0*(\d{1,6})(?!\d)', v_info, re.I)
+                                        if m_sub:
+                                            target_id = int(m_sub.group(1))
+                                            matched = next((p for p in uncompleted_late if p[0] == target_id), None)
+                                            if matched:
+                                                p_id, p_text = matched
+                                                slug = re.sub(r'[^\w\-\.]+', '_', p_text[:35].strip()).strip('_') or "video"
+                                                dest = self.output_dir / f"Prompt{p_id:04d}_{slug}.mp4"
+                                                if _download_muse_video_file(driver, v_item, dest, download_dir) and dest.exists() and dest.stat().st_size > 10240:
+                                                    uncompleted_late.remove(matched)
+                                                    with stats_lock:
+                                                        completed_total += 1
+                                                        acc_completed += 1
+                                                        failed_total = max(0, failed_total - 1)
+                                                        remaining_total = max(0, total_items - (completed_total + failed_total))
+                                                        self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
+                                                    mb_sz = dest.stat().st_size / (1024 * 1024)
+                                                    self.log_signal.emit(f"🎉 [{worker_tag}]: [Bù muộn cuối phiên] Đã tải xong Prompt #{p_id:04d} -> {dest.name} ({mb_sz:.2f} MB)")
+                                        if v_id:
+                                            seen_video_ids.add(v_id)
+                                        if v_src:
+                                            seen_video_srcs.add(v_src)
+                        except Exception:
+                            pass
+                        try:
                             driver.quit()
                         except Exception:
                             pass
@@ -1234,23 +1308,38 @@ class MuseCookieBatchRunnerThread(QThread):
         for t in threads:
             t.join()
 
-        # Nếu các tài khoản đã dừng hết nhưng vẫn còn prompt trong hàng đợi chung (do tất cả tài khoản đều hết token)
+        # Nếu các tài khoản đã dừng hết nhưng vẫn còn prompt trong hàng đợi chung (do tất cả tài khoản đều hết token hoặc dừng)
+        leftover_count = 0
         if shared_chunks:
             with chunks_lock:
                 leftover_count = sum(len(c.prompt_items) for c in shared_chunks)
                 shared_chunks.clear()
             with stats_lock:
-                failed_total += leftover_count
-                remaining_total = max(0, total_items - (completed_total + failed_total))
+                remaining_total = leftover_count
                 self.stats_signal.emit(total_items, completed_total, failed_total, remaining_total)
             self.log_signal.emit(
                 f"⚠ Tất cả các tài khoản đã chọn đều đã hết token/credit hoặc đã dừng! "
-                f"Còn {leftover_count} prompt chưa thể hoàn thành."
+                f"Còn {leftover_count} prompt chưa thực hiện (bạn có thể bấm '⏯ Tiếp tục prompt chưa làm' để chạy tiếp)."
             )
 
-        self.progress_signal.emit(100, f"Hoàn tất: {completed_total} thành công, {failed_total} lỗi")
-        self.log_signal.emit(f"🏁 Đã hoàn tất toàn bộ batch: {completed_total}/{total_items} thành công, {failed_total} lỗi.")
-        self.batch_finished_signal.emit(True, f"Đã xử lý xong: {completed_total} thành công, {failed_total} lỗi.")
+        if leftover_count > 0:
+            pct = int((completed_total / max(1, total_items)) * 100)
+            self.progress_signal.emit(pct, f"Tạm dừng: {completed_total} thành công, {leftover_count} chưa làm")
+            self.log_signal.emit(
+                f"🏁 Đã tạm dừng batch: {completed_total}/{total_items} hoàn tất, {failed_total} lỗi, {leftover_count} prompt chưa xử lý."
+            )
+            self.batch_finished_signal.emit(
+                False,
+                f"Đã tạm dừng batch:\n"
+                f"✔ Thành công: {completed_total} video\n"
+                f"✖ Lỗi: {failed_total}\n"
+                f"⏳ Còn lại chưa làm: {leftover_count} prompt\n\n"
+                f"💡 Bạn có thể bấm nút '⏯ Tiếp tục prompt chưa làm' để tiếp tục bất kỳ lúc nào!",
+            )
+        else:
+            self.progress_signal.emit(100, f"Hoàn tất: {completed_total} thành công, {failed_total} lỗi")
+            self.log_signal.emit(f"🏁 Đã hoàn tất toàn bộ batch: {completed_total}/{total_items} thành công, {failed_total} lỗi.")
+            self.batch_finished_signal.emit(True, f"Đã xử lý xong: {completed_total} thành công, {failed_total} lỗi.")
 
 
 class MuseAccountsPage(QWidget):
