@@ -2172,6 +2172,11 @@ class MuseAccountsPage(QWidget):
             name_color = QColor("#15803d")
             status_color = QColor("#16a34a")
             default_st = "✔ Đã hoàn tất"
+        elif status_type == "active":
+            bg_color = QColor("#ffffff")
+            name_color = QColor("#15803d")
+            status_color = QColor("#16a34a")
+            default_st = "🟢 Đang hoạt động"
         else:
             bg_color = QColor("#ffffff")
             name_color = QColor("#334155")
@@ -2212,7 +2217,17 @@ class MuseAccountsPage(QWidget):
                 lbl.setStyleSheet(f"color: {name_color.name()}; font-weight: 700; font-size: 12px; background: transparent;")
 
     def _update_account_realtime_row(self, account_id: str, status_type: str, status_text: str) -> None:
-        """Cập nhật trạng thái realtime cho một tài khoản cụ thể trong bảng."""
+        """Cập nhật trạng thái realtime cho một tài khoản cụ thể trong bảng và lưu lại vào cookie store."""
+        try:
+            self.cookie_store.update_status(
+                account_id,
+                status_type,
+                status_text,
+                last_checked=time.strftime("%d/%m %H:%M"),
+            )
+        except Exception:
+            pass
+
         for row in range(self.accounts_table.rowCount()):
             item = self.accounts_table.item(row, 0)
             if item and item.data(Qt.UserRole) == account_id:
@@ -2454,7 +2469,15 @@ class MuseAccountsPage(QWidget):
         self._active_checker.start()
 
     def _on_account_checked(self, account_id: str, is_active: bool, message: str, time_str: str, detected_email: str = "") -> None:
-        status_key = "active" if is_active else "expired"
+        msg_l = message.lower()
+        if "hết token" in msg_l or "hạn mức" in msg_l or "quota" in msg_l:
+            status_key = "quota"
+        elif "khóa" in msg_l or "chặn" in msg_l or "lỗi" in msg_l or "ngắt kết nối" in msg_l:
+            status_key = "error"
+        elif is_active:
+            status_key = "active"
+        else:
+            status_key = "expired"
         self.cookie_store.update_status(account_id, status_key, message, last_checked=time_str)
         if detected_email:
             self.cookie_store.update_email(account_id, detected_email)
@@ -2473,13 +2496,23 @@ class MuseAccountsPage(QWidget):
     def _on_all_accounts_checked_summary(self, active_count: int, total_count: int) -> None:
         self.btn_check_account.setEnabled(True)
         self.btn_check_all.setEnabled(True)
-        self.global_status.setText(f"Đã kiểm tra xong tất cả: {active_count}/{total_count} tài khoản đang hoạt động.")
+        accounts = self.cookie_store.all()
+        act_cnt = sum(1 for a in accounts if a.status == "active")
+        quota_cnt = sum(1 for a in accounts if a.status == "quota")
+        err_cnt = sum(1 for a in accounts if a.status in ("error", "expired"))
+        self.global_status.setText(f"Đã kiểm tra xong: {act_cnt} hoạt động, {quota_cnt} hết token, {err_cnt} lỗi/hết hạn.")
+        msg_lines = [
+            f"Hoàn tất kiểm tra {total_count} tài khoản:",
+            f"🟢 Đang hoạt động: {act_cnt}",
+        ]
+        if quota_cnt > 0:
+            msg_lines.append(f"⛔ Hết token (Hạn mức tuần): {quota_cnt}")
+        if err_cnt > 0:
+            msg_lines.append(f"🔴 Bị lỗi / Bị khóa / Hết hạn: {err_cnt}")
         QMessageBox.information(
             self,
             "Kết Quả Kiểm Tra Cookie",
-            f"Hoàn tất kiểm tra {total_count} tài khoản:\n"
-            f"🟢 Đang hoạt động: {active_count}\n"
-            f"🔴 Hết hạn hoặc lỗi: {total_count - active_count}",
+            "\n".join(msg_lines),
         )
 
     # =========================================================================

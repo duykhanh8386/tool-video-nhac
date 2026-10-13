@@ -106,6 +106,18 @@ class TestMuseCookies(unittest.TestCase):
         self.assertEqual(loaded.last_checked, "09/10 11:00")
         self.assertTrue("🟢 Đang hoạt động" in loaded.status_display)
 
+        # Update status to quota
+        self.store.update_status(acc.account_id, "quota", "⛔ Hết token (Hạn mức tuần)", last_checked="13/10 15:00")
+        loaded = self.store.get(acc.account_id)
+        self.assertEqual(loaded.status, "quota")
+        self.assertTrue("⛔ Hết token" in loaded.status_display)
+
+        # Update status to error
+        self.store.update_status(acc.account_id, "error", "• Lỗi: Tài khoản bị khóa", last_checked="13/10 15:00")
+        loaded = self.store.get(acc.account_id)
+        self.assertEqual(loaded.status, "error")
+        self.assertTrue("• Lỗi: Tài khoản bị khóa" in loaded.status_display)
+
         # Toggle enabled
         self.store.set_enabled(acc.account_id, False)
         loaded = self.store.get(acc.account_id)

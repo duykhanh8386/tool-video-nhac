@@ -121,6 +121,9 @@ class TestMuseAccountsPage(unittest.TestCase):
         page._update_account_realtime_row("test_acc_99", "quota", "⛔ Hết token – đã dừng lúc 12:00:00")
         self.assertIn("Hết token", status_item.text())
         self.assertEqual(status_item.background().color().name(), "#fee2e2")
+        persisted = page.cookie_store.get("test_acc_99")
+        self.assertEqual(persisted.status, "quota")
+        self.assertEqual(persisted.status_message, "⛔ Hết token – đã dừng lúc 12:00:00")
 
         # Cleanup
         page.cookie_store.delete("test_acc_99")

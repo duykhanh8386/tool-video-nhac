@@ -74,11 +74,15 @@ class MuseCookieAccount:
         elif self.status == "expired":
             return f"🔴 Hết hạn{time_part}"
         elif self.status == "error":
-            return f"🔴 Lỗi{time_part}"
+            if self.status_message and any(k in self.status_message.lower() for k in ("lỗi", "khóa", "chặn", "ngắt kết nối")):
+                return f"{self.status_message}{time_part}"
+            return f"• Lỗi{time_part}"
         elif self.status == "running":
             return "▶ Đang chạy tạo video"
         elif self.status == "quota":
-            return "⛔ Hết token"
+            if self.status_message and any(k in self.status_message.lower() for k in ("token", "hạn mức", "quota")):
+                return f"{self.status_message}"
+            return f"⛔ Hết token{time_part}"
         return f"⚪ Chưa kiểm tra{time_part}"
 
     @property
@@ -687,6 +691,36 @@ def check_single_cookie_account(
         if is_active:
             if not detected_email:
                 detected_email = extract_email_from_muse_page(driver)
+
+            try:
+                page_text = driver.execute_script("return (document.body.innerText || '').slice(0, 10000);").lower()
+            except Exception:
+                page_text = (driver.page_source or "").lower()
+
+            # 1. Kiểm tra tài khoản bị khóa / tạm khóa / chặn
+            if any(b in page_text for b in (
+                "account suspended", "bị tạm khóa", "tài khoản bị khóa",
+                "account blocked", "you have been blocked", "tài khoản đã bị đình chỉ",
+                "bị chặn", "blocked from",
+            )):
+                return False, detected_email, "• Lỗi: Tài khoản bị khóa / chặn"
+
+            # 2. Kiểm tra ngắt kết nối
+            try:
+                from auth.muse_generation import is_muse_disconnected_text
+                if is_muse_disconnected_text(page_text):
+                    return False, detected_email, "• Lỗi: Đã ngắt kết nối Muse"
+            except Exception:
+                pass
+
+            # 3. Kiểm tra hết token / hết hạn mức tuần
+            try:
+                from auth.muse_generation import is_muse_quota_exhausted
+                if is_muse_quota_exhausted(page_text):
+                    return False, detected_email, "⛔ Hết token (Hạn mức tuần)"
+            except Exception:
+                pass
+
             return True, detected_email, "Đang hoạt động"
         else:
             return False, detected_email, "Hết hạn hoặc chưa đăng nhập"
