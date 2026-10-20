@@ -128,6 +128,55 @@ class TestMuseAccountsPage(unittest.TestCase):
         # Cleanup
         page.cookie_store.delete("test_acc_99")
 
+    def test_clear_ui_resets_runner_and_status(self):
+        settings = AppSettings()
+        page = MuseAccountsPage(settings)
+        page.prompt.setPlainText("Test prompt line 1\nTest prompt line 2")
+        page.overall_progress.setValue(2)
+        page.logs_edit.appendPlainText("Sample log")
+
+        page._clear_ui()
+
+        self.assertEqual(page.prompt.toPlainText(), "")
+        self.assertEqual(page.overall_progress.value(), 0)
+        self.assertEqual(page.overall_progress.format(), "0 / 0 (0.0%)")
+        self.assertEqual(page.badge_total.text(), "📋 Tổng 0")
+        self.assertTrue(page.start_all.isEnabled())
+        self.assertFalse(page.stop_all.isEnabled())
+        self.assertIn("Đã xóa sạch dữ liệu UI", page.global_status.text())
+
+    def test_runner_is_resume_attribute(self):
+        from pathlib import Path
+        from auth.muse_video_batch import MuseVideoSettings
+        from ui.muse_accounts import MuseCookieBatchRunnerThread, MuseBatchChunk
+
+        runner_fresh = MuseCookieBatchRunnerThread(
+            accounts=[],
+            concurrency=1,
+            headless=True,
+            task_mode="video",
+            chunks=[],
+            total_prompts=0,
+            settings=MuseVideoSettings(),
+            output_dir=Path("."),
+            is_resume=False,
+        )
+        self.assertFalse(runner_fresh.is_resume)
+
+        runner_resume = MuseCookieBatchRunnerThread(
+            accounts=[],
+            concurrency=1,
+            headless=True,
+            task_mode="video",
+            chunks=[],
+            total_prompts=0,
+            settings=MuseVideoSettings(),
+            output_dir=Path("."),
+            is_resume=True,
+        )
+        self.assertTrue(runner_resume.is_resume)
+
 
 if __name__ == "__main__":
     unittest.main()
+
