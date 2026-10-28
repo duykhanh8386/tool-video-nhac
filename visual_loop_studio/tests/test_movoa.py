@@ -111,3 +111,28 @@ def test_movoa_rendering_wait_logic():
     assert any("đang trong hàng đợi" in l.lower() or "tiếp nhận" in l.lower() for l in logs)
     assert any("kết thúc" in l.lower() for l in logs)
 
+
+def test_check_movoa_render_error_no_false_positive():
+    """Đảm bảo chữ 'No Daily Cap' trên giao diện Movoa không bao giờ bị nhận nhầm là lỗi chạm giới hạn."""
+    from unittest.mock import MagicMock
+    from auth.movoa_generation import check_movoa_render_error, set_prompt_text
+
+    mock_driver = MagicMock()
+
+    # 1. Giả lập khi trang web có chữ No Daily Cap (khẩu hiệu web Movoa)
+    mock_driver.execute_script.return_value = [False, ""]
+    err, msg = check_movoa_render_error(mock_driver)
+    assert err is False
+    assert msg == ""
+
+    # 2. Giả lập khi có lỗi thật từ Movoa
+    mock_driver.execute_script.return_value = [True, "Tài khoản chạm giới hạn tạo video hàng ngày của Movoa."]
+    err, msg = check_movoa_render_error(mock_driver)
+    assert err is True
+    assert "giới hạn" in msg
+
+    # 3. Test set_prompt_text thành công khi JS setter ăn
+    mock_driver.execute_script.return_value = True
+    assert set_prompt_text(mock_driver, "A beautiful cinematic landscape") is True
+
+

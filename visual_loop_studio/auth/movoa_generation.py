@@ -84,36 +84,82 @@ def select_aspect_ratio(driver, ratio: str = "16:9") -> bool:
 
 
 def set_prompt_text(driver, prompt: str) -> bool:
-    """Điền prompt vào textarea#video-prompt."""
+    """Điền prompt vào textarea#video-prompt, xóa sạch prompt cũ và kích hoạt React state."""
+    clean_prompt = prompt.strip()
     script = """
         const val = arguments[0];
         const ta = document.getElementById('video-prompt') ||
                    document.querySelector('textarea#video-prompt') ||
-                   document.querySelector('textarea[placeholder*="Who is in the shot" i]');
+                   document.querySelector('textarea[placeholder*="Who is in the shot" i]') ||
+                   document.querySelector('textarea[id*="prompt" i]');
         if (!ta) return false;
+
         ta.focus();
-        ta.value = val;
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
-        ta.dispatchEvent(new Event('change', { bubbles: true }));
-        return true;
+        ta.value = '';
+
+        // Kích hoạt setter prototype của HTMLTextAreaElement để React nhận diện thay đổi state
+        try {
+            const proto = window.HTMLTextAreaElement.prototype;
+            const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+            if (nativeSetter) {
+                nativeSetter.call(ta, val);
+            } else {
+                ta.value = val;
+            }
+        } catch (e) {
+            ta.value = val;
+        }
+
+        ta.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+        ta.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+        ta.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ' ' }));
+        ta.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: ' ' }));
+
+        return (ta.value || '').trim() === val.trim();
     """
     try:
-        if driver.execute_script(script, prompt):
+        if driver.execute_script(script, clean_prompt):
+            time.sleep(0.3)
             return True
     except Exception:
         pass
 
+    # Fallback bằng Selenium SendKeys nếu React script chưa ăn
     try:
         from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+
         for sel in PROMPT_TEXTAREA_SELECTORS:
-            ta = driver.find_element(By.CSS_SELECTOR, sel)
-            if ta and ta.is_displayed():
-                ta.click()
-                ta.clear()
-                ta.send_keys(prompt)
-                return True
+            try:
+                ta = driver.find_element(By.CSS_SELECTOR, sel)
+                if ta and ta.is_displayed():
+                    ta.click()
+                    time.sleep(0.1)
+                    ta.send_keys(Keys.CONTROL + "a")
+                    ta.send_keys(Keys.BACKSPACE)
+                    time.sleep(0.1)
+                    ta.send_keys(clean_prompt)
+                    time.sleep(0.3)
+
+                    val = driver.execute_script("return (arguments[0].value || '').trim();", ta)
+                    if val == clean_prompt:
+                        return True
+            except Exception:
+                continue
     except Exception:
         pass
+
+    # Kiểm tra lần cuối
+    try:
+        check_val = driver.execute_script("""
+            const ta = document.getElementById('video-prompt') || document.querySelector('textarea#video-prompt');
+            return ta ? (ta.value || '').trim() : '';
+        """)
+        if check_val == clean_prompt:
+            return True
+    except Exception:
+        pass
+
     return False
 
 
@@ -183,29 +229,62 @@ def is_movoa_rendering(driver) -> bool:
 
 
 def check_movoa_render_error(driver) -> tuple[bool, str]:
-    """Kiểm tra xem Movoa có hiển thị lỗi kiểm duyệt, hết quota, hoặc render fail không."""
+    """Kiểm tra xem Movoa có hiển thị lỗi kiểm duyệt, hết quota, hoặc render fail không.
+    Tuyệt đối không bị false-positive với khẩu hiệu trang web 'No Daily Cap'.
+    """
     script = """
-        const bodyText = document.body ? (document.body.innerText || '') : '';
-        const lower = bodyText.toLowerCase();
+        // 1. Kiểm tra trong các thông báo Toasts, Alerts, Dialogs và text-destructive
+        const errorSelectors = [
+            '[role="alert"]',
+            '[data-slot="toast"]',
+            '[data-sonner-toast]',
+            '.toast',
+            '[role="dialog"]',
+            'dialog[open]',
+            '.text-destructive',
+            '[class*="destructive"]'
+        ];
 
-        if (lower.includes('violat') || lower.includes('moderation') || lower.includes('safety system')) {
-            return [true, 'Prompt bị hệ thống kiểm duyệt an toàn của Movoa chặn.'];
-        }
+        const errorElements = Array.from(document.querySelectorAll(errorSelectors.join(',')));
+        for (const el of errorElements) {
+            if (!el || (el.offsetParent === null && el.getAttribute('role') !== 'alert')) continue;
 
-        if (lower.includes('failed to render') || lower.includes('rendering failed') || lower.includes('generation failed')) {
-            return [true, 'Movoa báo lỗi render video thất bại.'];
-        }
+            const rawText = (el.innerText || '').trim();
+            const lower = rawText.toLowerCase();
+            if (!rawText) continue;
 
-        if (lower.includes('rate limit') || lower.includes('too many requests') || lower.includes('daily cap') || lower.includes('reached your limit')) {
-            return [true, 'Tài khoản chạm giới hạn tạo video của Movoa.'];
-        }
+            // Bỏ qua nếu là câu khẩu hiệu quảng cáo 'No Daily Cap'
+            if (lower.includes('no daily cap')) continue;
 
-        const toasts = Array.from(document.querySelectorAll('[role="alert"], [data-slot="toast"], .toast, .alert-error'));
-        for (const t of toasts) {
-            const txt = (t.innerText || '').trim();
-            if (txt && (txt.toLowerCase().includes('error') || txt.toLowerCase().includes('failed') || txt.toLowerCase().includes('limit'))) {
-                return [true, txt];
+            if (lower.includes('violat') || lower.includes('moderation') || lower.includes('safety system') || lower.includes('nsfw') || lower.includes('content policy')) {
+                return [true, 'Prompt bị hệ thống an toàn của Movoa chặn: ' + rawText.slice(0, 100)];
             }
+
+            if (lower.includes('failed to render') || lower.includes('rendering failed') || lower.includes('generation failed') || lower.includes('something went wrong')) {
+                return [true, 'Movoa báo lỗi render: ' + rawText.slice(0, 100)];
+            }
+
+            if (lower.includes('daily limit') || lower.includes('rate limit') || lower.includes('reached your limit') || lower.includes('too many requests') || lower.includes('quota exceeded') || lower.includes('upgrade to pro')) {
+                return [true, 'Movoa thông báo giới hạn tài khoản: ' + rawText.slice(0, 100)];
+            }
+        }
+
+        // 2. Kiểm tra toàn trang chỉ với các câu thông báo lỗi cụ thể (tuyệt đối không dùng 'daily cap' chung chung)
+        const bodyText = document.body ? (document.body.innerText || '') : '';
+        const bodyLower = bodyText.toLowerCase();
+
+        // Nếu có 'no daily cap', tuyệt đối không được coi là lỗi giới hạn ngày
+        if (!bodyLower.includes('no daily cap')) {
+            if (bodyLower.includes('daily limit reached') ||
+                bodyLower.includes('reached your daily limit') ||
+                bodyLower.includes('daily generation limit') ||
+                bodyLower.includes('rate limit exceeded')) {
+                return [true, 'Tài khoản chạm giới hạn tạo video hàng ngày của Movoa.'];
+            }
+        }
+
+        if (bodyLower.includes('failed to render clip') || bodyLower.includes('clip generation failed')) {
+            return [true, 'Movoa báo lỗi render video thất bại.'];
         }
 
         return [false, ''];
@@ -219,50 +298,60 @@ def check_movoa_render_error(driver) -> tuple[bool, str]:
     return False, ""
 
 
-def click_generate_clip(driver) -> bool:
+def click_generate_clip(driver, timeout: float = 6.0) -> bool:
     """Bấm nút 'Make my clip' hoặc 'Make it free' (chỉ bấm khi sẵn sàng, KHÔNG bấm nút Queue)."""
-    script = """
-        const allBtns = Array.from(document.querySelectorAll('button'));
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        script = """
+            const allBtns = Array.from(document.querySelectorAll('button'));
 
-        // 1. Ưu tiên tìm nút có chữ 'Make my clip' hoặc 'Make it free'
-        let btn = allBtns.find(b => {
-            const t = (b.innerText || '').toLowerCase();
-            return (t.includes('make my clip') || t.includes('make it free')) && b.offsetParent !== null;
-        });
+            // 1. Ưu tiên tìm nút có chữ 'Make my clip' hoặc 'Make it free'
+            let btn = allBtns.find(b => {
+                const t = (b.innerText || '').toLowerCase();
+                return (t.includes('make my clip') || t.includes('make it free')) && b.offsetParent !== null;
+            });
 
-        // 2. Fallback: button.generate-cta nhưng loại trừ nút Queue
-        if (!btn) {
-            const genBtn = document.querySelector('button.generate-cta');
-            if (genBtn && genBtn.offsetParent !== null) {
-                const t = (genBtn.innerText || '').toLowerCase();
-                if (!t.includes('queue')) {
-                    btn = genBtn;
+            // 2. Fallback: button.generate-cta nhưng loại trừ nút Queue
+            if (!btn) {
+                const genBtn = document.querySelector('button.generate-cta');
+                if (genBtn && genBtn.offsetParent !== null) {
+                    const t = (genBtn.innerText || '').toLowerCase();
+                    if (!t.includes('queue')) {
+                        btn = genBtn;
+                    }
                 }
             }
-        }
 
-        if (btn) {
-            btn.scrollIntoView({ block: 'center' });
-            btn.click();
-            return true;
-        }
-        return false;
-    """
-    try:
-        if driver.execute_script(script):
-            return True
-    except Exception:
-        pass
+            if (btn) {
+                if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') {
+                    return 'disabled';
+                }
+                btn.scrollIntoView({ block: 'center' });
+                btn.click();
+                return 'clicked';
+            }
+            return 'not_found';
+        """
+        try:
+            res = driver.execute_script(script)
+            if res == "clicked":
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
 
     try:
         from selenium.webdriver.common.by import By
         for sel in GENERATE_BTN_SELECTORS:
-            btn = driver.find_element(By.CSS_SELECTOR, sel)
-            if btn and btn.is_displayed():
-                txt = (btn.text or "").lower()
-                if "queue" not in txt:
-                    btn.click()
-                    return True
+            try:
+                btn = driver.find_element(By.CSS_SELECTOR, sel)
+                if btn and btn.is_displayed():
+                    txt = (btn.text or "").lower()
+                    if "queue" not in txt and btn.is_enabled():
+                        btn.click()
+                        return True
+            except Exception:
+                continue
     except Exception:
         pass
     return False
@@ -725,6 +814,7 @@ class MovoaVideoBatchRunnerThread(QThread):
                         if not set_prompt_text(driver, prompt_text):
                             raise RuntimeError("Không thể điền prompt vào ô #video-prompt.")
 
+                        self.log_signal.emit(f"✍ [{worker_tag}] [{task_label}]: Đã điền prompt mới vào ô #video-prompt.")
                         time.sleep(1.0)
 
                         # 5. Bấm nút Make my clip (tuyệt đối không bấm nhầm nút Queue)
