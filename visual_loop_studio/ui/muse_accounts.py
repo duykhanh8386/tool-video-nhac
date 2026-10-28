@@ -290,7 +290,7 @@ class MuseBatchChunk:
 
 
 class MuseCookieBatchRunnerThread(QThread):
-    """Luồng chạy batch tạo video/ảnh qua danh sách tài khoản Cookie (gom 5 prompt/lần, Concurrency 1-5, tự F5 ngầm)."""
+    """Luồng chạy batch tạo video/ảnh qua danh sách tài khoản Cookie (chạy lần lượt 1 prompt/lần, Concurrency theo số tài khoản, tự F5 ngầm)."""
 
     progress_signal = Signal(int, str)
     stats_signal = Signal(int, int, int, int)  # total, completed, failed, remaining
@@ -319,7 +319,7 @@ class MuseCookieBatchRunnerThread(QThread):
     ) -> None:
         super().__init__(parent)
         self.accounts = accounts
-        self.concurrency = max(1, min(5, concurrency))
+        self.concurrency = max(1, min(20, concurrency))
         self.headless = headless
         self.task_mode = task_mode
         self.chunks = chunks
@@ -668,7 +668,7 @@ class MuseCookieBatchRunnerThread(QThread):
         account_pool_lock = threading.Lock()
 
         self.log_signal.emit(
-            f"🚀 Bắt đầu batch {action_name}: {self.total_prompts} prompt ({total_chunks} đợt gom 5 prompt/lần) "
+            f"🚀 Bắt đầu batch {action_name}: {self.total_prompts} prompt ({total_chunks} đợt, mỗi tài khoản chạy lần lượt 1 prompt/lần) "
             f"trên {len(sorted_accounts)} tài khoản (Chạy song song: {effective_concurrency} luồng, Chạy ẩn: {self.headless}, "
             f"F5 ngầm mỗi: {self.auto_refresh_minutes} phút)."
         )
@@ -844,7 +844,10 @@ class MuseCookieBatchRunnerThread(QThread):
                         n_prompts = len(chunk.prompt_items)
                         first_id = chunk.prompt_items[0][0]
                         last_id = chunk.prompt_items[-1][0]
-                        chunk_label = f"Đợt {chunk.chunk_index}/{total_chunks} (Prompt #{first_id:04d} - #{last_id:04d})"
+                        if n_prompts == 1:
+                            chunk_label = f"Prompt #{first_id:04d} (Đợt {chunk.chunk_index}/{total_chunks})"
+                        else:
+                            chunk_label = f"Đợt {chunk.chunk_index}/{total_chunks} (Prompt #{first_id:04d} - #{last_id:04d})"
 
                         # Kiểm tra xem toàn bộ prompt trong đợt này đã có file hoàn tất trong output_dir chưa (CHỈ áp dụng khi Tiếp tục - Resume)
                         if self.is_resume:
@@ -883,7 +886,7 @@ class MuseCookieBatchRunnerThread(QThread):
                             last_f5_time = time.monotonic()
 
                         self.worker_status_signal.emit(worker_id, f"[{acc_label}] {chunk_label}…")
-                        self.log_signal.emit(f"🎬 [{worker_tag}]: Bắt đầu gửi nhóm {n_prompts} prompt ({chunk_label})…")
+                        self.log_signal.emit(f"🎬 [{worker_tag}]: Bắt đầu gửi {chunk_label}…")
 
                         try:
                             _dismiss_muse_popups(driver)
@@ -1033,7 +1036,7 @@ class MuseCookieBatchRunnerThread(QThread):
                             elif is_muse_quota_exhausted(post_submit_text):
                                 self.log_signal.emit(f"ℹ [{worker_tag}]: Có cảnh báo hạn mức/quota, Muse vẫn xử lý ở hàng đợi thường…")
 
-                            self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang theo dõi và tải {n_prompts} video ({chunk_label})…")
+                            self.worker_status_signal.emit(worker_id, f"[{acc_label}] Đang theo dõi và tải video ({chunk_label})…")
                             start_wait = time.monotonic()
                             unassigned_prompts = list(chunk.prompt_items)
                             batch_success_count = 0
@@ -1245,10 +1248,10 @@ class MuseCookieBatchRunnerThread(QThread):
                                     f"Video vẫn đang tạo ngầm trên Muse và sẽ tự động tải bù ở các đợt tiếp theo."
                                 )
 
-                            cooldown = round(random.uniform(8.0, 15.0), 1)
+                            cooldown = round(random.uniform(3.0, 6.0), 1)
                             self.worker_status_signal.emit(worker_id, f"[{acc_label}] Giãn cách an toàn ({cooldown}s)…")
                             self.log_signal.emit(
-                                f"💤 [{worker_tag}]: Giãn cách nhẹ {cooldown}s trước đợt tiếp theo để tài khoản an toàn, tránh bị Muse giới hạn…"
+                                f"💤 [{worker_tag}]: Giãn cách nhẹ {cooldown}s trước prompt tiếp theo để tài khoản an toàn, tránh bị Muse giới hạn…"
                             )
                             time.sleep(cooldown)
 
@@ -1593,13 +1596,13 @@ class MuseAccountsPage(QWidget):
         lbl_conc = QLabel("⚡ Chạy cùng lúc:")
         lbl_conc.setStyleSheet("font-weight: 700; color: #1e293b; font-size: 13px;")
         self.concurrency_spin = QSpinBox()
-        self.concurrency_spin.setRange(1, 5)
+        self.concurrency_spin.setRange(1, 20)
         self.concurrency_spin.setValue(int(getattr(self.settings, "muse_concurrency", 1) or 1))
         self.concurrency_spin.setMinimumHeight(32)
         self.concurrency_spin.setMinimumWidth(60)
         self.concurrency_spin.valueChanged.connect(self._on_concurrency_changed)
 
-        lbl_conc_desc = QLabel("tài khoản song song (1 - 5). Sẽ chạy lần lượt các tài khoản được tick đến hết.")
+        lbl_conc_desc = QLabel("tài khoản song song (= số tài khoản đã chọn). Mỗi tài khoản gửi và tải lần lượt 1 prompt.")
         lbl_conc_desc.setStyleSheet("color: #475569; font-size: 12px;")
 
         self.btn_select_all = QPushButton("☑ Chọn tất cả")
@@ -2190,6 +2193,10 @@ class MuseAccountsPage(QWidget):
                 self._apply_row_styling(row, acc.status, acc.status_display)
         finally:
             self._refreshing = False
+            enabled_count = len([a for a in accounts if a.enabled])
+            if enabled_count > 0:
+                self.concurrency_spin.setRange(1, max(20, len(accounts)))
+                self.concurrency_spin.setValue(enabled_count)
 
     def _apply_row_styling(self, row: int, status_type: str, status_text: str = "") -> None:
         """Tô màu toàn bộ hàng và text trạng thái realtime khớp 100% giao diện ảnh mẫu."""
@@ -2322,6 +2329,9 @@ class MuseAccountsPage(QWidget):
         if account_id:
             enabled = (item.checkState() == Qt.Checked)
             self.cookie_store.set_enabled(account_id, enabled)
+            enabled_count = len(self._get_enabled_accounts())
+            if enabled_count > 0:
+                self.concurrency_spin.setValue(enabled_count)
 
     def _on_table_row_clicked(self, item: QTableWidgetItem) -> None:
         row = item.row()
@@ -2350,6 +2360,9 @@ class MuseAccountsPage(QWidget):
         for acc in self.cookie_store.all():
             self.cookie_store.set_enabled(acc.account_id, enabled)
         self._reload_accounts_table()
+        enabled_count = len(self._get_enabled_accounts())
+        if enabled_count > 0:
+            self.concurrency_spin.setValue(enabled_count)
 
     # =========================================================================
     # THAO TÁC NÚT BẤM TOOLBAR
@@ -2645,7 +2658,7 @@ class MuseAccountsPage(QWidget):
             QMessageBox.warning(self, "Thiếu Prompt", "Vui lòng nhập ít nhất 1 prompt hoặc nạp file .txt.")
             return
 
-        num_chunks = (total_prompts + 4) // 5
+        num_chunks = total_prompts
         is_image = (self._current_task_mode() == "image")
         type_name = "ảnh" if is_image else "video"
         folder_text = self.image_folder.text().strip()
@@ -2656,13 +2669,13 @@ class MuseAccountsPage(QWidget):
 
         if imgs:
             self.global_status.setText(
-                f"Đã phân bổ {total_prompts:,} prompt ({len(imgs)} ảnh mẫu, chia thành {num_chunks:,} đợt gom 5 prompt/lần) "
-                f"qua {len(active_accounts)} tài khoản được tick (Trung bình ~{max(1, num_chunks // len(active_accounts))} đợt/tài khoản)."
+                f"Đã phân bổ {total_prompts:,} prompt ({len(imgs)} ảnh mẫu, mỗi tài khoản chạy lần lượt 1 prompt/lần) "
+                f"qua {len(active_accounts)} tài khoản được tick (Mỗi tài khoản xử lý 1 prompt cùng lúc)."
             )
         else:
             self.global_status.setText(
-                f"Đã phân bổ {total_prompts:,} prompt thuần {type_name} (chia thành {num_chunks:,} đợt gom 5 prompt/lần) "
-                f"qua {len(active_accounts)} tài khoản được tick (Trung bình ~{max(1, num_chunks // len(active_accounts))} đợt/tài khoản)."
+                f"Đã phân bổ {total_prompts:,} prompt thuần {type_name} (mỗi tài khoản chạy lần lượt 1 prompt/lần) "
+                f"qua {len(active_accounts)} tài khoản được tick (Mỗi tài khoản xử lý 1 prompt cùng lúc)."
             )
 
     def _start_batch(self) -> None:
@@ -2701,9 +2714,9 @@ class MuseAccountsPage(QWidget):
         if folder_text:
             all_images = self._scan_images()
 
-        # Chia thành các chunk gom 5 prompt/lần (và 5 ảnh tương ứng nếu có)
+        # Mỗi tài khoản chạy lần lượt 1 prompt (không gom 5 prompt như trước)
         chunks: list[MuseBatchChunk] = []
-        chunk_size = 5
+        chunk_size = 1
         prompt_tuples = list(enumerate(lines, start=1))  # (1-based index, text)
         for i in range(0, len(prompt_tuples), chunk_size):
             chunk_items = prompt_tuples[i : i + chunk_size]
@@ -2726,7 +2739,9 @@ class MuseAccountsPage(QWidget):
             quantity=self.image_quantity.value() if is_image else 1,
         )
 
-        concurrency = self.concurrency_spin.value()
+        # Luồng đồng thời = số tài khoản đã chọn
+        concurrency = len(active_accounts)
+        self.concurrency_spin.setValue(concurrency)
         headless = self.headless_check.isChecked()
         auto_f5_mins = self.f5_spin.value()
         style_suffix = self.style_suffix_edit.text().strip()
@@ -2820,9 +2835,9 @@ class MuseAccountsPage(QWidget):
         if folder_text:
             all_images = self._scan_images()
 
-        # Gom các prompt còn thiếu thành các đợt 5 prompt
+        # Mỗi tài khoản chạy lần lượt 1 prompt còn thiếu (không gom 5 prompt như trước)
         chunks: list[MuseBatchChunk] = []
-        chunk_size = 5
+        chunk_size = 1
         for i in range(0, len(pending_tuples), chunk_size):
             chunk_items = pending_tuples[i : i + chunk_size]
             chunk_imgs = []
@@ -2847,7 +2862,9 @@ class MuseAccountsPage(QWidget):
             quantity=self.image_quantity.value() if is_image else 1,
         )
 
-        concurrency = self.concurrency_spin.value()
+        # Luồng đồng thời = số tài khoản đã chọn
+        concurrency = len(active_accounts)
+        self.concurrency_spin.setValue(concurrency)
         headless = self.headless_check.isChecked()
         auto_f5_mins = self.f5_spin.value()
         style_suffix = self.style_suffix_edit.text().strip()

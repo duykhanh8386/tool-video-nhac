@@ -338,12 +338,12 @@ class ZskyStudioPage(QWidget):
 
         cfg_grid.addWidget(QLabel("Chạy cùng lúc:"), 0, 0)
         self.concurrency_spin = QSpinBox()
-        self.concurrency_spin.setRange(1, 5)
+        self.concurrency_spin.setRange(1, 20)
         self.concurrency_spin.setValue(int(getattr(self.settings, "zsky_concurrency", 1) or 1))
         self.concurrency_spin.setMinimumHeight(32)
         self.concurrency_spin.valueChanged.connect(self._save_settings)
         cfg_grid.addWidget(self.concurrency_spin, 0, 1)
-        cfg_grid.addWidget(QLabel("tài khoản song song (1 - 5)"), 0, 2)
+        cfg_grid.addWidget(QLabel("tài khoản song song (= số tài khoản đã chọn). Mỗi tài khoản gửi và tải lần lượt 1 prompt."), 0, 2)
 
         self.headless_check = QCheckBox("🔒 Chạy ẩn (Headless - không hiện cửa sổ trình duyệt)")
         self.headless_check.setStyleSheet("font-weight: 600; color: #1e293b;")
@@ -631,6 +631,9 @@ class ZskyStudioPage(QWidget):
                 if acc:
                     acc.enabled = (item.checkState() == Qt.Checked)
                     self.account_store.save(acc)
+                    enabled_count = len([a for a in self.account_store.all() if a.enabled])
+                    if enabled_count > 0:
+                        self.concurrency_spin.setValue(enabled_count)
 
     def _on_account_combo_changed(self) -> None:
         acc_id = self.account_combo.currentData()
@@ -816,6 +819,10 @@ class ZskyStudioPage(QWidget):
         if not enabled_accounts:
             QMessageBox.warning(self, "Chưa chọn tài khoản", "Hãy tích chọn ít nhất 1 tài khoản trong bảng tài khoản để chạy.")
             return
+
+        # Luồng đồng thời = số tài khoản đã chọn
+        concurrency = len(enabled_accounts)
+        self.concurrency_spin.setValue(concurrency)
 
         # Tự động đóng các cửa sổ Chrome đăng nhập thủ công nếu còn mở để giải phóng Profile
         if self._manual_drivers:

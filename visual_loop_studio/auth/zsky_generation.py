@@ -479,7 +479,7 @@ class ZskyVideoBatchRunnerThread(QThread):
         self.prompts = [p.strip() for p in prompts if p.strip()]
         self.output_dir = Path(output_dir).resolve()
         self.audio_prompt = audio_prompt
-        self.concurrency = max(1, min(5, concurrency))
+        self.concurrency = max(1, min(20, concurrency))
         self.headless = headless
         self.trim_seconds = float(trim_seconds)
         self.ffmpeg_path = ffmpeg_path
