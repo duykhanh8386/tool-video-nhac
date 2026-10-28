@@ -353,16 +353,16 @@ def check_zsky_login_status(driver) -> tuple[bool, str]:
         # 1. Kiểm tra avatar hoặc profile icon ở góc trên bên phải
         avatar_script = """
             const avatar = document.querySelector(
-                'img[src*="googleusercontent"], img[alt*="avatar" i], [class*="avatar" i], [aria-label*="account" i], [aria-label*="profile" i]'
+                'header img[src*="googleusercontent"], ' +
+                'header img[alt*="avatar" i], ' +
+                'header [class*="avatar" i], ' +
+                'header [aria-label*="account" i], ' +
+                'header [aria-label*="profile" i], ' +
+                'img[src*="googleusercontent"]'
             );
             if (avatar) {
-                return avatar.getAttribute('title') || avatar.getAttribute('alt') || avatar.getAttribute('src') || 'logged_in';
+                return avatar.getAttribute('title') || avatar.getAttribute('alt') || 'logged_in';
             }
-            // Kiểm tra nút My Creations hoặc nút Free month Pro / Profile button
-            const myCreations = [...document.querySelectorAll('a, button, div')].find(
-                el => el.innerText && el.innerText.trim().toLowerCase() === 'my creations'
-            );
-            if (myCreations) return 'my_creations_found';
             return '';
         """
         avatar_val = driver.execute_script(avatar_script)
@@ -378,7 +378,7 @@ def check_zsky_login_status(driver) -> tuple[bool, str]:
             except Exception:
                 return True, "Tài khoản Google"
 
-        # 2. Kiểm tra nếu có nút Sign in / Log in
+        # 2. Kiểm tra nếu có nút Sign in / Log in -> chắc chắn chưa đăng nhập
         login_btn = driver.execute_script("""
             const btns = [...document.querySelectorAll('button, a')];
             return Boolean(btns.find(b => {
@@ -389,10 +389,13 @@ def check_zsky_login_status(driver) -> tuple[bool, str]:
         if login_btn:
             return False, ""
 
-        # Nếu đang ở URL /create hoặc /my-creations mà không có nút login -> xem như đã đăng nhập
-        cur_url = driver.current_url.lower()
-        if "zsky.ai" in cur_url:
-            return True, "Zsky User"
+        # 3. Kiểm tra các chỉ số tài khoản đã đăng nhập (Free month Pro / My Creations trên header và không có nút login)
+        has_user_indicator = driver.execute_script("""
+            const text = (document.body.innerText || '').toLowerCase();
+            return text.includes('free month pro') || text.includes('my creations');
+        """)
+        if has_user_indicator:
+            return True, "Tài khoản Google"
     except Exception:
         pass
     return False, ""
@@ -510,9 +513,37 @@ def inject_cookies_to_driver(driver, cookies: list[dict[str, Any]], target_url: 
                 except Exception:
                     pass
 
+    # Đồng thời nạp vào localStorage phòng trường hợp Zsky lưu token xác thực (Supabase/Firebase) trong localStorage
+    try:
+        for cookie in cookies:
+            c_name = cookie.get("name")
+            c_val = cookie.get("value")
+            if c_name and c_val:
+                try:
+                    driver.execute_script(
+                        "try { localStorage.setItem(arguments[0], arguments[1]); } catch(e){}",
+                        str(c_name),
+                        str(c_val),
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Đóng các tab phụ nếu có, giữ lại duy nhất 1 tab làm việc
+    try:
+        if len(driver.window_handles) > 1:
+            main_h = driver.window_handles[0]
+            for h in driver.window_handles[1:]:
+                driver.switch_to.window(h)
+                driver.close()
+            driver.switch_to.window(main_h)
+    except Exception:
+        pass
+
     try:
         driver.refresh()
-        time.sleep(1.5)
+        time.sleep(2.0)
     except Exception:
         try:
             driver.get(target_url)

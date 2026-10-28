@@ -69,7 +69,9 @@ def ensure_video_mode(driver) -> bool:
         if (videoBtn) {
             const isSelected = videoBtn.classList.contains('active') ||
                                videoBtn.classList.contains('selected') ||
-                               videoBtn.getAttribute('aria-pressed') === 'true';
+                               videoBtn.getAttribute('aria-pressed') === 'true' ||
+                               videoBtn.getAttribute('data-active') === 'true' ||
+                               videoBtn.classList.contains('btn-active');
             if (!isSelected) {
                 videoBtn.click();
                 return true;
@@ -85,17 +87,30 @@ def ensure_video_mode(driver) -> bool:
 
 
 def set_input_value_native_and_js(driver, selector: str, value: str) -> bool:
-    """Điền text vào input đồng thời kích hoạt sự kiện input, change, keydown để framework nhận diện."""
+    """Điền text vào input đồng thời kích hoạt sự kiện input, change, keydown để framework React nhận diện."""
     script = """
         const sel = arguments[0];
         const val = arguments[1];
         const el = document.querySelector(sel);
         if (!el) return false;
         el.focus();
-        el.value = val;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
+        
+        // Gọi native setter của HTMLInputElement prototype để React cập nhật state nội bộ
+        const proto = window.HTMLInputElement.prototype;
+        const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (nativeSetter) {
+            nativeSetter.call(el, val);
+        } else {
+            el.value = val;
+        }
+        
+        // Dispatch đầy đủ sự kiện React lắng nghe
+        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
-        return true;
+        el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ' ' }));
+        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: ' ' }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+        return el.value === val;
     """
     try:
         res = driver.execute_script(script, selector, value)
@@ -106,12 +121,17 @@ def set_input_value_native_and_js(driver, selector: str, value: str) -> bool:
 
     try:
         from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
         el = driver.find_element(By.CSS_SELECTOR, selector)
         if el and el.is_displayed():
             el.click()
-            el.clear()
+            el.send_keys(Keys.CONTROL + "a")
+            el.send_keys(Keys.BACKSPACE)
             el.send_keys(value)
-            return True
+            # Kiểm tra giá trị sau khi gõ
+            current_val = el.get_attribute("value") or ""
+            if current_val == value:
+                return True
     except Exception:
         pass
     return False
@@ -129,7 +149,7 @@ def submit_zsky_prompt(driver, prompt: str, audio_prompt: str = "") -> bool:
             prompt_filled = True
             break
     if not prompt_filled:
-        raise RuntimeError("Không tìm thấy ô nhập prompt (#promptInput) trên Zsky.ai.")
+        raise RuntimeError("Không tìm thấy hoặc không thể điền ô nhập prompt (#promptInput) trên Zsky.ai.")
 
     # 2. Điền Audio prompt (nếu có)
     if audio_prompt.strip():
@@ -172,68 +192,109 @@ def submit_zsky_prompt(driver, prompt: str, audio_prompt: str = "") -> bool:
     if not clicked:
         raise RuntimeError("Không thể click nút Generate (#generateBtn).")
 
+    # Xác nhận xem hệ thống đã nhận lệnh và bắt đầu sinh video hay chưa
+    confirm_script = """
+        const btn = document.getElementById('generateBtn') || document.querySelector('button.prompt-generate');
+        if (!btn) return false;
+        const isBusy = btn.disabled ||
+                       btn.classList.contains('generating') ||
+                       btn.classList.contains('loading') ||
+                       btn.classList.contains('is-loading') ||
+                       Boolean(document.querySelector('.cloud-bolt.active, .cloud-rain.active, .cloud-bolt[style*="opacity: 1"]'));
+        return isBusy;
+    """
+    for _ in range(5):
+        time.sleep(1.0)
+        try:
+            if driver.execute_script(confirm_script):
+                break
+        except Exception:
+            pass
+    else:
+        # Nếu chưa chuyển trạng thái busy, thử click lại một lần nữa
+        try:
+            driver.execute_script(click_script)
+        except Exception:
+            pass
+
     return True
 
 
 def wait_for_video_generation(
     driver,
     timeout: float = 240.0,
-    poll_interval: float = 2.0,
+    poll_interval: float = 3.0,
     cancel_check: Callable[[], bool] | None = None,
     log_cb: Callable[[str], None] | None = None,
 ) -> bool:
-    """Chờ Zsky hoàn thành sinh video sau khi đã bấm Generate."""
+    """Chờ Zsky hoàn thành sinh video sau khi đã bấm Generate.
+    TUYỆT ĐỐI KHÔNG quét thẻ <video> ngẫu nhiên trên trang create vì có video demo nền!
+    """
     start_time = time.monotonic()
     cancel_check = cancel_check or (lambda: False)
     log_cb = log_cb or (lambda _m: None)
 
-    # Đợi 3 giây đầu để server kích hoạt tiến trình tạo video
-    time.sleep(3.0)
+    # Đợi 4 giây đầu để backend tiếp nhận prompt và chuyển trạng thái
+    time.sleep(4.0)
 
     log_cb("⏳ Đang chờ Zsky xử lý và tạo video...")
+    last_log_time = time.monotonic()
+
     while time.monotonic() - start_time < timeout:
         if cancel_check():
             return False
 
-        # Kiểm tra xem Zsky đã hiển thị preview video hoặc hoàn thành
-        status_script = """
-            // 1. Kiểm tra nếu có video tag xuất hiện với thời lượng > 0 hoặc src hợp lệ
-            const videos = Array.from(document.querySelectorAll('video'));
-            const activeVideo = videos.find(v => v.src && v.src.length > 5 || v.querySelector('source'));
-            if (activeVideo) return 'video_ready';
+        elapsed = int(time.monotonic() - start_time)
 
-            // 2. Kiểm tra nếu có màn hình editor "Close the editor and return to your creations"
+        # Định kỳ mỗi 15s báo cáo tiến độ
+        if time.monotonic() - last_log_time >= 15.0:
+            log_cb(f"⏳ Zsky đang render video... (đã chờ {elapsed}s)")
+            last_log_time = time.monotonic()
+
+        # Kiểm tra xem Zsky đã hoàn thành tạo video hay chưa
+        status_script = """
+            // 1. Kiểm tra màn hình editor xuất hiện sau khi tạo xong (như trong ảnh mẫu)
             const bodyText = (document.body.innerText || '').toLowerCase();
-            if (bodyText.includes('close the editor and return to your creations') || bodyText.includes('my creations')) {
-                // Kiểm tra xem nút generate có đang loading không
-                const genBtn = document.getElementById('generateBtn');
-                const isGenerating = genBtn && (
-                    genBtn.classList.contains('generating') ||
-                    genBtn.classList.contains('loading') ||
-                    genBtn.disabled
-                );
-                if (!isGenerating) return 'editor_ready';
+            if (bodyText.includes('close the editor and return to your creations') ||
+                bodyText.includes('your videos') ||
+                bodyText.includes('clip 1 (00:0') ||
+                document.querySelector('[title*="close the editor" i], button[aria-label*="close the editor" i]')) {
+                return 'editor_ready';
             }
 
-            // 3. Kiểm tra nút generate đã trở lại trạng thái sẵn sàng (không còn class loading/generating)
-            const btn = document.getElementById('generateBtn');
+            // 2. Kiểm tra thanh revealBar xuất hiện
+            const revealBar = document.getElementById('revealBar');
+            if (revealBar && (revealBar.classList.contains('active') || revealBar.offsetHeight > 50)) {
+                return 'reveal_ready';
+            }
+
+            // 3. Kiểm tra nút generate đã kết thúc trạng thái busy
+            const btn = document.getElementById('generateBtn') || document.querySelector('button.prompt-generate');
             if (btn) {
                 const isBusy = btn.disabled ||
                                btn.classList.contains('generating') ||
                                btn.classList.contains('loading') ||
-                               Boolean(document.querySelector('.cloud-bolt, .cloud-rain'));
-                // Nếu sau 15 giây mà nút không còn busy -> xem như đã sinh xong
-                return isBusy ? 'generating' : 'idle_ready';
+                               btn.classList.contains('is-loading') ||
+                               Boolean(document.querySelector('.cloud-bolt.active, .cloud-rain.active'));
+                // Một video AI tối thiểu phải mất từ 25s trở lên.
+                // Nếu đã chạy trên 25s mà nút không còn busy -> đã hoàn thành
+                const elapsedSec = arguments[0];
+                if (!isBusy && elapsedSec >= 25) {
+                    return 'idle_ready';
+                }
+                return isBusy ? 'generating' : 'waiting';
             }
             return 'waiting';
         """
         try:
-            status = driver.execute_script(status_script)
-            elapsed = int(time.monotonic() - start_time)
-            if status in ("video_ready", "editor_ready"):
-                log_cb(f"✔ Zsky đã hoàn thành tạo video (sau {elapsed}s)!")
+            status = driver.execute_script(status_script, elapsed)
+            if status == "editor_ready":
+                log_cb(f"✔ Zsky đã hoàn thành tạo video (Editor đã mở sau {elapsed}s)!")
                 return True
-            if status == "idle_ready" and elapsed >= 15:
+            if status == "reveal_ready":
+                log_cb(f"✔ Zsky đã hoàn thành tạo video (Reveal bar sau {elapsed}s)!")
+                return True
+            if status == "idle_ready":
                 log_cb(f"✔ Tiến trình tạo video hoàn tất (sau {elapsed}s)!")
                 return True
         except Exception:
@@ -241,7 +302,7 @@ def wait_for_video_generation(
 
         time.sleep(poll_interval)
 
-    log_cb("⚠ Hết thời gian chờ tạo video trên giao diện create. Sẽ kiểm tra trang My Creations...")
+    log_cb("⚠ Hết thời gian chờ trên giao diện Create. Đang chuyển sang My Creations để kiểm tra video hoàn thành...")
     return True
 
 
@@ -532,25 +593,19 @@ class ZskyVideoBatchRunnerThread(QThread):
         def worker_task(worker_id: int, account: ZskyAccount) -> None:
             nonlocal completed_count, failed_count
             worker_tag = f"Luồng {worker_id} [{account.name}]"
-            self.worker_status_signal.emit(worker_id, f"Đang mở Chrome...")
-            self.log_signal.emit(f"⚙ [{worker_tag}]: Khởi tạo Chrome Profile ({account.profile_dir})")
-
+            self.worker_status_signal.emit(worker_id, "Đang mở Chrome...")
+            
             profile_dir = Path(account.profile_dir).resolve()
-            temp_dl_dir = Path(tempfile.mkdtemp(prefix=f"zsky_w{worker_id}_", dir=CACHE_DIR))
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            clean_chrome_profile_locks(profile_dir)
+            self.log_signal.emit(f"⚙ [{worker_tag}]: Sử dụng Chrome Profile ({profile_dir})")
 
-            # Nếu tài khoản chạy bằng cookies, dùng profile riêng biệt trong temp_dl_dir
-            # để cookies chạy hoàn toàn cô lập, không bao giờ đụng độ lock với trình duyệt ngoài
-            if account.cookies:
-                worker_profile = temp_dl_dir / "cookie_profile"
-                worker_profile.mkdir(parents=True, exist_ok=True)
-            else:
-                worker_profile = profile_dir
-                clean_chrome_profile_locks(worker_profile)
+            temp_dl_dir = Path(tempfile.mkdtemp(prefix=f"zsky_w{worker_id}_", dir=CACHE_DIR))
 
             driver = None
             try:
                 driver = create_zsky_chrome_driver(
-                    worker_profile, download_dir=temp_dl_dir, headless=self.headless
+                    profile_dir, download_dir=temp_dl_dir, headless=self.headless
                 )
                 driver.set_page_load_timeout(45)
 
@@ -562,6 +617,17 @@ class ZskyVideoBatchRunnerThread(QThread):
                     driver.get(ZSKY_START_URL)
                     time.sleep(3.0)
 
+                # Đóng các tab phụ phát sinh lúc mở trình duyệt
+                try:
+                    if len(driver.window_handles) > 1:
+                        main_h = driver.window_handles[0]
+                        for h in driver.window_handles[1:]:
+                            driver.switch_to.window(h)
+                            driver.close()
+                        driver.switch_to.window(main_h)
+                except Exception:
+                    pass
+
                 # Kiểm tra trạng thái đăng nhập
                 is_logged_in, user_label = check_zsky_login_status(driver)
                 if is_logged_in:
@@ -571,7 +637,7 @@ class ZskyVideoBatchRunnerThread(QThread):
                     self.account_status_signal.emit(account.account_id, "need_login", "🟡 Chưa đăng nhập")
                     self.log_signal.emit(
                         f"⚠ [{worker_tag}]: Chưa đăng nhập Google trên zsky.ai! "
-                        f"Hãy đảm bảo bạn đã mở trình duyệt đăng nhập tài khoản này trước đó."
+                        f"Hãy đảm bảo bạn đã mở trình duyệt đăng nhập tài khoản này hoặc dán cookie hợp lệ."
                     )
 
                 # Lặp lấy prompt từ hàng đợi chung
@@ -602,10 +668,19 @@ class ZskyVideoBatchRunnerThread(QThread):
                             driver.get(ZSKY_START_URL)
                             time.sleep(3.0)
 
+                        # Tắt các tooltip hoặc popup che khuất nếu có
+                        try:
+                            driver.execute_script("""
+                                const tooltips = document.querySelectorAll('.img2-tooltip-close, .audio-tooltip-close, .modal-close');
+                                tooltips.forEach(t => { try { t.click(); } catch(e){} });
+                            """)
+                        except Exception:
+                            pass
+
                         submit_zsky_prompt(driver, prompt_text, audio_prompt=self.audio_prompt)
                         self.log_signal.emit(f"🚀 [{worker_tag}] [{task_label}]: Đã bấm nút Generate! Đang chờ tạo video...")
 
-                        # Chờ video tạo xong
+                        # Chờ video tạo xong THẬT SỰ trên trang Create (KHÔNG tắt sau 3s)
                         gen_ok = wait_for_video_generation(
                             driver,
                             timeout=240.0,
@@ -615,7 +690,7 @@ class ZskyVideoBatchRunnerThread(QThread):
                         if not gen_ok:
                             raise RuntimeError("Tạo video bị hủy hoặc quá thời gian chờ.")
 
-                        # Tải video từ trang My Creations
+                        # CHỈ SAU KHI TẠO XONG mới chuyển sang My Creations để tải video
                         downloaded_file = download_video_from_my_creations(
                             driver,
                             temp_dl_dir,
@@ -647,11 +722,16 @@ class ZskyVideoBatchRunnerThread(QThread):
                         self.video_completed_signal.emit(prompt_text, str(trimmed_file))
                         self.log_signal.emit(f"🎉 [{worker_tag}] [{task_label}]: Thành công -> {trimmed_file.name}")
 
-                        # Xóa file tạm
+                        # Xóa file tạm download
                         try:
                             downloaded_file.unlink(missing_ok=True)
                         except Exception:
                             pass
+
+                        # Quay trở lại trang Create để sẵn sàng cho prompt tiếp theo
+                        if not self._stopped:
+                            driver.get(ZSKY_START_URL)
+                            time.sleep(2.5)
 
                     except Exception as exc:
                         with stats_lock:
@@ -661,6 +741,13 @@ class ZskyVideoBatchRunnerThread(QThread):
 
                         self.log_signal.emit(f"❌ [{worker_tag}] [{task_label}] Lỗi: {exc}")
                         time.sleep(2.0)
+                        # Đảm bảo quay lại trang create nếu bị lỗi giữa chừng
+                        try:
+                            if not self._stopped and "zsky.ai/create" not in driver.current_url.lower():
+                                driver.get(ZSKY_START_URL)
+                                time.sleep(2.0)
+                        except Exception:
+                            pass
 
             except Exception as e:
                 self.log_signal.emit(f"❌ [{worker_tag}] Lỗi trình duyệt hoặc phiên: {e}")
