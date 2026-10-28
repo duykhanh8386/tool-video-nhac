@@ -39,6 +39,7 @@ from ui.visual_creator import VisualCreatorPage
 from ui.youtube_accounts import YouTubeAccountsPage
 from ui.zsky_studio import ZskyStudioPage
 from ui.movoa_studio import MovoaStudioPage
+from ui.local_studio import LocalStudioPage
 from auth.license_manager import get_license_manager
 from ui.license_dialog import LicenseDialog
 from utils.config import load_settings, save_settings, write_json
@@ -91,7 +92,7 @@ class MainWindow(QMainWindow):
         self.navigation.addItems([
             "Trang chủ", "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh",
             "Render hàng loạt", "AI Video hàng loạt", "Tài khoản YouTube", "Muse AI Studio (Cookie)",
-            "Zsky AI Studio (Farm Video)", "Movoa AI Studio (Farm Video)",
+            "Zsky AI Studio (Farm Video)", "Movoa AI Studio (Farm Video)", "AI Video Local (Farm Video)",
         ])
         self.navigation.setCurrentRow(0)
         self.navigation.currentRowChanged.connect(self._navigate)
@@ -114,9 +115,11 @@ class MainWindow(QMainWindow):
         self.muse_accounts = MuseAccountsPage(self.settings)
         self.zsky_studio = ZskyStudioPage(self.settings)
         self.movoa_studio = MovoaStudioPage(self.settings)
+        self.local_studio = LocalStudioPage(self.settings)
         for page in (
             self.home, self.visual, self.loop, self.audio, self.batch, self.ai_batch,
             self.youtube_accounts, self.muse_accounts, self.zsky_studio, self.movoa_studio,
+            self.local_studio,
         ):
             self.pages.addWidget(page)
         self.home.navigate.connect(self.navigation.setCurrentRow)
@@ -128,6 +131,7 @@ class MainWindow(QMainWindow):
         self.muse_accounts.settings_changed.connect(self._save_settings)
         self.zsky_studio.settings_changed.connect(self._save_settings)
         self.movoa_studio.settings_changed.connect(self._save_settings)
+        self.local_studio.settings_changed.connect(self._save_settings)
         root.addWidget(self.pages, 1)
         self.setCentralWidget(shell)
 
@@ -149,7 +153,7 @@ class MainWindow(QMainWindow):
         for index, text in enumerate((
             "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh",
             "Render hàng loạt", "AI Video hàng loạt", "Tài khoản YouTube", "Muse AI Studio (Cookie)",
-            "Zsky AI Studio (Farm Video)", "Movoa AI Studio (Farm Video)",
+            "Zsky AI Studio (Farm Video)", "Movoa AI Studio (Farm Video)", "AI Video Local (Farm Video)",
         ), start=1):
             action = QAction(text, self)
             action.triggered.connect(lambda _checked=False, index=index: self.navigation.setCurrentRow(index))

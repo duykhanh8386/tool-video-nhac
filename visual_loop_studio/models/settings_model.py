@@ -45,6 +45,12 @@ class AppSettings:
     movoa_trim_seconds: float = 1.5
     movoa_aspect_ratio: str = "16:9"
     movoa_last_output_folder: str = ""
+    local_farm_comfyui_url: str = "http://127.0.0.1:8188"
+    local_farm_model: str = "dmd4"
+    local_farm_resolution: str = "832x480"
+    local_farm_aspect_ratio: str = "16:9"
+    local_farm_duration: int = 5
+    local_farm_last_output_folder: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
