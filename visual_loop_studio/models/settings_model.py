@@ -34,6 +34,11 @@ class AppSettings:
     muse_concurrency: int = 1
     muse_auto_refresh_minutes: int = 60
     muse_style_suffix: str = ""
+    zsky_start_url: str = "https://zsky.ai/create"
+    zsky_headless: bool = False
+    zsky_concurrency: int = 1
+    zsky_trim_seconds: float = 1.5
+    zsky_last_output_folder: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

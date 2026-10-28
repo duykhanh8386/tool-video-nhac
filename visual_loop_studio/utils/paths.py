@@ -18,10 +18,12 @@ else:
 DATA_DIR = USER_DATA_ROOT / "data"
 CACHE_DIR = USER_DATA_ROOT / "cache"
 LOG_DIR = USER_DATA_ROOT / "logs"
+ZSKY_PROFILES_DIR = USER_DATA_ROOT / "ZskyChromeProfiles"
+ZSKY_ACCOUNTS_FILE = DATA_DIR / "zsky_accounts.json"
 
 
 def ensure_app_dirs() -> None:
-    for path in (DATA_DIR, CACHE_DIR, LOG_DIR):
+    for path in (DATA_DIR, CACHE_DIR, LOG_DIR, ZSKY_PROFILES_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 
