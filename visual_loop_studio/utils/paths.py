@@ -20,10 +20,12 @@ CACHE_DIR = USER_DATA_ROOT / "cache"
 LOG_DIR = USER_DATA_ROOT / "logs"
 ZSKY_PROFILES_DIR = USER_DATA_ROOT / "ZskyChromeProfiles"
 ZSKY_ACCOUNTS_FILE = DATA_DIR / "zsky_accounts.json"
+MOVOA_PROFILES_DIR = USER_DATA_ROOT / "MovoaChromeProfiles"
+MOVOA_ACCOUNTS_FILE = DATA_DIR / "movoa_accounts.json"
 
 
 def ensure_app_dirs() -> None:
-    for path in (DATA_DIR, CACHE_DIR, LOG_DIR, ZSKY_PROFILES_DIR):
+    for path in (DATA_DIR, CACHE_DIR, LOG_DIR, ZSKY_PROFILES_DIR, MOVOA_PROFILES_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 

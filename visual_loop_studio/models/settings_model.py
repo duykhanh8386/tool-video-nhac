@@ -39,6 +39,12 @@ class AppSettings:
     zsky_concurrency: int = 1
     zsky_trim_seconds: float = 1.5
     zsky_last_output_folder: str = ""
+    movoa_start_url: str = "https://movoa.ai/video/text-to-video"
+    movoa_headless: bool = False
+    movoa_concurrency: int = 1
+    movoa_trim_seconds: float = 1.5
+    movoa_aspect_ratio: str = "16:9"
+    movoa_last_output_folder: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
