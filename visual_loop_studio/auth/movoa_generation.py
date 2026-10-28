@@ -117,14 +117,130 @@ def set_prompt_text(driver, prompt: str) -> bool:
     return False
 
 
-def click_generate_clip(driver) -> bool:
-    """Bấm nút 'Make my clip' hoặc 'Make it free'."""
+def get_movoa_current_video_src(driver) -> str:
+    """Lấy src hoặc poster của thẻ video hiện tại trên Movoa (nếu có)."""
     script = """
-        const btn = document.querySelector('button.generate-cta') ||
-                    Array.from(document.querySelectorAll('button')).find(b => {
-                        const t = (b.innerText || '').toLowerCase();
-                        return t.includes('make my clip') || t.includes('make it free');
-                    });
+        const v = document.querySelector('video');
+        if (v) {
+            return v.currentSrc || v.src || (v.querySelector('source') ? v.querySelector('source').src : '') || v.poster || '';
+        }
+        return '';
+    """
+    try:
+        res = driver.execute_script(script)
+        return str(res or "").strip()
+    except Exception:
+        return ""
+
+
+def is_movoa_rendering(driver) -> bool:
+    """Kiểm tra xem Movoa có đang trong trạng thái render clip hay không."""
+    script = """
+        const bodyText = document.body ? (document.body.innerText || '') : '';
+        const lower = bodyText.toLowerCase();
+
+        // 1. Kiểm tra text thông báo đang render trên card 'Your clips'
+        if (lower.includes('the model is rendering your clip') ||
+            lower.includes('clips rendering') ||
+            lower.includes('rendering your clip') ||
+            lower.includes('rendering...')) {
+            return true;
+        }
+
+        // 2. Kiểm tra nếu nút chuyển sang trạng thái Queue / Spinner
+        const allBtns = Array.from(document.querySelectorAll('button'));
+        const queueBtn = allBtns.find(b => {
+            const t = (b.innerText || '').toLowerCase();
+            return (t.includes('queue my next take') || t.includes('queue next take')) && b.offsetParent !== null;
+        });
+        if (queueBtn) return true;
+
+        const genBtn = document.querySelector('button.generate-cta');
+        if (genBtn && genBtn.offsetParent !== null) {
+            const t = (genBtn.innerText || '').toLowerCase();
+            if (t.includes('queue') || genBtn.disabled || genBtn.classList.contains('loading')) {
+                return true;
+            }
+        }
+
+        // 3. Kiểm tra spinner quay tròn
+        const spinners = document.querySelectorAll('svg.animate-spin, .animate-spin, [class*="animate-spin"]');
+        for (const s of spinners) {
+            if (s.offsetParent !== null) {
+                const parentText = (s.closest('div, section')?.innerText || '').toLowerCase();
+                if (parentText.includes('rendering') || parentText.includes('queue')) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    """
+    try:
+        return bool(driver.execute_script(script))
+    except Exception:
+        return False
+
+
+def check_movoa_render_error(driver) -> tuple[bool, str]:
+    """Kiểm tra xem Movoa có hiển thị lỗi kiểm duyệt, hết quota, hoặc render fail không."""
+    script = """
+        const bodyText = document.body ? (document.body.innerText || '') : '';
+        const lower = bodyText.toLowerCase();
+
+        if (lower.includes('violat') || lower.includes('moderation') || lower.includes('safety system')) {
+            return [true, 'Prompt bị hệ thống kiểm duyệt an toàn của Movoa chặn.'];
+        }
+
+        if (lower.includes('failed to render') || lower.includes('rendering failed') || lower.includes('generation failed')) {
+            return [true, 'Movoa báo lỗi render video thất bại.'];
+        }
+
+        if (lower.includes('rate limit') || lower.includes('too many requests') || lower.includes('daily cap') || lower.includes('reached your limit')) {
+            return [true, 'Tài khoản chạm giới hạn tạo video của Movoa.'];
+        }
+
+        const toasts = Array.from(document.querySelectorAll('[role="alert"], [data-slot="toast"], .toast, .alert-error'));
+        for (const t of toasts) {
+            const txt = (t.innerText || '').trim();
+            if (txt && (txt.toLowerCase().includes('error') || txt.toLowerCase().includes('failed') || txt.toLowerCase().includes('limit'))) {
+                return [true, txt];
+            }
+        }
+
+        return [false, ''];
+    """
+    try:
+        res = driver.execute_script(script)
+        if isinstance(res, list) and len(res) == 2:
+            return bool(res[0]), str(res[1])
+    except Exception:
+        pass
+    return False, ""
+
+
+def click_generate_clip(driver) -> bool:
+    """Bấm nút 'Make my clip' hoặc 'Make it free' (chỉ bấm khi sẵn sàng, KHÔNG bấm nút Queue)."""
+    script = """
+        const allBtns = Array.from(document.querySelectorAll('button'));
+
+        // 1. Ưu tiên tìm nút có chữ 'Make my clip' hoặc 'Make it free'
+        let btn = allBtns.find(b => {
+            const t = (b.innerText || '').toLowerCase();
+            return (t.includes('make my clip') || t.includes('make it free')) && b.offsetParent !== null;
+        });
+
+        // 2. Fallback: button.generate-cta nhưng loại trừ nút Queue
+        if (!btn) {
+            const genBtn = document.querySelector('button.generate-cta');
+            if (genBtn && genBtn.offsetParent !== null) {
+                const t = (genBtn.innerText || '').toLowerCase();
+                if (!t.includes('queue')) {
+                    btn = genBtn;
+                }
+            }
+        }
+
         if (btn) {
             btn.scrollIntoView({ block: 'center' });
             btn.click();
@@ -143,8 +259,10 @@ def click_generate_clip(driver) -> bool:
         for sel in GENERATE_BTN_SELECTORS:
             btn = driver.find_element(By.CSS_SELECTOR, sel)
             if btn and btn.is_displayed():
-                btn.click()
-                return True
+                txt = (btn.text or "").lower()
+                if "queue" not in txt:
+                    btn.click()
+                    return True
     except Exception:
         pass
     return False
@@ -152,67 +270,105 @@ def click_generate_clip(driver) -> bool:
 
 def wait_for_movoa_clip_ready(
     driver,
-    timeout: float = 300.0,
-    poll_interval: float = 3.0,
+    initial_video_src: str = "",
+    timeout: float = 360.0,
+    poll_interval: float = 2.5,
     cancel_check: Callable[[], bool] | None = None,
     log_cb: Callable[[str], None] | None = None,
 ) -> bool:
-    """Chờ clip video tạo xong trên Movoa AI (khung 'Your clips' xuất hiện nút 'Download my clip')."""
+    """Chờ clip video tạo xong trên Movoa AI:
+    1. Đợi Movoa tiếp nhận và hiển thị trạng thái đang render ('The model is rendering your clip...').
+    2. Chờ cho tới khi quá trình render kết thúc hoàn toàn (thẻ rendering biến mất).
+    3. Xác nhận video mới và nút 'Download my clip' đã sẵn sàng tải.
+    """
     start_time = time.monotonic()
     cancel_check = cancel_check or (lambda: False)
     log_cb = log_cb or (lambda _m: None)
 
-    time.sleep(3.0)
-    log_cb("⏳ Đang chờ Movoa AI xử lý và sinh video (hàng đợi shared queue)...")
+    # Bước 1: Đợi tối đa 15s để Movoa xác nhận render đã bắt đầu
+    render_started = False
+    log_cb("⏳ Đang gửi yêu cầu và chờ Movoa kích hoạt render...")
 
+    for _ in range(15):
+        if cancel_check():
+            return False
+
+        err_found, err_msg = check_movoa_render_error(driver)
+        if err_found:
+            raise RuntimeError(f"Movoa báo lỗi: {err_msg}")
+
+        if is_movoa_rendering(driver):
+            render_started = True
+            log_cb("🚀 Movoa đã tiếp nhận! Đang trong hàng đợi render video...")
+            break
+
+        current_src = get_movoa_current_video_src(driver)
+        if initial_video_src and current_src and current_src != initial_video_src:
+            log_cb("✔ Clip video mới đã xuất hiện ngay!")
+            return True
+
+        time.sleep(1.0)
+
+    # Bước 2: Vòng lặp chờ render hoàn tất
+    last_log_time = time.monotonic()
     while time.monotonic() - start_time < timeout:
         if cancel_check():
             return False
 
+        err_found, err_msg = check_movoa_render_error(driver)
+        if err_found:
+            raise RuntimeError(f"Movoa báo lỗi: {err_msg}")
+
+        rendering = is_movoa_rendering(driver)
+        elapsed = int(time.monotonic() - start_time)
+
+        if rendering:
+            # Vẫn đang render: KHÔNG ĐƯỢC return ready, bất kể có nút download cũ hay không!
+            if time.monotonic() - last_log_time >= 10.0:
+                log_cb(f"⏳ Movoa đang render video... (đã render {elapsed}s)")
+                last_log_time = time.monotonic()
+            time.sleep(poll_interval)
+            continue
+
+        # Nếu không còn rendering nữa (render_started đã qua hoặc render vừa xong)
+        if render_started:
+            log_cb(f"✔ Quá trình render kết thúc sau {elapsed}s! Đang chuẩn bị clip thành phẩm...")
+            time.sleep(2.0)
+            break
+        else:
+            # Nếu ban đầu không bắt được rendering, kiểm tra xem video src có thay đổi không
+            current_src = get_movoa_current_video_src(driver)
+            if not initial_video_src or (current_src and current_src != initial_video_src):
+                break
+            time.sleep(poll_interval)
+
+    # Bước 3: Đợi nút 'Download my clip' xuất hiện và sẵn sàng
+    confirm_start = time.monotonic()
+    while time.monotonic() - confirm_start < 25.0:
+        if cancel_check():
+            return False
+
         check_script = """
-            // 1. Kiểm tra xem nút 'Download my clip' đã xuất hiện chưa
             const allBtns = Array.from(document.querySelectorAll('button'));
             const dlBtn = allBtns.find(b => {
                 const t = (b.innerText || '').toLowerCase();
                 const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                return t.includes('download my clip') || aria.includes('download my clip') || t.includes('download clip');
+                return (t.includes('download my clip') || aria.includes('download my clip') || t.includes('download clip')) && b.offsetParent !== null;
             });
-            if (dlBtn && dlBtn.offsetParent !== null) {
-                return 'ready';
-            }
-
-            // 2. Kiểm tra nếu có video tag trong phần 'Your clips'
-            const yourClipsContainer = Array.from(document.querySelectorAll('div[data-slot="card"], section, div')).find(
-                el => (el.innerText || '').includes('Your clips')
-            );
-            if (yourClipsContainer) {
-                const v = yourClipsContainer.querySelector('video');
-                if (v && (v.src || v.querySelector('source'))) {
-                    return 'video_found';
-                }
-            }
-
-            // 3. Kiểm tra xem nút generate có đang loading không
-            const genBtn = document.querySelector('button.generate-cta');
-            if (genBtn) {
-                const isBusy = genBtn.disabled || genBtn.classList.contains('loading');
-                if (isBusy) return 'generating';
-            }
-
-            return 'waiting';
+            return Boolean(dlBtn);
         """
         try:
-            status = driver.execute_script(check_script)
-            elapsed = int(time.monotonic() - start_time)
-            if status in ("ready", "video_found"):
-                log_cb(f"✔ Clip video đã tạo xong (sau {elapsed}s)!")
+            has_dl_btn = bool(driver.execute_script(check_script))
+            if has_dl_btn:
+                total_elapsed = int(time.monotonic() - start_time)
+                log_cb(f"✔ Clip video mới đã hoàn tất và sẵn sàng tải (sau {total_elapsed}s)!")
                 return True
         except Exception:
             pass
 
-        time.sleep(poll_interval)
+        time.sleep(1.5)
 
-    log_cb("⚠ Hết thời gian chờ tạo clip trên Movoa. Đang thử quét nút download...")
+    log_cb("⚠ Đã hết thời gian chờ nút download. Sẽ thử quét và tải file...")
     return True
 
 
@@ -229,6 +385,14 @@ def download_movoa_clip(
     download_dir = Path(download_dir).resolve()
     download_dir.mkdir(parents=True, exist_ok=True)
 
+    # Dọn dẹp các file cũ trong thư mục tạm trước khi tải mới để tránh nhầm lẫn
+    for old_file in download_dir.glob("*"):
+        if old_file.is_file():
+            try:
+                old_file.unlink()
+            except Exception:
+                pass
+
     existing_files = set(download_dir.glob("*"))
 
     click_download_script = """
@@ -236,7 +400,7 @@ def download_movoa_clip(
         const dlBtn = allBtns.find(b => {
             const t = (b.innerText || '').toLowerCase();
             const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-            return t.includes('download my clip') || aria.includes('download my clip') || t.includes('download clip');
+            return (t.includes('download my clip') || aria.includes('download my clip') || t.includes('download clip')) && b.offsetParent !== null;
         });
         if (dlBtn) {
             dlBtn.scrollIntoView({ block: 'center' });
@@ -535,30 +699,53 @@ class MovoaVideoBatchRunnerThread(QThread):
 
                         ensure_text_to_video_tab(driver)
                         time.sleep(0.5)
+
+                        # 1. Nếu có video trước đó đang render dở, chờ nó render xong hoàn toàn
+                        if is_movoa_rendering(driver):
+                            self.log_signal.emit(
+                                f"⏳ [{worker_tag}] [{task_label}]: Phát hiện clip trước đó đang render dở dang. "
+                                f"Đang chờ hoàn tất trước khi gửi prompt mới..."
+                            )
+                            wait_for_movoa_clip_ready(
+                                driver,
+                                timeout=360.0,
+                                cancel_check=lambda: self._stopped,
+                                log_cb=lambda m: self.log_signal.emit(f"[{worker_tag}]: {m}"),
+                            )
+                            time.sleep(2.0)
+
+                        # 2. Ghi nhận video src hiện tại để đối chiếu với video mới
+                        initial_src = get_movoa_current_video_src(driver)
+
+                        # 3. Chọn tỉ lệ khung hình
                         select_aspect_ratio(driver, self.aspect_ratio)
                         time.sleep(0.5)
 
+                        # 4. Nhập prompt
                         if not set_prompt_text(driver, prompt_text):
                             raise RuntimeError("Không thể điền prompt vào ô #video-prompt.")
 
-                        time.sleep(0.5)
+                        time.sleep(1.0)
 
+                        # 5. Bấm nút Make my clip (tuyệt đối không bấm nhầm nút Queue)
                         if not click_generate_clip(driver):
                             raise RuntimeError("Không thể click nút 'Make my clip' / 'Make it free'.")
 
                         self.log_signal.emit(f"🚀 [{worker_tag}] [{task_label}]: Đã bấm nút Make my clip! Đang chờ tạo video...")
 
-                        # Chờ video tạo xong
+                        # 6. Chờ video MỚI tạo xong hoàn tất (đợi render xong, không tải video cũ)
                         gen_ok = wait_for_movoa_clip_ready(
                             driver,
-                            timeout=300.0,
+                            initial_video_src=initial_src,
+                            timeout=420.0,
                             cancel_check=lambda: self._stopped,
                             log_cb=lambda m: self.log_signal.emit(f"[{worker_tag}]: {m}"),
                         )
                         if not gen_ok:
-                            raise RuntimeError("Tạo clip bị hủy hoặc quá thời gian chờ.")
+                            raise RuntimeError("Tạo clip bị hủy hoặc quá thời gian chờ render.")
 
-                        # Tải video qua nút 'Download my clip'
+                        # 7. Tải video MỚI vừa render xong qua nút 'Download my clip'
+                        self.worker_status_signal.emit(worker_id, f"Đang tải {task_label}...")
                         downloaded_file = download_movoa_clip(
                             driver,
                             temp_dl_dir,
@@ -567,7 +754,8 @@ class MovoaVideoBatchRunnerThread(QThread):
                             log_cb=lambda m: self.log_signal.emit(f"[{worker_tag}]: {m}"),
                         )
 
-                        # Cắt xóa 1.5s cuối (hoặc số giây cấu hình)
+                        # 8. Cắt xóa 1.5s cuối (hoặc số giây cấu hình)
+                        self.worker_status_signal.emit(worker_id, f"Cắt {self.trim_seconds}s cuối...")
                         stem_name = safe_filename(f"movoa_{p_idx:03d}_{prompt_text[:30]}", default_prefix="movoa")
                         final_output = self.output_dir / f"{Path(stem_name).stem}_cut.mp4"
 
@@ -579,6 +767,9 @@ class MovoaVideoBatchRunnerThread(QThread):
                             ffprobe_path=self.ffprobe_path,
                             log_cb=lambda m: self.log_signal.emit(f"[{worker_tag}]: {m}"),
                         )
+
+                        # Nghỉ 2.5s để Movoa cập nhật giao diện trước khi tiếp tục
+                        time.sleep(2.5)
 
                         with stats_lock:
                             completed_count += 1

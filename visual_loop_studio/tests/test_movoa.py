@@ -62,3 +62,52 @@ def test_movoa_trim_video_end(tmp_path: Path):
 
     new_info = probe_media(str(trimmed_video))
     assert 3.4 <= new_info.duration <= 3.6
+
+
+def test_movoa_rendering_wait_logic():
+    """Kiểm tra logic đợi render Movoa với driver giả lập."""
+    from unittest.mock import MagicMock
+    from auth.movoa_generation import is_movoa_rendering, wait_for_movoa_clip_ready
+
+    mock_driver = MagicMock()
+
+    # 1. Test is_movoa_rendering returns True when script says True
+    mock_driver.execute_script.return_value = True
+    assert is_movoa_rendering(mock_driver) is True
+
+    # 2. Test is_movoa_rendering returns False when script says False
+    mock_driver.execute_script.return_value = False
+    assert is_movoa_rendering(mock_driver) is False
+
+    # 3. Test wait_for_movoa_clip_ready with state progression:
+    # Phase 1: render start (True)
+    # Phase 2: rendering for 2 ticks (True, True, then False)
+    # Phase 3: has_dl_btn (True)
+    script_responses = [
+        [False, ""],  # check_error
+        True,         # is_movoa_rendering -> started
+        [False, ""],  # check_error
+        True,         # is_rendering (tick 1)
+        [False, ""],  # check_error
+        False,        # is_rendering (finished)
+        True,         # has_dl_btn
+    ]
+
+    def mock_exec(script, *args):
+        if script_responses:
+            return script_responses.pop(0)
+        return False
+
+    mock_driver.execute_script.side_effect = mock_exec
+    logs = []
+    res = wait_for_movoa_clip_ready(
+        mock_driver,
+        initial_video_src="old_clip.mp4",
+        timeout=10.0,
+        poll_interval=0.1,
+        log_cb=logs.append
+    )
+    assert res is True
+    assert any("đang trong hàng đợi" in l.lower() or "tiếp nhận" in l.lower() for l in logs)
+    assert any("kết thúc" in l.lower() for l in logs)
+
