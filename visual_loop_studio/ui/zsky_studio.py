@@ -41,7 +41,9 @@ from auth.zsky_auth import (
     ZskyAccount,
     ZskyAccountStore,
     check_zsky_login_status,
+    clean_chrome_profile_locks,
     create_zsky_chrome_driver,
+    inject_cookies_to_driver,
     parse_cookie_input,
 )
 from auth.zsky_generation import ZskyVideoBatchRunnerThread
@@ -92,31 +94,62 @@ class AddZskyAccountDialog(QDialog):
 
 
 class PasteCookieDialog(QDialog):
-    """Hộp thoại dán cookie JSON hoặc text cho tài khoản Zsky."""
+    """Hộp thoại dán trực tiếp chuỗi JSON hoặc text cookie cho tài khoản Zsky AI (tương tự Muse)."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, default_name: str = "", parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("🔑 Dán Cookie Zsky AI")
-        self.setMinimumWidth(500)
-        self.setMinimumHeight(350)
+        self.setWindowTitle("➕ Dán Cookie Tài Khoản Zsky AI")
+        self.setMinimumWidth(560)
+        self.setMinimumHeight(420)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Dán chuỗi Cookie JSON hoặc Key=Value (xuất từ Cookie-Editor / J2Team):"))
+        layout.setSpacing(10)
 
+        hint = QLabel(
+            "📋 Hướng dẫn: Đăng nhập vào Zsky.ai (qua Google) trên trình duyệt thường, dùng extension "
+            "(như Cookie-Editor, J2Team) xuất cookie dạng JSON rồi dán vào khung bên dưới.\n"
+            "Tool sẽ tự động nhận diện cookie, email và tạo ngay tài khoản mới sẵn sàng farm!"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #0369a1; font-size: 12px; background: #e0f2fe; padding: 8px; border-radius: 6px;")
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        self.name_edit = QLineEdit(default_name)
+        self.name_edit.setPlaceholderText("Tên tài khoản (ví dụ: Zsky 1)")
+        self.name_edit.setMinimumHeight(32)
+
+        self.email_edit = QLineEdit()
+        self.email_edit.setPlaceholderText("(Tùy chọn) Nhập email hoặc để trống để tool tự quét...")
+        self.email_edit.setMinimumHeight(32)
+
+        form.addRow("Tên hiển thị:", self.name_edit)
+        form.addRow("Email tài khoản:", self.email_edit)
+        layout.addLayout(form)
+
+        layout.addWidget(QLabel("Dán nội dung Cookie (JSON / Text):"))
         self.cookie_text = QPlainTextEdit()
-        self.cookie_text.setPlaceholderText('[\n  {\n    "name": "session",\n    "value": "...",\n    "domain": ".zsky.ai"\n  }\n]')
-        self.cookie_text.setStyleSheet("font-family: Consolas, monospace; font-size: 12px;")
+        self.cookie_text.setPlaceholderText(
+            '[\n  {\n    "name": "session",\n    "value": "...",\n    "domain": ".zsky.ai"\n  }\n]'
+        )
+        self.cookie_text.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 12px; border: 1.5px solid #cbd5e1; border-radius: 6px;"
+        )
         layout.addWidget(self.cookie_text)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.button(QDialogButtonBox.Ok).setText("✔ Lưu Cookie")
+        btn_box.button(QDialogButtonBox.Ok).setText("✔ Thêm tài khoản")
         btn_box.button(QDialogButtonBox.Cancel).setText("Hủy")
         btn_box.accepted.connect(self.accept)
         btn_box.rejected.connect(self.reject)
         layout.addWidget(btn_box)
 
-    def get_cookies(self) -> list[dict]:
-        return parse_cookie_input(self.cookie_text.toPlainText())
+    def get_data(self) -> tuple[str, str, str]:
+        return (
+            self.cookie_text.toPlainText().strip(),
+            self.name_edit.text().strip(),
+            self.email_edit.text().strip(),
+        )
 
 
 class ZskyCheckAccountThread(QThread):
@@ -132,10 +165,14 @@ class ZskyCheckAccountThread(QThread):
         driver = None
         try:
             profile_dir = Path(self.account.profile_dir).resolve()
+            clean_chrome_profile_locks(profile_dir)
             driver = create_zsky_chrome_driver(profile_dir, headless=True)
             driver.set_page_load_timeout(30)
-            driver.get(ZSKY_START_URL)
-            time.sleep(3.0)
+            if self.account.cookies:
+                inject_cookies_to_driver(driver, self.account.cookies, target_url=ZSKY_START_URL)
+            else:
+                driver.get(ZSKY_START_URL)
+                time.sleep(3.0)
             is_logged_in, label = check_zsky_login_status(driver)
             self.result_signal.emit(self.account.account_id, is_logged_in, label)
         except Exception as e:
@@ -158,6 +195,7 @@ class ZskyStudioPage(QWidget):
 
         self._active_runner: ZskyVideoBatchRunnerThread | None = None
         self._active_checker: ZskyCheckAccountThread | None = None
+        self._manual_drivers: dict[str, Any] = {}
 
         self._build_ui()
         self._reload_accounts_table()
@@ -173,6 +211,12 @@ class ZskyStudioPage(QWidget):
         if self._active_runner and self._active_runner.isRunning():
             self._active_runner.stop()
             self._active_runner.wait(3000)
+        for _acc_id, d in list(self._manual_drivers.items()):
+            try:
+                d.quit()
+            except Exception:
+                pass
+        self._manual_drivers.clear()
 
     def _build_ui(self) -> None:
         outer_layout = QVBoxLayout(self)
@@ -232,6 +276,12 @@ class ZskyStudioPage(QWidget):
         self.btn_add_account.clicked.connect(self._open_add_account_dialog)
         toolbar.addWidget(self.btn_add_account)
 
+        self.btn_paste_cookie = QPushButton("➕ Dán Cookie")
+        self.btn_paste_cookie.setMinimumHeight(32)
+        self.btn_paste_cookie.setStyleSheet("background: #0d9488; color: #ffffff; font-weight: 600;")
+        self.btn_paste_cookie.clicked.connect(self._open_paste_cookie_dialog)
+        toolbar.addWidget(self.btn_paste_cookie)
+
         self.btn_open_browser = QPushButton("🌐 Mở Chrome đăng nhập")
         self.btn_open_browser.setMinimumHeight(32)
         self.btn_open_browser.setStyleSheet("background: #0284c7; color: #ffffff; font-weight: 600;")
@@ -242,11 +292,6 @@ class ZskyStudioPage(QWidget):
         self.btn_check_account.setMinimumHeight(32)
         self.btn_check_account.clicked.connect(self._check_current_account)
         toolbar.addWidget(self.btn_check_account)
-
-        self.btn_paste_cookie = QPushButton("🔑 Dán Cookie")
-        self.btn_paste_cookie.setMinimumHeight(32)
-        self.btn_paste_cookie.clicked.connect(self._open_paste_cookie_dialog)
-        toolbar.addWidget(self.btn_paste_cookie)
 
         self.btn_delete_account = QPushButton("🗑 Xoá tài khoản")
         self.btn_delete_account.setMinimumHeight(32)
@@ -624,14 +669,28 @@ class ZskyStudioPage(QWidget):
             self._open_browser_for_account(acc)
 
     def _open_browser_for_account(self, account: ZskyAccount) -> None:
+        if account.account_id in self._manual_drivers:
+            QMessageBox.information(
+                self,
+                "Chrome đang mở",
+                f"Trình duyệt Chrome cho tài khoản '{account.name}' đã đang mở rồi.\n\n"
+                f"Hãy đăng nhập Google trên cửa sổ đó, sau đó ĐÓNG cửa sổ lại trước khi bấm bắt đầu farm.",
+            )
+            return
+
         self._append_log(f"🌐 Đang mở Chrome cho tài khoản [{account.name}] để bạn đăng nhập Google...")
 
         def run_browser():
             driver = None
             try:
                 profile_dir = Path(account.profile_dir).resolve()
+                clean_chrome_profile_locks(profile_dir)
                 driver = create_zsky_chrome_driver(profile_dir, headless=False)
-                driver.get(ZSKY_START_URL)
+                self._manual_drivers[account.account_id] = driver
+                if account.cookies:
+                    inject_cookies_to_driver(driver, account.cookies, target_url=ZSKY_START_URL)
+                else:
+                    driver.get(ZSKY_START_URL)
 
                 # Giữ cửa sổ mở để người dùng đăng nhập
                 while True:
@@ -653,12 +712,13 @@ class ZskyStudioPage(QWidget):
             except Exception as exc:
                 self._append_log(f"❌ Không thể mở Chrome: {exc}")
             finally:
+                self._manual_drivers.pop(account.account_id, None)
                 if driver is not None:
                     try:
                         driver.quit()
                     except Exception:
                         pass
-                # Cập nhật UI
+                clean_chrome_profile_locks(account.profile_dir)
                 self.account_store.save(account)
 
         t = threading.Thread(target=run_browser, daemon=True)
@@ -667,8 +727,10 @@ class ZskyStudioPage(QWidget):
             self,
             "Trình duyệt Chrome đang mở",
             f"Trình duyệt Chrome đã mở với Profile riêng của tài khoản '{account.name}'.\n\n"
-            f"Hãy bấm 'Sign in with Google' trên trang web và đăng nhập tài khoản của bạn.\n"
-            f"Khi đăng nhập xong, bạn có thể đóng trình duyệt; phiên đăng nhập sẽ được lưu tự động!",
+            f"1. Hãy bấm 'Sign in with Google' trên trang web và đăng nhập tài khoản của bạn.\n"
+            f"2. Sau khi thấy đã đăng nhập, HÃY ĐÓNG CỬA SỔ CHROME lại để lưu phiên!\n\n"
+            f"⚠ LƯU Ý: Phải đóng cửa sổ Chrome này trước khi bấm 'Bắt đầu Farm Video' "
+            f"để tránh xung đột khóa Profile của Chrome.",
         )
 
     def _check_current_account(self) -> None:
@@ -702,24 +764,29 @@ class ZskyStudioPage(QWidget):
             self._reload_accounts_table()
 
     def _open_paste_cookie_dialog(self) -> None:
-        acc_id = self.account_combo.currentData()
-        if not acc_id:
-            QMessageBox.warning(self, "Chú ý", "Vui lòng chọn tài khoản trước.")
-            return
-        acc = self.account_store.get(acc_id)
-        if not acc:
-            return
-        dlg = PasteCookieDialog(self)
+        """Mở hộp thoại dán Cookie để thêm trực tiếp tài khoản mới (giống Muse)."""
+        default_name = self.account_store.next_name()
+        dlg = PasteCookieDialog(default_name, self)
         if dlg.exec() == QDialog.Accepted:
-            cookies = dlg.get_cookies()
-            if cookies:
-                acc.cookies = cookies
-                acc.status = "active"
-                acc.status_message = f"Đã nạp {len(cookies)} cookie"
-                acc.last_checked = time.strftime("%d/%m %H:%M")
-                self.account_store.save(acc)
+            raw, name, email = dlg.get_data()
+            if not raw:
+                QMessageBox.warning(self, "Thiếu dữ liệu", "Vui lòng dán chuỗi cookie vào khung.")
+                return
+            try:
+                acc = self.account_store.import_from_json(raw, default_name=name, default_email=email)
+                QMessageBox.information(
+                    self,
+                    "Thêm Cookie thành công",
+                    f"Đã thêm tài khoản: {acc.combo_label}\n"
+                    f"Tổng số cookies nhận diện: {len(acc.cookies)}.",
+                )
                 self._reload_accounts_table()
-                self._append_log(f"✔ Đã nạp {len(cookies)} cookies cho tài khoản [{acc.name}]")
+                idx = self.account_combo.findData(acc.account_id)
+                if idx >= 0:
+                    self.account_combo.setCurrentIndex(idx)
+                self._append_log(f"✔ Đã thêm tài khoản Zsky qua Cookie: {acc.combo_label} ({len(acc.cookies)} cookies)")
+            except Exception as exc:
+                QMessageBox.critical(self, "Lỗi Cookie", f"Không thể nhận diện cookie: {exc}")
 
     def _delete_current_account(self) -> None:
         acc_id = self.account_combo.currentData()
@@ -749,6 +816,17 @@ class ZskyStudioPage(QWidget):
         if not enabled_accounts:
             QMessageBox.warning(self, "Chưa chọn tài khoản", "Hãy tích chọn ít nhất 1 tài khoản trong bảng tài khoản để chạy.")
             return
+
+        # Tự động đóng các cửa sổ Chrome đăng nhập thủ công nếu còn mở để giải phóng Profile
+        if self._manual_drivers:
+            for acc_id, d in list(self._manual_drivers.items()):
+                try:
+                    d.quit()
+                except Exception:
+                    pass
+            self._manual_drivers.clear()
+            self._append_log("ℹ Đã tự động đóng cửa sổ Chrome đăng nhập để giải phóng Profile cho luồng farm.")
+            time.sleep(1.0)
 
         out_dir = Path(self.output_edit.text().strip()).resolve()
         out_dir.mkdir(parents=True, exist_ok=True)

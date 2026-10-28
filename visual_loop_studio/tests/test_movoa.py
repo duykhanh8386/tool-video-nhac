@@ -24,7 +24,19 @@ def test_movoa_account_store(tmp_path: Path):
     assert loaded is not None
     assert loaded.status == "active"
 
+    # Test next_name
+    assert store.next_name() == "Movoa 1"
+
+    # Test import_from_json
+    cookie_json = '[{"name": "session_id", "value": "xyz123", "domain": ".movoa.ai", "path": "/"}]'
+    imported = store.import_from_json(cookie_json, default_name="Movoa Cookie", default_email="user_cookie@gmail.com")
+    assert imported.name == "Movoa Cookie"
+    assert imported.email == "user_cookie@gmail.com"
+    assert len(imported.cookies) == 1
+    assert imported.status == "active"
+
     store.delete(acc.account_id)
+    store.delete(imported.account_id)
     assert len(store.all()) == 0
 
 

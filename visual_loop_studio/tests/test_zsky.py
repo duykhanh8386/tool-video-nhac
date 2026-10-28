@@ -25,7 +25,19 @@ def test_zsky_account_store(tmp_path: Path):
     assert loaded is not None
     assert loaded.status == "active"
 
+    # Test next_name
+    assert store.next_name() == "Zsky 1"
+
+    # Test import_from_json
+    cookie_json = '[{"name": "session_id", "value": "xyz123", "domain": ".zsky.ai", "path": "/"}]'
+    imported = store.import_from_json(cookie_json, default_name="Zsky Cookie", default_email="zsky_user@gmail.com")
+    assert imported.name == "Zsky Cookie"
+    assert imported.email == "zsky_user@gmail.com"
+    assert len(imported.cookies) == 1
+    assert imported.status == "active"
+
     store.delete(acc.account_id)
+    store.delete(imported.account_id)
     assert len(store.all()) == 0
 
 

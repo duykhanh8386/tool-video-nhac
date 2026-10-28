@@ -155,6 +155,101 @@ class ZskyAccountStore:
                         pass
             write_json(self.path, {"version": 1, "accounts": []})
 
+    def next_name(self) -> str:
+        with self._lock:
+            existing = {a.name.strip().casefold() for a in self.all()}
+            idx = 1
+            while f"zsky {idx}".casefold() in existing:
+                idx += 1
+            return f"Zsky {idx}"
+
+    def import_from_json(self, raw_text: str, default_name: str = "", default_email: str = "") -> ZskyAccount:
+        """Thêm trực tiếp tài khoản mới từ chuỗi cookie JSON hoặc text (giống Muse)."""
+        with self._lock:
+            cookies = parse_cookie_input(raw_text)
+            if not cookies:
+                raise ValueError("Không tìm thấy dữ liệu cookie hợp lệ trong chuỗi JSON/text.")
+
+            detected_email = default_email.strip() or extract_email_from_text(raw_text, cookies)
+            name = default_name.strip() or self.next_name()
+            acc_id = "zsky_" + hashlib.md5(f"{name}_{detected_email}_{time.time()}".encode("utf-8")).hexdigest()[:12]
+            profile_path = ZSKY_PROFILES_DIR / acc_id
+            profile_path.mkdir(parents=True, exist_ok=True)
+            clean_chrome_profile_locks(profile_path)
+
+            account = ZskyAccount(
+                account_id=acc_id,
+                name=name,
+                email=detected_email,
+                profile_dir=str(profile_path.resolve()),
+                cookies=cookies,
+                status="active",
+                status_message=f"Đã nạp {len(cookies)} cookies",
+                last_checked=_formatted_now(),
+                enabled=True,
+                tasks_completed=0,
+                created_at=_iso_now(),
+            )
+            self.save(account)
+            return account
+
+
+EMAIL_REGEX = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
+
+
+def extract_email_from_text(text: str, cookies: list[dict[str, Any]] | None = None) -> str:
+    """Trích xuất địa chỉ email từ nội dung chuỗi hoặc cookies."""
+    if cookies:
+        for c in cookies:
+            for key in ("value", "name"):
+                val = str(c.get(key) or "")
+                m = EMAIL_REGEX.search(val)
+                if m:
+                    em = m.group(0).lower()
+                    if not any(skip in em for skip in ("support@", "help@", "info@", "contact@", "w3.org", "schema.org")):
+                        return em
+    if text:
+        for m in EMAIL_REGEX.finditer(text):
+            em = m.group(0).lower()
+            if not any(skip in em for skip in ("support@", "help@", "info@", "contact@", "w3.org", "schema.org")):
+                return em
+    return ""
+
+
+def kill_chrome_on_profile(profile_dir: Path | str) -> None:
+    """Tắt các tiến trình chrome.exe cũ đang chiếm dụng thư mục profile này."""
+    p_str = str(Path(profile_dir).resolve())
+    if not p_str or len(p_str) < 5:
+        return
+    try:
+        ps_cmd = (
+            f"Get-CimInstance Win32_Process -Filter \"name = 'chrome.exe'\" | "
+            f"Where-Object {{ $_.CommandLine -like '*{p_str}*' }} | "
+            f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+        )
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, timeout=5, **kwargs)
+        time.sleep(0.3)
+    except Exception:
+        pass
+
+
+def clean_chrome_profile_locks(profile: Path | str) -> None:
+    """Xóa các file lock của Chrome trong thư mục profile để tránh lỗi crash / DevToolsActivePort."""
+    p = Path(profile).resolve()
+    if not p.is_dir():
+        return
+    kill_chrome_on_profile(p)
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort", "lockfile"):
+        try:
+            target = p / name
+            if target.is_file() or target.is_symlink():
+                target.unlink(missing_ok=True)
+        except Exception:
+            pass
+
 
 def create_zsky_chrome_driver(
     profile: Path,
@@ -169,11 +264,15 @@ def create_zsky_chrome_driver(
 
     profile = Path(profile).resolve()
     profile.mkdir(parents=True, exist_ok=True)
+    clean_chrome_profile_locks(profile)
 
     options = webdriver.ChromeOptions()
     options.add_argument(f"--user-data-dir={profile}")
+    options.add_argument("--remote-debugging-port=0")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-session-crashed-bubble")
     options.add_argument("--force-renderer-accessibility")
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -300,47 +399,87 @@ def check_zsky_login_status(driver) -> tuple[bool, str]:
 
 
 def parse_cookie_input(raw: str) -> list[dict[str, Any]]:
-    """Hỗ trợ phân tích cookie dạng JSON hoặc Text dán vào."""
-    raw = (raw or "").strip()
-    if not raw:
+    """Phân tích cookie JSON (Cookie-Editor, J2Team), Netscape format, hoặc Header string."""
+    text = (raw or "").strip()
+    if not text:
         return []
+
+    parsed_raw: list[dict[str, Any]] = []
+    # 1. Thử phân tích JSON
     try:
-        data = json.loads(raw)
+        data = json.loads(text)
         if isinstance(data, list):
-            res = []
             for item in data:
                 if isinstance(item, dict) and "name" in item and "value" in item:
-                    c = {
-                        "name": str(item["name"]),
-                        "value": str(item["value"]),
-                        "domain": str(item.get("domain", ".zsky.ai")),
-                        "path": str(item.get("path", "/")),
-                    }
-                    if "secure" in item:
-                        c["secure"] = bool(item["secure"])
-                    if "httpOnly" in item:
-                        c["httpOnly"] = bool(item["httpOnly"])
-                    res.append(c)
-            return res
+                    parsed_raw.append(item)
+        elif isinstance(data, dict):
+            if "cookies" in data and isinstance(data["cookies"], list):
+                for item in data["cookies"]:
+                    if isinstance(item, dict) and "name" in item and "value" in item:
+                        parsed_raw.append(item)
+            else:
+                for k, v in data.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        parsed_raw.append({"name": str(k), "value": str(v)})
     except Exception:
         pass
-    # Text key=val format
-    cookies = []
-    for pair in raw.split(";"):
-        pair = pair.strip()
-        if "=" in pair:
-            name, val = pair.split("=", 1)
-            cookies.append({
-                "name": name.strip(),
-                "value": val.strip(),
-                "domain": ".zsky.ai",
-                "path": "/",
-            })
-    return cookies
+
+    # 2. Thử phân tích Netscape hoặc Key=Value nếu không phải JSON
+    if not parsed_raw:
+        lines = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+        for line in lines:
+            parts = line.split("\t")
+            if len(parts) >= 7:
+                parsed_raw.append({
+                    "domain": parts[0],
+                    "path": parts[2],
+                    "secure": parts[3].upper() == "TRUE",
+                    "expirationDate": parts[4],
+                    "name": parts[5],
+                    "value": parts[6],
+                })
+            elif ";" in line or "=" in line:
+                for pair in line.split(";"):
+                    if "=" in pair:
+                        k, v = pair.split("=", 1)
+                        if k.strip():
+                            parsed_raw.append({"name": k.strip(), "value": v.strip()})
+
+    # 3. Chuẩn hóa cho Selenium
+    normalized: list[dict[str, Any]] = []
+    for item in parsed_raw:
+        name = str(item.get("name") or "").strip()
+        val = str(item.get("value") or "").strip()
+        if not name:
+            continue
+        raw_dom = str(item.get("domain") or "").strip().lower()
+        if not raw_dom or "zsky.ai" not in raw_dom:
+            dom = ".zsky.ai"
+        else:
+            dom = raw_dom if raw_dom.startswith(".") else f".{raw_dom}"
+
+        c: dict[str, Any] = {
+            "name": name,
+            "value": val,
+            "domain": dom,
+            "path": str(item.get("path") or "/"),
+            "secure": bool(item.get("secure", True)),
+        }
+        if "httpOnly" in item:
+            c["httpOnly"] = bool(item["httpOnly"])
+        exp = item.get("expiry") or item.get("expirationDate")
+        if exp is not None:
+            try:
+                c["expiry"] = int(float(exp))
+            except Exception:
+                pass
+        normalized.append(c)
+
+    return normalized
 
 
 def inject_cookies_to_driver(driver, cookies: list[dict[str, Any]], target_url: str = ZSKY_START_URL) -> int:
-    """Nạp cookies vào trình duyệt Selenium."""
+    """Nạp cookies vào trình duyệt Selenium và làm mới trang để nhận phiên."""
     if not cookies:
         return 0
     try:
@@ -348,19 +487,36 @@ def inject_cookies_to_driver(driver, cookies: list[dict[str, Any]], target_url: 
         time.sleep(1.0)
     except Exception:
         pass
+
+    try:
+        driver.delete_all_cookies()
+    except Exception:
+        pass
+
+    allowed_keys = {"name", "value", "path", "domain", "secure", "httpOnly", "expiry"}
     added = 0
-    for c in cookies:
+    for cookie in cookies:
+        clean = {k: v for k, v in cookie.items() if k in allowed_keys}
         try:
-            cookie_dict = {
-                "name": c["name"],
-                "value": c["value"],
-                "path": c.get("path", "/"),
-            }
-            dom = c.get("domain", "")
-            if dom and "zsky.ai" in dom:
-                cookie_dict["domain"] = dom
-            driver.add_cookie(cookie_dict)
+            driver.add_cookie(clean)
             added += 1
         except Exception:
-            continue
+            if "domain" in clean:
+                clean_no_dom = dict(clean)
+                del clean_no_dom["domain"]
+                try:
+                    driver.add_cookie(clean_no_dom)
+                    added += 1
+                except Exception:
+                    pass
+
+    try:
+        driver.refresh()
+        time.sleep(1.5)
+    except Exception:
+        try:
+            driver.get(target_url)
+        except Exception:
+            pass
+
     return added

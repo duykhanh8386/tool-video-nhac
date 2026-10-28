@@ -18,6 +18,7 @@ from auth.zsky_auth import (
     ZSKY_START_URL,
     ZskyAccount,
     check_zsky_login_status,
+    clean_chrome_profile_locks,
     create_zsky_chrome_driver,
     inject_cookies_to_driver,
 )
@@ -537,19 +538,29 @@ class ZskyVideoBatchRunnerThread(QThread):
             profile_dir = Path(account.profile_dir).resolve()
             temp_dl_dir = Path(tempfile.mkdtemp(prefix=f"zsky_w{worker_id}_", dir=CACHE_DIR))
 
+            # Nếu tài khoản chạy bằng cookies, dùng profile riêng biệt trong temp_dl_dir
+            # để cookies chạy hoàn toàn cô lập, không bao giờ đụng độ lock với trình duyệt ngoài
+            if account.cookies:
+                worker_profile = temp_dl_dir / "cookie_profile"
+                worker_profile.mkdir(parents=True, exist_ok=True)
+            else:
+                worker_profile = profile_dir
+                clean_chrome_profile_locks(worker_profile)
+
             driver = None
             try:
                 driver = create_zsky_chrome_driver(
-                    profile_dir, download_dir=temp_dl_dir, headless=self.headless
+                    worker_profile, download_dir=temp_dl_dir, headless=self.headless
                 )
                 driver.set_page_load_timeout(45)
 
                 if account.cookies:
+                    self.worker_status_signal.emit(worker_id, "Nạp cookies...")
                     inject_cookies_to_driver(driver, account.cookies, target_url=ZSKY_START_URL)
-
-                self.worker_status_signal.emit(worker_id, "Đang vào zsky.ai/create...")
-                driver.get(ZSKY_START_URL)
-                time.sleep(3.0)
+                else:
+                    self.worker_status_signal.emit(worker_id, "Đang vào zsky.ai/create...")
+                    driver.get(ZSKY_START_URL)
+                    time.sleep(3.0)
 
                 # Kiểm tra trạng thái đăng nhập
                 is_logged_in, user_label = check_zsky_login_status(driver)
