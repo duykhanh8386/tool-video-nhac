@@ -168,11 +168,18 @@ def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
     video_info = probe_media(project.video, settings.ffprobe_path)
     if not video_info.has_video:
         raise ValueError("File video không có video stream.")
-    audio_duration = main_audio_duration(project.main_audio, settings.ffprobe_path)
+    raw_audio_duration = main_audio_duration(project.main_audio, settings.ffprobe_path)
+    trim_start = max(0.0, float(getattr(project, "main_trim_start", 0.0) or 0.0))
+    trim_end = max(0.0, float(getattr(project, "main_trim_end", 0.0) or 0.0))
+    if trim_start + trim_end >= raw_audio_duration:
+        trim_start = 0.0
+        trim_end = 0.0
+    effective_audio_duration = max(1.0, raw_audio_duration - trim_start - trim_end)
+
     if project.duration_mode == "custom" and project.custom_duration > 0:
         duration = float(project.custom_duration)
     else:
-        duration = audio_duration
+        duration = effective_audio_duration
     if project.background_audio and not probe_media(project.background_audio, settings.ffprobe_path).has_audio:
         raise ValueError("Background music không có audio stream.")
     encoder = resolve_encoder(project.encoder, settings.ffmpeg_path)
@@ -183,11 +190,12 @@ def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
         video_input = prepare_seamless_video(project.video, video_info.duration, settings.ffmpeg_path)
 
     audio_input = project.main_audio
-    if project.seamless_video and audio_duration and duration > audio_duration and audio_duration >= 4.0:
-        audio_input = prepare_seamless_audio(project.main_audio, audio_duration, settings.ffmpeg_path)
+    if trim_start == 0.0 and trim_end == 0.0:
+        if project.seamless_video and raw_audio_duration and duration > raw_audio_duration and raw_audio_duration >= 4.0:
+            audio_input = prepare_seamless_audio(project.main_audio, raw_audio_duration, settings.ffmpeg_path)
 
     command = [settings.ffmpeg_path, "-hide_banner", "-y", "-stream_loop", "-1", "-i", video_input]
-    if project.duration_mode == "custom" and duration > audio_duration:
+    if project.duration_mode == "custom" and duration > effective_audio_duration and (trim_start == 0.0 and trim_end == 0.0):
         command += ["-stream_loop", "-1"]
     command += ["-i", audio_input]
     if project.background_audio:
@@ -206,10 +214,34 @@ def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
         fade_st = max(0.0, duration - 1.5)
         video_filters.append(f"fade=t=out:st={fade_st:.3f}:d=1.5")
 
-    audio_filters = [f"[1:a]volume={project.main_volume:.4f}[main]"]
+    # Volume filter strings
+    if hasattr(project, "main_volume_db") and project.main_volume_db != 0.0:
+        main_vol_str = f"volume={project.main_volume_db:.1f}dB"
+    elif project.main_volume != 1.0:
+        main_vol_str = f"volume={project.main_volume:.4f}"
+    else:
+        main_vol_str = f"volume={getattr(project, 'main_volume_db', 0.0):.1f}dB"
+
+    if hasattr(project, "background_volume_db") and project.background_volume_db != -18.0:
+        bg_vol_str = f"volume={project.background_volume_db:.1f}dB"
+    elif project.background_volume != 0.15:
+        bg_vol_str = f"volume={project.background_volume:.4f}"
+    else:
+        bg_vol_str = f"volume={getattr(project, 'background_volume_db', -18.0):.1f}dB"
+
+    if trim_start > 0.0 or trim_end > 0.0:
+        trim_end_pt = raw_audio_duration - trim_end
+        main_chain = f"[1:a]atrim=start={trim_start:.3f}:end={trim_end_pt:.3f},asetpts=PTS-STARTPTS"
+        if duration > effective_audio_duration:
+            main_chain += ",aloop=loop=-1:size=2147483647"
+        main_chain += f",{main_vol_str}[main]"
+    else:
+        main_chain = f"[1:a]{main_vol_str}[main]"
+
+    audio_filters = [main_chain]
     audio_map = "[main]"
     if project.background_audio:
-        bg_chain = f"[2:a]volume={project.background_volume:.4f}"
+        bg_chain = f"[2:a]{bg_vol_str}"
         if project.background_crossfade and project.crossfade_ms:
             fade = project.crossfade_ms / 1000
             # Softens the initial boundary; stream_loop keeps memory use constant for long outputs.

@@ -57,5 +57,12 @@ class BatchRenderTests(unittest.TestCase):
         self.assertEqual(format_seconds_to_hhmmss(3661.0), "01:01:01")
 
 
+    def test_columns_include_backtrack(self):
+        from ui.batch_render import BatchRenderPage
+        self.assertIn("Nhạc backtrack", BatchRenderPage.COLUMNS)
+        self.assertEqual(BatchRenderPage.COLUMNS[2], "Nhạc chính")
+        self.assertEqual(BatchRenderPage.COLUMNS[3], "Nhạc backtrack")
+
+
 if __name__ == "__main__":
     unittest.main()

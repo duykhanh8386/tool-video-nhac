@@ -3,10 +3,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QGridLayout,
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout,
+    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
     QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -92,6 +92,7 @@ class BatchRenderPage(QWidget):
         "#",
         "Video",
         "Nhạc chính",
+        "Nhạc backtrack",
         "Thư mục lưu",
         "Tên file xuất",
         "Thời lượng",
@@ -113,16 +114,17 @@ class BatchRenderPage(QWidget):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
 
-        title = QLabel("🎬 Render hàng loạt (Tự động bắt cặp Video & Nhạc)")
+        title = QLabel("🎬 Render hàng loạt (Tự động bắt cặp Video & Nhạc + Backtrack)")
         title.setObjectName("pageTitle")
         root.addWidget(title)
 
         # Card 1: Chọn folder nguồn & đầu ra
-        folder_group = QGroupBox("📁 Nguồn Video & Nhạc theo Thư mục")
+        folder_group = QGroupBox("📁 Nguồn Video, Nhạc chính & Nhạc Backtrack theo Thư mục")
         folder_grid = QGridLayout(folder_group)
         folder_grid.setVerticalSpacing(8)
         folder_grid.setHorizontalSpacing(10)
 
+        # Row 0: Folder Video
         self.video_folder = QLineEdit()
         self.video_folder.setMinimumHeight(36)
         self.video_folder.setPlaceholderText("Chọn thư mục chứa các file video (.mp4, .mov, .mkv, .webm...)...")
@@ -132,19 +134,39 @@ class BatchRenderPage(QWidget):
         self.video_count = QLabel("0 video")
         self.video_count.setStyleSheet("color: #2563eb; font-weight: 600;")
 
+        # Row 1: Folder Nhạc chính
         self.audio_folder = QLineEdit()
         self.audio_folder.setMinimumHeight(36)
-        self.audio_folder.setPlaceholderText("Chọn thư mục chứa các file nhạc (.mp3, .wav, .aac, .m4a...)...")
+        self.audio_folder.setPlaceholderText("Chọn thư mục chứa các file nhạc chính (.mp3, .wav, .aac, .m4a...)...")
         self.choose_audio_btn = QPushButton("🎵 Chọn folder Nhạc")
         self.choose_audio_btn.setMinimumHeight(36)
         self.choose_audio_btn.clicked.connect(self._choose_audio_folder)
         self.audio_count = QLabel("0 bài nhạc")
         self.audio_count.setStyleSheet("color: #2563eb; font-weight: 600;")
 
+        # Row 2: Folder Backtrack (Tùy chọn)
+        self.backtrack_folder = QLineEdit()
+        self.backtrack_folder.setMinimumHeight(36)
+        self.backtrack_folder.setPlaceholderText("Chọn thư mục chứa nhạc nền backtrack / beat phụ (Tùy chọn, để trống nếu không dùng)...")
+        backtrack_btn_box = QHBoxLayout()
+        backtrack_btn_box.setSpacing(6)
+        self.choose_backtrack_btn = QPushButton("🎶 Chọn folder Backtrack")
+        self.choose_backtrack_btn.setMinimumHeight(36)
+        self.choose_backtrack_btn.clicked.connect(self._choose_backtrack_folder)
+        self.clear_backtrack_btn = QPushButton("✕ Xóa")
+        self.clear_backtrack_btn.setMinimumHeight(36)
+        self.clear_backtrack_btn.setToolTip("Xóa chọn folder backtrack")
+        self.clear_backtrack_btn.clicked.connect(self._clear_backtrack_folder)
+        backtrack_btn_box.addWidget(self.choose_backtrack_btn)
+        backtrack_btn_box.addWidget(self.clear_backtrack_btn)
+        self.backtrack_count = QLabel("0 bài backtrack")
+        self.backtrack_count.setStyleSheet("color: #7c3aed; font-weight: 600;")
+
+        # Row 3: Thư mục lưu
         self.output_folder = QLineEdit(self.settings.last_output_folder)
         self.output_folder.setMinimumHeight(36)
         self.output_folder.setPlaceholderText("Chọn thư mục lưu video kết quả...")
-        self.choose_output_btn = QPushButton("📁 Chọn folder Lưu")
+        self.choose_output_btn = QPushButton("📂 Chọn folder Lưu")
         self.choose_output_btn.setMinimumHeight(36)
         self.choose_output_btn.clicked.connect(self._choose_output_folder)
 
@@ -153,22 +175,28 @@ class BatchRenderPage(QWidget):
         folder_grid.addWidget(self.choose_video_btn, 0, 2)
         folder_grid.addWidget(self.video_count, 0, 3)
 
-        folder_grid.addWidget(QLabel("Folder Nhạc:"), 1, 0)
+        folder_grid.addWidget(QLabel("Folder Nhạc chính:"), 1, 0)
         folder_grid.addWidget(self.audio_folder, 1, 1)
         folder_grid.addWidget(self.choose_audio_btn, 1, 2)
         folder_grid.addWidget(self.audio_count, 1, 3)
 
-        folder_grid.addWidget(QLabel("Thư mục lưu:"), 2, 0)
-        folder_grid.addWidget(self.output_folder, 2, 1)
-        folder_grid.addWidget(self.choose_output_btn, 2, 2)
+        folder_grid.addWidget(QLabel("Folder Backtrack:"), 2, 0)
+        folder_grid.addWidget(self.backtrack_folder, 2, 1)
+        folder_grid.addLayout(backtrack_btn_box, 2, 2)
+        folder_grid.addWidget(self.backtrack_count, 2, 3)
+
+        folder_grid.addWidget(QLabel("Thư mục lưu:"), 3, 0)
+        folder_grid.addWidget(self.output_folder, 3, 1)
+        folder_grid.addWidget(self.choose_output_btn, 3, 2)
 
         root.addWidget(folder_group)
 
-        # Card 2: Cài đặt thời lượng & Tự động bắt cặp
-        settings_group = QGroupBox("⏱️ Cài đặt Thời Lượng Chung & Tự Động Bắt Cặp")
+        # Card 2: Cài đặt thời lượng & Âm lượng dB / Trim
+        settings_group = QGroupBox("⏱️ Cài Đặt Thời Lượng Chung & Âm Lượng (dB) / Cắt Nhạc")
         settings_layout = QVBoxLayout(settings_group)
         settings_layout.setSpacing(10)
 
+        # Row 1: Duration settings
         config_row = QHBoxLayout()
         config_row.setSpacing(12)
 
@@ -216,8 +244,74 @@ class BatchRenderPage(QWidget):
         )
         config_row.addWidget(self.loop_mismatch)
         config_row.addStretch()
-
         settings_layout.addLayout(config_row)
+
+        # Row 2: Volume (dB) and Trim settings (as in user screenshot)
+        audio_config_row = QHBoxLayout()
+        audio_config_row.setSpacing(14)
+
+        # Main music volume (dB)
+        lbl_main_vol = QLabel("Main music volume (dB):")
+        lbl_main_vol.setStyleSheet("font-weight: 600; color: #1e293b;")
+        self.main_vol_db = QDoubleSpinBox()
+        self.main_vol_db.setRange(-60.0, 20.0)
+        self.main_vol_db.setValue(0.0)
+        self.main_vol_db.setSingleStep(0.5)
+        self.main_vol_db.setSuffix(" dB")
+        self.main_vol_db.setDecimals(1)
+        self.main_vol_db.setMinimumHeight(32)
+        self.main_vol_db.setFixedWidth(90)
+        self.main_vol_db.setToolTip("Âm lượng nhạc chính theo dB. 0.0 dB là âm lượng gốc 100%.")
+
+        # Background volume (dB)
+        lbl_bg_vol = QLabel("Background volume (dB):")
+        lbl_bg_vol.setStyleSheet("font-weight: 600; color: #1e293b;")
+        self.bg_vol_db = QDoubleSpinBox()
+        self.bg_vol_db.setRange(-60.0, 20.0)
+        self.bg_vol_db.setValue(-18.0)
+        self.bg_vol_db.setSingleStep(0.5)
+        self.bg_vol_db.setSuffix(" dB")
+        self.bg_vol_db.setDecimals(1)
+        self.bg_vol_db.setMinimumHeight(32)
+        self.bg_vol_db.setFixedWidth(90)
+        self.bg_vol_db.setToolTip("Âm lượng nhạc nền / backtrack theo dB. Mặc định -18.0 dB (nhỏ êm vừa phải).")
+
+        # Main music trim start (seconds)
+        lbl_trim_start = QLabel("Main music trim start (seconds):")
+        lbl_trim_start.setStyleSheet("font-weight: 600; color: #1e293b;")
+        self.main_trim_start = QDoubleSpinBox()
+        self.main_trim_start.setRange(0.0, 3600.0)
+        self.main_trim_start.setValue(0.0)
+        self.main_trim_start.setSingleStep(0.5)
+        self.main_trim_start.setSuffix(" s")
+        self.main_trim_start.setDecimals(1)
+        self.main_trim_start.setMinimumHeight(32)
+        self.main_trim_start.setFixedWidth(90)
+        self.main_trim_start.setToolTip("Cắt bỏ X giây đầu của bài nhạc chính (ví dụ 5.0s để bỏ đoạn dạo đầu).")
+
+        # Main music trim end (seconds)
+        lbl_trim_end = QLabel("Main music trim end (seconds):")
+        lbl_trim_end.setStyleSheet("font-weight: 600; color: #1e293b;")
+        self.main_trim_end = QDoubleSpinBox()
+        self.main_trim_end.setRange(0.0, 3600.0)
+        self.main_trim_end.setValue(0.0)
+        self.main_trim_end.setSingleStep(0.5)
+        self.main_trim_end.setSuffix(" s")
+        self.main_trim_end.setDecimals(1)
+        self.main_trim_end.setMinimumHeight(32)
+        self.main_trim_end.setFixedWidth(90)
+        self.main_trim_end.setToolTip("Cắt bỏ X giây cuối của bài nhạc chính (ví dụ 5.0s để bỏ đoạn outro).")
+
+        audio_config_row.addWidget(lbl_main_vol)
+        audio_config_row.addWidget(self.main_vol_db)
+        audio_config_row.addWidget(lbl_bg_vol)
+        audio_config_row.addWidget(self.bg_vol_db)
+        audio_config_row.addWidget(lbl_trim_start)
+        audio_config_row.addWidget(self.main_trim_start)
+        audio_config_row.addWidget(lbl_trim_end)
+        audio_config_row.addWidget(self.main_trim_end)
+        audio_config_row.addStretch()
+        settings_layout.addLayout(audio_config_row)
 
         action_row = QHBoxLayout()
         action_row.setSpacing(10)
@@ -236,6 +330,10 @@ class BatchRenderPage(QWidget):
 
         action_row.addWidget(self.auto_pair_btn)
         action_row.addWidget(self.add_manual_btn)
+
+        hint_label = QLabel("💡 Mẹo: Click đúp vào ô 'Nhạc chính' hoặc 'Nhạc backtrack' (hoặc click chuột phải vào hàng) để chọn riêng bài nhạc cho video đó.")
+        hint_label.setStyleSheet("color: #047857; font-size: 12px; font-weight: 500; margin-left: 8px;")
+        action_row.addWidget(hint_label)
         action_row.addStretch()
         settings_layout.addLayout(action_row)
 
@@ -318,6 +416,12 @@ class BatchRenderPage(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
+
+        # Enable double-click to edit audio/video and context menu
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_table_context_menu)
+
         root.addWidget(self.table, 1)
 
         self.summary = QLabel("Hàng đợi trống. Hãy chọn folder video và nhạc rồi bấm Ghép cặp.")
@@ -336,11 +440,22 @@ class BatchRenderPage(QWidget):
             self.video_count.setText(f"{len(files)} video")
 
     def _choose_audio_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục Nhạc", self.audio_folder.text() or "")
+        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục Nhạc chính", self.audio_folder.text() or "")
         if folder:
             self.audio_folder.setText(folder)
             files = scan_folder(folder, AUDIO_EXTS)
             self.audio_count.setText(f"{len(files)} bài nhạc")
+
+    def _choose_backtrack_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục Nhạc Backtrack", self.backtrack_folder.text() or "")
+        if folder:
+            self.backtrack_folder.setText(folder)
+            files = scan_folder(folder, AUDIO_EXTS)
+            self.backtrack_count.setText(f"{len(files)} bài backtrack")
+
+    def _clear_backtrack_folder(self) -> None:
+        self.backtrack_folder.clear()
+        self.backtrack_count.setText("0 bài backtrack")
 
     def _choose_output_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục Lưu Video", self.output_folder.text() or "")
@@ -380,6 +495,7 @@ class BatchRenderPage(QWidget):
     def _auto_pair(self) -> None:
         video_dir = self.video_folder.text().strip()
         audio_dir = self.audio_folder.text().strip()
+        backtrack_dir = self.backtrack_folder.text().strip()
         out_dir = self.output_folder.text().strip() or self.settings.last_output_folder
 
         if not video_dir or not Path(video_dir).is_dir():
@@ -394,9 +510,12 @@ class BatchRenderPage(QWidget):
 
         videos = scan_folder(video_dir, VIDEO_EXTS)
         audios = scan_folder(audio_dir, AUDIO_EXTS)
+        backtracks = scan_folder(backtrack_dir, AUDIO_EXTS) if backtrack_dir and Path(backtrack_dir).is_dir() else []
 
         self.video_count.setText(f"{len(videos)} video")
         self.audio_count.setText(f"{len(audios)} bài nhạc")
+        if backtracks:
+            self.backtrack_count.setText(f"{len(backtracks)} bài backtrack")
 
         if not videos:
             QMessageBox.warning(self, "Không tìm thấy video", f"Không tìm thấy file video nào trong thư mục:\n{video_dir}")
@@ -416,6 +535,8 @@ class BatchRenderPage(QWidget):
         for i in range(total_pairs):
             v_file = videos[i % len(videos)]
             a_file = audios[i % len(audios)]
+            b_file = backtracks[i % len(backtracks)] if backtracks else None
+
             base_name = f"{a_file.stem}.mp4"
             if base_name in seen_names:
                 seen_names[base_name] += 1
@@ -430,26 +551,37 @@ class BatchRenderPage(QWidget):
             self._set_item(row, 0, str(row + 1))
             self._set_item(row, 1, v_file.name, str(v_file))
             self._set_item(row, 2, a_file.name, str(a_file))
-            self._set_item(row, 3, out_dir, out_dir)
-            self._set_item(row, 4, out_name)
-            self._set_item(row, 5, dur_label)
-            self._set_item(row, 6, enc_choice)
-            self._set_item(row, 7, "Pending")
-            self._set_item(row, 8, "0%")
-            self._set_item(row, 9, "—")
+            if b_file:
+                self._set_item(row, 3, b_file.name, str(b_file))
+            else:
+                self._set_item(row, 3, "(Không có)", "")
+            self._set_item(row, 4, out_dir, out_dir)
+            self._set_item(row, 5, out_name)
+            self._set_item(row, 6, dur_label)
+            self._set_item(row, 7, enc_choice)
+            self._set_item(row, 8, "Pending")
+            self._set_item(row, 9, "0%")
+            self._set_item(row, 10, "—")
             added += 1
 
         self._update_summary()
-        QMessageBox.information(
-            self,
-            "Đã ghép cặp thành công",
+        msg_text = (
             f"Đã bắt cặp thành công {added} tác vụ vào hàng đợi!\n"
             f"• Video: {len(videos)} file\n"
-            f"• Nhạc: {len(audios)} file\n"
-            f"• Thời lượng chung: {dur_label}\n"
-            f"• Bộ mã hóa: {enc_choice}\n\n"
-            f"Bấm '▶ Bắt đầu Render Hàng Đợi' để chạy tự động.",
+            f"• Nhạc chính: {len(audios)} file\n"
         )
+        if backtracks:
+            msg_text += f"• Nhạc backtrack: {len(backtracks)} file (đã tự ghép kèm theo)\n"
+        else:
+            msg_text += "• Nhạc backtrack: Không có (chỉ ghép video + nhạc chính)\n"
+        msg_text += (
+            f"• Thời lượng chung: {dur_label}\n"
+            f"• Bộ mã hóa: {enc_choice}\n"
+            f"• Âm lượng: Nhạc chính {self.main_vol_db.value():+.1f}dB, Backtrack {self.bg_vol_db.value():+.1f}dB\n\n"
+            f"💡 Mẹo: Có thể click đúp vào bất kỳ ô 'Nhạc chính' hoặc 'Nhạc backtrack' nào để chọn riêng bài nhạc khác cho video đó!\n"
+            f"Bấm '▶ Bắt đầu Render Hàng Đợi' để chạy tự động."
+        )
+        QMessageBox.information(self, "Đã ghép cặp thành công", msg_text)
 
     def add_job(self) -> None:
         video, _ = QFileDialog.getOpenFileName(self, "Chọn file Video", "", VIDEO_FILTER)
@@ -458,6 +590,12 @@ class BatchRenderPage(QWidget):
         audio, _ = QFileDialog.getOpenFileName(self, "Chọn file Nhạc chính", str(Path(video).parent), AUDIO_FILTER)
         if not audio:
             return
+        backtrack, _ = QFileDialog.getOpenFileName(
+            self,
+            "Chọn file Nhạc backtrack (Tùy chọn - Bấm Cancel nếu không có)",
+            self.backtrack_folder.text() or str(Path(audio).parent),
+            AUDIO_FILTER,
+        )
         folder = QFileDialog.getExistingDirectory(
             self, "Chọn thư mục Lưu", self.output_folder.text() or self.settings.last_output_folder or str(Path(video).parent)
         )
@@ -474,15 +612,104 @@ class BatchRenderPage(QWidget):
         self._set_item(row, 0, str(row + 1))
         self._set_item(row, 1, Path(video).name, video)
         self._set_item(row, 2, Path(audio).name, audio)
-        self._set_item(row, 3, folder, folder)
-        self._set_item(row, 4, out_name)
-        self._set_item(row, 5, dur_label)
-        self._set_item(row, 6, enc_choice)
-        self._set_item(row, 7, "Pending")
-        self._set_item(row, 8, "0%")
-        self._set_item(row, 9, "—")
+        if backtrack:
+            self._set_item(row, 3, Path(backtrack).name, backtrack)
+        else:
+            self._set_item(row, 3, "(Không có)", "")
+        self._set_item(row, 4, folder, folder)
+        self._set_item(row, 5, out_name)
+        self._set_item(row, 6, dur_label)
+        self._set_item(row, 7, enc_choice)
+        self._set_item(row, 8, "Pending")
+        self._set_item(row, 9, "0%")
+        self._set_item(row, 10, "—")
 
         self._update_summary()
+
+    def _on_cell_double_clicked(self, row: int, col: int) -> None:
+        """Cho phép người dùng click đúp vào dòng để chọn/đổi riêng nhạc chính, backtrack hoặc video."""
+        if self.running and self._text(row, 8) == "Rendering":
+            QMessageBox.warning(self, "Đang render", "Tác vụ này đang render, không thể đổi file lúc này.")
+            return
+
+        if col == 1:
+            self._pick_video_for_row(row)
+        elif col == 2:
+            self._pick_main_audio_for_row(row)
+        elif col == 3:
+            self._pick_backtrack_for_row(row)
+
+    def _pick_main_audio_for_row(self, row: int) -> None:
+        current = self._get_path(row, 2)
+        start_dir = str(Path(current).parent) if current and Path(current).is_file() else (self.audio_folder.text() or "")
+        new_file, _ = QFileDialog.getOpenFileName(self, f"Chọn bài nhạc chính riêng cho dòng #{row + 1}", start_dir, AUDIO_FILTER)
+        if not new_file:
+            return
+        p = Path(new_file)
+        self._set_item(row, 2, p.name, str(p))
+        # Update output filename to reflect new music stem
+        self._set_item(row, 5, f"{p.stem}.mp4")
+        self._update_summary()
+
+    def _pick_backtrack_for_row(self, row: int) -> None:
+        current = self._get_path(row, 3)
+        start_dir = (
+            str(Path(current).parent)
+            if current and Path(current).is_file()
+            else (self.backtrack_folder.text() or self.audio_folder.text() or "")
+        )
+        new_file, _ = QFileDialog.getOpenFileName(self, f"Chọn bài nhạc backtrack riêng cho dòng #{row + 1}", start_dir, AUDIO_FILTER)
+        if not new_file:
+            return
+        p = Path(new_file)
+        self._set_item(row, 3, p.name, str(p))
+        self._update_summary()
+
+    def _clear_backtrack_for_row(self, row: int) -> None:
+        self._set_item(row, 3, "(Không có)", "")
+        self._update_summary()
+
+    def _pick_video_for_row(self, row: int) -> None:
+        current = self._get_path(row, 1)
+        start_dir = str(Path(current).parent) if current and Path(current).is_file() else (self.video_folder.text() or "")
+        new_file, _ = QFileDialog.getOpenFileName(self, f"Chọn video riêng cho dòng #{row + 1}", start_dir, VIDEO_FILTER)
+        if not new_file:
+            return
+        p = Path(new_file)
+        self._set_item(row, 1, p.name, str(p))
+        self._update_summary()
+
+    def _on_table_context_menu(self, pos: QPoint) -> None:
+        item = self.table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        menu = QMenu(self)
+
+        act_change_main = menu.addAction("🎵 Chọn / Đổi nhạc chính cho video này...")
+        act_change_bg = menu.addAction("🎶 Chọn / Đổi nhạc backtrack cho video này...")
+        act_clear_bg = menu.addAction("❌ Xóa nhạc backtrack (dòng này)")
+        menu.addSeparator()
+        act_change_video = menu.addAction("🎬 Chọn / Đổi video cho dòng này...")
+        menu.addSeparator()
+        act_delete_row = menu.addAction("🗑️ Xóa dòng này khỏi hàng đợi")
+
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen == act_change_main:
+            self._pick_main_audio_for_row(row)
+        elif chosen == act_change_bg:
+            self._pick_backtrack_for_row(row)
+        elif chosen == act_clear_bg:
+            self._clear_backtrack_for_row(row)
+        elif chosen == act_change_video:
+            self._pick_video_for_row(row)
+        elif chosen == act_delete_row:
+            if self.running and self._text(row, 8) == "Rendering":
+                QMessageBox.warning(self, "Đang render", "Không thể xóa tác vụ đang render.")
+                return
+            self.table.removeRow(row)
+            self._renumber_rows()
+            self._update_summary()
 
     def remove_selected(self) -> None:
         if self.running:
@@ -497,7 +724,7 @@ class BatchRenderPage(QWidget):
         if self.running:
             return
         for row in range(self.table.rowCount() - 1, -1, -1):
-            if self._text(row, 7) in {"Done", "Failed", "Canceled"}:
+            if self._text(row, 8) in {"Done", "Failed", "Canceled"}:
                 self.table.removeRow(row)
         self._renumber_rows()
         self._update_summary()
@@ -521,7 +748,7 @@ class BatchRenderPage(QWidget):
         self.queue = [
             row
             for row in range(self.table.rowCount())
-            if self._text(row, 7) in {"Pending", "Failed", "Canceled"}
+            if self._text(row, 8) in {"Pending", "Failed", "Canceled"}
         ]
         if not self.queue:
             QMessageBox.information(self, "Hàng đợi", "Không có tác vụ nào đang chờ xử lý.")
@@ -538,19 +765,26 @@ class BatchRenderPage(QWidget):
     def _start_one(self, row: int) -> None:
         video_path = self._get_path(row, 1)
         audio_path = self._get_path(row, 2)
-        out_folder = self._get_path(row, 3)
-        out_name = self._text(row, 4)
-        duration_text = self._text(row, 5)
-        enc_text = self._text(row, 6)
+        backtrack_path = self._get_path(row, 3)
+        if backtrack_path in {"(Không có)", "none", "None", ""}:
+            backtrack_path = ""
+        out_folder = self._get_path(row, 4)
+        out_name = self._text(row, 5)
+        duration_text = self._text(row, 6)
+        enc_text = self._text(row, 7)
 
         dur_mode, cust_dur = parse_duration_string(duration_text)
 
         project = LoopProject(
             video=video_path,
             main_audio=audio_path,
-            background_audio="",
+            background_audio=backtrack_path,
             output_folder=out_folder,
             output_name=out_name,
+            main_volume_db=float(self.main_vol_db.value()),
+            background_volume_db=float(self.bg_vol_db.value()),
+            main_trim_start=float(self.main_trim_start.value()),
+            main_trim_end=float(self.main_trim_end.value()),
             encoder=enc_text or "Auto",
             duration_mode=dur_mode,
             custom_duration=cust_dur,
@@ -559,7 +793,7 @@ class BatchRenderPage(QWidget):
 
         try:
             job = build_loop_job(project, self.settings)
-            self._set(row, 7, "Rendering")
+            self._set(row, 8, "Rendering")
             worker = RenderWorker(self)
             self.workers.append(worker)
             self.active[worker] = row
@@ -570,25 +804,25 @@ class BatchRenderPage(QWidget):
             worker.start(job)
             self._update_summary()
         except Exception as exc:
-            self._set(row, 7, "Failed")
-            self._set(row, 9, str(exc))
+            self._set(row, 8, "Failed")
+            self._set(row, 10, str(exc))
             self._update_summary()
             self._pump()
 
     def _progress(self, worker: RenderWorker, value) -> None:
         row = self.active.get(worker, -1)
         if row >= 0:
-            self._set(row, 8, f"{value.percent:.1f}%")
+            self._set(row, 9, f"{value.percent:.1f}%")
             if value.speed > 0:
                 remaining = max(0, value.current_seconds * (100 / max(value.percent, 0.001) - 1) / value.speed)
-                self._set(row, 9, f"{remaining:.0f}s còn lại ({value.speed:.1f}x)")
+                self._set(row, 10, f"{remaining:.0f}s còn lại ({value.speed:.1f}x)")
 
     def _finished(self, worker: RenderWorker, output: str, _log: str) -> None:
         row = self.active.get(worker, -1)
         if row >= 0:
-            self._set(row, 7, "Done")
-            self._set(row, 8, "100%")
-            self._set(row, 9, Path(output).name)
+            self._set(row, 8, "Done")
+            self._set(row, 9, "100%")
+            self._set(row, 10, Path(output).name)
         self._release(worker)
         self._update_summary()
         self._pump()
@@ -596,8 +830,8 @@ class BatchRenderPage(QWidget):
     def _failed(self, worker: RenderWorker, message: str, log_path: str) -> None:
         row = self.active.get(worker, -1)
         if row >= 0:
-            self._set(row, 7, "Failed")
-            self._set(row, 9, message)
+            self._set(row, 8, "Failed")
+            self._set(row, 10, message)
         show_error(self, "Batch job thất bại", message, log_path)
         self._release(worker)
         self._update_summary()
@@ -606,7 +840,7 @@ class BatchRenderPage(QWidget):
     def _canceled(self, worker: RenderWorker) -> None:
         row = self.active.get(worker, -1)
         if row >= 0:
-            self._set(row, 7, "Canceled")
+            self._set(row, 8, "Canceled")
         self._release(worker)
         self._update_summary("Queue đã dừng theo yêu cầu")
 
@@ -626,21 +860,23 @@ class BatchRenderPage(QWidget):
             self.summary.setText("Hàng đợi trống. Hãy chọn folder video và nhạc rồi bấm Ghép cặp.")
             return
 
-        pending = sum(1 for r in range(total) if self._text(r, 7) == "Pending")
-        running = sum(1 for r in range(total) if self._text(r, 7) == "Rendering")
-        done = sum(1 for r in range(total) if self._text(r, 7) == "Done")
-        failed = sum(1 for r in range(total) if self._text(r, 7) in {"Failed", "Canceled"})
+        pending = sum(1 for r in range(total) if self._text(r, 8) == "Pending")
+        running = sum(1 for r in range(total) if self._text(r, 8) == "Rendering")
+        done = sum(1 for r in range(total) if self._text(r, 8) == "Done")
+        failed = sum(1 for r in range(total) if self._text(r, 8) in {"Failed", "Canceled"})
 
         msg = f"📊 Tổng cộng: {total} job(s) | ⏳ Chờ: {pending} | 🚀 Đang render: {running} | ✅ Hoàn tất: {done} | ❌ Lỗi/Hủy: {failed}"
         if extra_message:
-            msg += f" — {extra_message}"
+            msg += f" • {extra_message}"
         self.summary.setText(msg)
 
     def _set_item(self, row: int, col: int, text: str, user_data: str | None = None) -> None:
         item = QTableWidgetItem(text)
         if user_data is not None:
             item.setData(Qt.ItemDataRole.UserRole, user_data)
-            item.setToolTip(user_data)
+            item.setToolTip(f"{user_data}\n(💡 Click đúp hoặc chuột phải để đổi file này)")
+        elif col in (1, 2, 3):
+            item.setToolTip(f"{text}\n(💡 Click đúp hoặc chuột phải để đổi file này)")
         self.table.setItem(row, col, item)
 
     def _get_path(self, row: int, col: int) -> str:
@@ -648,7 +884,7 @@ class BatchRenderPage(QWidget):
         if not item:
             return ""
         data = item.data(Qt.ItemDataRole.UserRole)
-        return str(data) if data else item.text().strip()
+        return str(data) if data is not None else item.text().strip()
 
     def _text(self, row: int, col: int) -> str:
         item = self.table.item(row, col)

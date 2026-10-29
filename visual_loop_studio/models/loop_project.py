@@ -13,6 +13,10 @@ class LoopProject:
     output_name: str = ""
     main_volume: float = 1.0
     background_volume: float = 0.15
+    main_volume_db: float = 0.0
+    background_volume_db: float = -18.0
+    main_trim_start: float = 0.0
+    main_trim_end: float = 0.0
     loop_background: bool = True
     background_crossfade: bool = True
     crossfade_ms: int = 1000

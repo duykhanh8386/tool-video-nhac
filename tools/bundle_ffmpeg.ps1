@@ -42,6 +42,9 @@ if ($Download) {
 }
 
 $candidateDirectories = [Collections.Generic.List[string]]::new()
+if (Test-Path -LiteralPath $destinationPath) {
+    $candidateDirectories.Add($destinationPath)
+}
 
 Get-Command ffmpeg.exe -All -ErrorAction SilentlyContinue | ForEach-Object {
     if ($_.Source) {
@@ -78,7 +81,9 @@ if (-not $sourceDirectory) {
     throw 'Could not find portable ffmpeg.exe and ffprobe.exe binaries (Chocolatey shims are intentionally rejected).'
 }
 
-New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
-Copy-Item -LiteralPath (Join-Path $sourceDirectory 'ffmpeg.exe') -Destination (Join-Path $destinationPath 'ffmpeg.exe') -Force
-Copy-Item -LiteralPath (Join-Path $sourceDirectory 'ffprobe.exe') -Destination (Join-Path $destinationPath 'ffprobe.exe') -Force
+if ([IO.Path]::GetFullPath($sourceDirectory) -ne [IO.Path]::GetFullPath($destinationPath)) {
+    New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
+    Copy-Item -LiteralPath (Join-Path $sourceDirectory 'ffmpeg.exe') -Destination (Join-Path $destinationPath 'ffmpeg.exe') -Force
+    Copy-Item -LiteralPath (Join-Path $sourceDirectory 'ffprobe.exe') -Destination (Join-Path $destinationPath 'ffprobe.exe') -Force
+}
 Write-Host "Bundled FFmpeg from: $sourceDirectory"
