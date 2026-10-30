@@ -124,7 +124,7 @@ class LoopMusicPage(QWidget):
         self.seamless = QCheckBox("Lặp video liền mạch")
         self.seamless.setChecked(True)
         self.encoder = QComboBox()
-        self.encoder.addItems(["Auto", "H264 NVENC", "HEVC NVENC", "libx264"])
+        self.encoder.addItems(["Auto", "Direct Stream Copy", "Intel QSV", "H264 NVENC", "HEVC NVENC", "libx264"])
         self.encoder.setCurrentText(settings.encoder)
         self.resolution = QComboBox()
         self.resolution.addItems(["Keep source", "1920x1080", "3840x2160"])

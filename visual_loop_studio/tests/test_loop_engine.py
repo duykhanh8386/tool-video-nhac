@@ -52,6 +52,54 @@ class LoopEngineTests(unittest.TestCase):
             # Both video and audio should have -stream_loop -1 because 600 > 120
             self.assertEqual(job.command.count("-stream_loop"), 2)
 
+    def test_auto_encoder_uses_direct_stream_copy_when_compatible(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            video = root / "short.mp4"
+            audio = root / "audio.mp3"
+            video.write_bytes(b"video")
+            audio.write_bytes(b"audio")
+            project = LoopProject(
+                video=str(video),
+                main_audio=str(audio),
+                output_folder=str(root),
+                encoder="Auto",
+                resolution="Keep source",
+                fps="Keep source",
+            )
+            info = MediaInfo(str(video), 10.0, True, False, video_codec="h264", width=1280, height=720, fps=24)
+            with patch("render.ffmpeg.probe_media", return_value=info), patch(
+                "render.ffmpeg.main_audio_duration", return_value=1800.0
+            ):
+                job = build_loop_job(project, AppSettings())
+            self.assertEqual(job.label, "Loop Video + Music (Stream Copy)")
+            self.assertIn("-c:v", job.command)
+            self.assertEqual(job.command[job.command.index("-c:v") + 1], "copy")
+            self.assertIn("-map", job.command)
+            self.assertEqual(job.command[job.command.index("-map") + 1], "0:v:0")
+
+    def test_direct_stream_copy_mode_requested_uses_copy(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            video = root / "video.mp4"
+            audio = root / "audio.mp3"
+            video.write_bytes(b"video")
+            audio.write_bytes(b"audio")
+            project = LoopProject(
+                video=str(video),
+                main_audio=str(audio),
+                output_folder=str(root),
+                encoder="Direct Stream Copy (Siêu tốc như VideoMusicLooper - Không lag)",
+                resolution="Keep source",
+                fps="Keep source",
+            )
+            info = MediaInfo(str(video), 10.0, True, False, video_codec="h264", width=1280, height=720, fps=24)
+            with patch("render.ffmpeg.probe_media", return_value=info), patch(
+                "render.ffmpeg.main_audio_duration", return_value=1800.0
+            ):
+                job = build_loop_job(project, AppSettings())
+            self.assertEqual(job.label, "Loop Video + Music (Stream Copy)")
+            self.assertEqual(job.command[job.command.index("-c:v") + 1], "copy")
 
     def test_trim_start_and_end_affects_duration_and_filter(self):
         with tempfile.TemporaryDirectory() as folder:

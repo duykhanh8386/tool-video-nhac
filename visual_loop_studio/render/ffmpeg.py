@@ -36,19 +36,21 @@ def _filter_script(value: str) -> str:
 
 
 def _video_encoding(encoder: str) -> list[str]:
+    if encoder == "copy":
+        return ["-c:v", "copy"]
     if encoder == "libx264":
-        return ["-c:v", encoder, "-preset", "veryfast", "-crf", "20", "-threads", "0"]
+        return ["-c:v", encoder, "-preset", "ultrafast", "-crf", "23", "-threads", "0"]
     if encoder == "hevc_nvenc":
-        return ["-c:v", encoder, "-preset", "p4", "-cq", "22", "-tag:v", "hvc1"]
+        return ["-c:v", encoder, "-preset", "p1", "-cq", "25", "-tag:v", "hvc1"]
     if encoder == "h264_nvenc":
-        return ["-c:v", encoder, "-preset", "p4", "-cq", "21"]
+        return ["-c:v", encoder, "-preset", "p1", "-cq", "24"]
     if encoder == "h264_qsv":
-        return ["-c:v", encoder, "-preset", "veryfast", "-global_quality", "22"]
+        return ["-c:v", encoder, "-preset", "veryfast", "-global_quality", "24"]
     if encoder == "h264_amf":
-        return ["-c:v", encoder, "-quality", "speed", "-rc", "cqp", "-qp_p", "22", "-qp_i", "22"]
+        return ["-c:v", encoder, "-quality", "speed", "-rc", "cqp", "-qp_p", "24", "-qp_i", "24"]
     if encoder == "h264_mf":
         return ["-c:v", encoder, "-b:v", "8M"]
-    return ["-c:v", encoder, "-preset", "p4", "-cq", "21"]
+    return ["-c:v", encoder, "-preset", "p1", "-cq", "24"]
 
 
 def build_visual_job(project: VisualProject, settings: AppSettings) -> RenderJob:
@@ -182,19 +184,39 @@ def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
         duration = effective_audio_duration
     if project.background_audio and not probe_media(project.background_audio, settings.ffprobe_path).has_audio:
         raise ValueError("Background music không có audio stream.")
-    encoder = resolve_encoder(project.encoder, settings.ffmpeg_path)
     output = unique_output(project.output_folder, project.output_name, "final", ".mp4")
 
     video_input = project.video
+    is_seamless_prepared = False
     if project.seamless_video and video_info.duration and duration > video_info.duration and video_info.duration >= 2.0:
-        video_input = prepare_seamless_video(project.video, video_info.duration, settings.ffmpeg_path)
+        prepared = prepare_seamless_video(project.video, video_info.duration, settings.ffmpeg_path)
+        if prepared != project.video:
+            video_input = prepared
+            is_seamless_prepared = True
 
     audio_input = project.main_audio
     if trim_start == 0.0 and trim_end == 0.0:
         if project.seamless_video and raw_audio_duration and duration > raw_audio_duration and raw_audio_duration >= 4.0:
             audio_input = prepare_seamless_audio(project.main_audio, raw_audio_duration, settings.ffmpeg_path)
 
-    command = [settings.ffmpeg_path, "-hide_banner", "-y", "-stream_loop", "-1", "-i", video_input]
+    # Check whether Direct Stream Copy (VideoMusicLooper fast path) is possible
+    enc_raw = str(project.encoder or "").strip().lower()
+    is_copy_requested = "copy" in enc_raw
+    is_auto = enc_raw in {"auto", ""}
+    keep_dimensions = (
+        (project.resolution == "Keep source" or not project.resolution)
+        and (project.fps == "Keep source" or not project.fps)
+    )
+    codec_name = str(getattr(video_info, "video_codec", "") or "").lower()
+    codec_copyable = is_seamless_prepared or (codec_name in {"h264", "hevc", "h265", "mpeg4"})
+
+    use_stream_copy = (is_copy_requested and keep_dimensions) or (is_auto and keep_dimensions and codec_copyable)
+
+    command = [
+        settings.ffmpeg_path, "-hide_banner", "-y",
+        "-threads", "0", "-fflags", "+genpts",
+        "-stream_loop", "-1", "-i", video_input,
+    ]
     if project.duration_mode == "custom" and duration > effective_audio_duration and (trim_start == 0.0 and trim_end == 0.0):
         command += ["-stream_loop", "-1"]
     command += ["-i", audio_input]
@@ -202,17 +224,6 @@ def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
         if project.loop_background:
             command += ["-stream_loop", "-1"]
         command += ["-i", project.background_audio]
-
-    video_filters: list[str] = []
-    if project.resolution != "Keep source":
-        width, height = project.resolution.split("x", 1)
-        video_filters += [f"scale={width}:{height}:force_original_aspect_ratio=decrease", f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"]
-    if project.fps != "Keep source":
-        video_filters.append(f"fps={project.fps}")
-    video_filters += ["setpts=PTS-STARTPTS", "format=yuv420p"]
-    if duration >= 4.0:
-        fade_st = max(0.0, duration - 1.5)
-        video_filters.append(f"fade=t=out:st={fade_st:.3f}:d=1.5")
 
     # Volume filter strings
     if hasattr(project, "main_volume_db") and project.main_volume_db != 0.0:
@@ -264,9 +275,27 @@ def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
         audio_filters.append(f"[main]afade=t=out:st={fade_st:.3f}:d=1.5[mix]")
         audio_map = "[mix]"
 
+    if use_stream_copy:
+        # Fast Direct Stream Copy path (same as VideoMusicLooper)
+        command += ["-filter_complex", ";".join(audio_filters), "-map", "0:v:0", "-map", audio_map]
+        command += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-t", f"{duration:.6f}", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]
+        return RenderJob(command, output, duration, "Loop Video + Music (Stream Copy)")
+
+    encoder = resolve_encoder(project.encoder, settings.ffmpeg_path)
+    video_filters: list[str] = []
+    if project.resolution != "Keep source":
+        width, height = project.resolution.split("x", 1)
+        video_filters += [f"scale={width}:{height}:force_original_aspect_ratio=decrease", f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"]
+    if project.fps != "Keep source":
+        video_filters.append(f"fps={project.fps}")
+    video_filters += ["setpts=PTS-STARTPTS", "format=yuv420p"]
+    if duration >= 4.0:
+        fade_st = max(0.0, duration - 1.5)
+        video_filters.append(f"fade=t=out:st={fade_st:.3f}:d=1.5")
+
     filter_complex = f"[0:v]{','.join(video_filters)}[vout];" + ";".join(audio_filters)
     command += ["-filter_complex", filter_complex, "-map", "[vout]", "-map", audio_map]
-    command += [*_video_encoding(encoder), "-c:a", "aac", "-b:a", "320k", "-t", f"{duration:.6f}", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]
+    command += [*_video_encoding(encoder), "-c:a", "aac", "-b:a", "192k", "-t", f"{duration:.6f}", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]
     return RenderJob(command, output, duration, "Loop Video + Music")
 
 
