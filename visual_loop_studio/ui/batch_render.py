@@ -815,7 +815,9 @@ class BatchRenderPage(QWidget):
         row = self.active.get(worker, -1)
         if row >= 0:
             self._set(row, 9, f"{value.percent:.1f}%")
-            if value.speed > 0:
+            if value.percent >= 99.9:
+                self._set(row, 10, "Đang lưu hoàn tất file...")
+            elif value.speed > 0:
                 remaining = max(0, value.current_seconds * (100 / max(value.percent, 0.001) - 1) / value.speed)
                 self._set(row, 10, f"{remaining:.0f}s còn lại ({value.speed:.1f}x)")
 

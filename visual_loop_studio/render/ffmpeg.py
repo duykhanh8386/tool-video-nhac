@@ -278,7 +278,7 @@ def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
     if use_stream_copy:
         # Fast Direct Stream Copy path (same as VideoMusicLooper)
         command += ["-filter_complex", ";".join(audio_filters), "-map", "0:v:0", "-map", audio_map]
-        command += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-t", f"{duration:.6f}", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]
+        command += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-t", f"{duration:.6f}", "-progress", "pipe:1", "-nostats", str(output)]
         return RenderJob(command, output, duration, "Loop Video + Music (Stream Copy)")
 
     encoder = resolve_encoder(project.encoder, settings.ffmpeg_path)
@@ -295,7 +295,7 @@ def build_loop_job(project: LoopProject, settings: AppSettings) -> RenderJob:
 
     filter_complex = f"[0:v]{','.join(video_filters)}[vout];" + ";".join(audio_filters)
     command += ["-filter_complex", filter_complex, "-map", "[vout]", "-map", audio_map]
-    command += [*_video_encoding(encoder), "-c:a", "aac", "-b:a", "192k", "-t", f"{duration:.6f}", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]
+    command += [*_video_encoding(encoder), "-c:a", "aac", "-b:a", "192k", "-t", f"{duration:.6f}", "-pix_fmt", "yuv420p", "-progress", "pipe:1", "-nostats", str(output)]
     return RenderJob(command, output, duration, "Loop Video + Music")
 
 
