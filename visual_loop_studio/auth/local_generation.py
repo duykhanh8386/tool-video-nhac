@@ -33,8 +33,8 @@ def create_neutral_canvas_image(width: int, height: int, output_path: Path) -> P
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     img = QImage(int(width), int(height), QImage.Format.Format_RGB888)
-    # Tô màu xám đậm trung tính (dark neutral) để latent noise hội tụ tự nhiên theo prompt
-    img.fill(QColor(22, 22, 26))
+    # Tô màu xám trung tính (128, 128, 128 - 18% photographic gray) để latent noise hội tụ tự nhiên, không bị hắc đen
+    img.fill(QColor(128, 128, 128))
     img.save(str(output_path), "PNG")
     return output_path
 
@@ -44,8 +44,9 @@ def conform_video_duration(
     output_path: Path,
     target_seconds: float = 5.0,
     ffmpeg_path: str = "ffmpeg",
+    trim_start_seconds: float = 0.0,
 ) -> Path:
-    """Cắt chuẩn xác thời lượng video về target_seconds bằng FFmpeg."""
+    """Cắt chuẩn xác thời lượng video về target_seconds bằng FFmpeg, tự động loại bỏ frame canvas đen đầu nếu có."""
     input_path = Path(input_path).resolve()
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,7 +54,36 @@ def conform_video_duration(
     if not input_path.is_file():
         raise FileNotFoundError(f"Không tìm thấy video nguồn: {input_path}")
 
-    # Cắt chuẩn xác thời lượng video
+    start_offset = max(0.0, float(trim_start_seconds))
+
+    # Nếu có yêu cầu cắt bỏ frame đầu (Text-to-Video canvas), re-encode nhanh để cắt chuẩn xác từng frame
+    if start_offset > 0.0:
+        cmd_trim = [
+            ffmpeg_path,
+            "-hide_banner",
+            "-y",
+            "-ss", f"{start_offset:.3f}",
+            "-i", str(input_path),
+            "-t", f"{target_seconds:.3f}",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "17",
+            "-pix_fmt", "yuv420p",
+            str(output_path),
+        ]
+        res = subprocess.run(
+            cmd_trim,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            **hidden_process_kwargs(),
+        )
+        if res.returncode == 0 and output_path.exists():
+            return output_path
+
+    # Trường hợp thông thường (chọn ảnh nguồn thật), ưu tiên stream copy nhanh
     cmd = [
         ffmpeg_path,
         "-hide_banner",
@@ -81,7 +111,7 @@ def conform_video_duration(
             ffmpeg_path,
             "-hide_banner",
             "-y",
-            "-ss", "0",
+            "-ss", f"{start_offset:.3f}",
             "-i", str(input_path),
             "-t", f"{target_seconds:.3f}",
             "-c:v", "libx264",
@@ -206,6 +236,8 @@ class LocalVideoBatchRunnerThread(QThread):
             f"Model: {model_label_str} | Kích thước: {width}×{height} ({self.aspect_ratio}) | "
             f"Thời lượng: {self.duration_seconds}s ({length} frames) | Số bước: {steps} steps (CFG {cfg})"
         )
+        if not (self.source_image_path and Path(self.source_image_path).is_file()):
+            self.log_signal.emit("✨ Đang bật tự động khử frame đen: Video sẽ bắt đầu ngay từ khung hình sắc nét.")
 
         completed_count = 0
         failed_count = 0
@@ -250,7 +282,8 @@ class LocalVideoBatchRunnerThread(QThread):
 
                 try:
                     # Chuẩn bị ảnh đầu vào
-                    if self.source_image_path and Path(self.source_image_path).is_file():
+                    is_canvas_fallback = not (self.source_image_path and Path(self.source_image_path).is_file())
+                    if not is_canvas_fallback:
                         active_image = self.source_image_path
                     else:
                         canvas_file = temp_work_dir / f"canvas_{idx}.png"
@@ -281,16 +314,18 @@ class LocalVideoBatchRunnerThread(QThread):
                         cancelled=lambda: self._stopped,
                     )
 
-                    # Cắt chuẩn xác 5 giây nếu cần
+                    # Cắt chuẩn xác thời lượng và loại bỏ frame đen đầu nếu là canvas trống
                     stem_name = safe_filename(f"local_{idx:03d}_{prompt_text[:35]}", default_prefix="local")
                     final_output = self.output_dir / f"{Path(stem_name).stem}.mp4"
 
                     self.worker_status_signal.emit(f"[{task_label}] Cắt chuẩn {self.duration_seconds}s...")
+                    trim_offset = 0.16 if is_canvas_fallback else 0.0
                     conform_video_duration(
                         Path(generated_file),
                         final_output,
                         target_seconds=float(self.duration_seconds),
                         ffmpeg_path=self.ffmpeg_path,
+                        trim_start_seconds=trim_offset,
                     )
 
                     render_duration = int(time.monotonic() - start_task_time)

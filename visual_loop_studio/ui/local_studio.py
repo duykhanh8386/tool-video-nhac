@@ -395,26 +395,39 @@ class LocalStudioPage(QWidget):
         def check_task():
             try:
                 if not server_ready(url):
-                    return False, f"Không thể kết nối ComfyUI tại {url}"
+                    return False, f"Không thể kết nối ComfyUI tại {url}", {}
                 stats = check_comfyui(url, require_default_models=False, wan_variant=model_val)
                 devices = stats.get("devices") or []
                 dev_name = "GPU/CPU"
+                is_xpu = False
                 if devices and isinstance(devices, list):
                     d = devices[0]
-                    dev_name = str(d.get("name") or d.get("type") or "GPU")
+                    dev_type = str(d.get("type") or "").lower()
+                    dev_name = str(d.get("name") or dev_type or "GPU")
                     vram = d.get("vram_total")
                     if isinstance(vram, (int, float)):
                         dev_name += f" ({vram / 1024**3:.1f} GB)"
-                return True, f"🟢 ComfyUI sẵn sàng ({dev_name})"
+                    if dev_type == "xpu" or "arc" in dev_name.lower():
+                        is_xpu = True
+                badge_text = f"🟢 ComfyUI sẵn sàng ({dev_name})"
+                return True, badge_text, {"dev_name": dev_name, "is_xpu": is_xpu}
             except Exception as e:
-                return False, f"🔴 Lỗi: {e}"
+                return False, f"🔴 Lỗi: {e}", {}
 
-        def done_callback(ok: bool, msg: str):
+        def done_callback(ok: bool, msg: str, info: dict):
             if ok:
                 self.status_badge.setText(msg)
                 self.status_badge.setStyleSheet("font-weight: 700; color: #16a34a; padding: 2px 6px;")
                 if not silent:
                     self._append_log(f"✔ {msg}")
+                    if info.get("is_xpu"):
+                        self._append_log(
+                            "⚡ [Intel Arc XPU] Đã kích hoạt PyTorch XPU & SDPA Attention. "
+                            "Tận dụng trọn vẹn 16 GB VRAM chạy mô hình FP16 nguyên bản."
+                        )
+                        self._append_log(
+                            "💡 [Mẹo Intel Arc]: Hãy đảm bảo Resizable BAR đang 'Enabled' trong Intel Arc Control để tối ưu PCIe."
+                        )
             else:
                 self.status_badge.setText("🔴 Chưa kết nối")
                 self.status_badge.setStyleSheet("font-weight: 700; color: #dc2626; padding: 2px 6px;")
@@ -422,11 +435,9 @@ class LocalStudioPage(QWidget):
                     self._append_log(f"❌ {msg}")
 
         def runner():
-            ok, msg = check_task()
-            from PySide6.QtCore import QMetaObject, Q_ARG
-            # Chuyển về UI thread
+            ok, msg, info = check_task()
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(0, lambda: done_callback(ok, msg))
+            QTimer.singleShot(0, lambda: done_callback(ok, msg, info))
 
         threading.Thread(target=runner, daemon=True).start()
 

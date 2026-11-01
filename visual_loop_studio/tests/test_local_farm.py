@@ -45,6 +45,13 @@ def test_conform_video_duration(tmp_path: Path):
     info = probe_media(str(conformed))
     assert 4.9 <= info.duration <= 5.2
 
+    # Test trim frame đen đầu
+    conformed_trimmed = tmp_path / "conformed_trimmed.mp4"
+    out_trimmed = conform_video_duration(raw_video, conformed_trimmed, target_seconds=5.0, trim_start_seconds=0.16)
+    assert out_trimmed.exists()
+    info_trimmed = probe_media(str(conformed_trimmed))
+    assert 4.8 <= info_trimmed.duration <= 5.2
+
 
 def test_local_farm_thread_mock(tmp_path: Path):
     output_dir = tmp_path / "local_output"
