@@ -51,6 +51,18 @@ class AppSettings:
     local_farm_aspect_ratio: str = "16:9"
     local_farm_duration: int = 5
     local_farm_last_output_folder: str = ""
+    playlist_last_mp3_folder: str = ""
+    playlist_last_output_folder: str = ""
+    playlist_provider: str = "wan"
+    playlist_wan_variant: str = "dmd4"
+    playlist_prompt_template: str = "{prompt}, mood theo bài hát \"{title}\", cinematic, smooth motion"
+    playlist_use_template: bool = True
+    playlist_mismatch_mode: str = "loop"
+    playlist_duration: int = 5
+    playlist_resolution: str = "1280x704"
+    playlist_conflict_mode: str = "suffix"
+    playlist_keep_thumbnail: bool = True
+    playlist_muse_cookie: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

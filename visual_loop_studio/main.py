@@ -37,7 +37,7 @@ from ui.settings import SettingsDialog
 from ui.updater import UpdateController
 from ui.visual_creator import VisualCreatorPage
 from ui.youtube_accounts import YouTubeAccountsPage
-from ui.zsky_studio import ZskyStudioPage
+from playlist_ai import PlaylistStudioPage
 from ui.movoa_studio import MovoaStudioPage
 from ui.local_studio import LocalStudioPage
 from auth.license_manager import get_license_manager
@@ -92,7 +92,7 @@ class MainWindow(QMainWindow):
         self.navigation.addItems([
             "Trang chủ", "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh",
             "Render hàng loạt", "AI Video hàng loạt", "Tài khoản YouTube", "Muse AI Studio (Cookie)",
-            "Zsky AI Studio (Farm Video)", "Movoa AI Studio (Farm Video)", "AI Video Local (Farm Video)",
+            "Tạo Video Playlist (AI)", "Movoa AI Studio (Farm Video)", "AI Video Local (Farm Video)",
         ])
         self.navigation.setCurrentRow(0)
         self.navigation.currentRowChanged.connect(self._navigate)
@@ -113,12 +113,12 @@ class MainWindow(QMainWindow):
         self.ai_batch = AiBatchPage(self.settings)
         self.youtube_accounts = YouTubeAccountsPage(self.settings)
         self.muse_accounts = MuseAccountsPage(self.settings)
-        self.zsky_studio = ZskyStudioPage(self.settings)
+        self.playlist_studio = PlaylistStudioPage(self.settings)
         self.movoa_studio = MovoaStudioPage(self.settings)
         self.local_studio = LocalStudioPage(self.settings)
         for page in (
             self.home, self.visual, self.loop, self.audio, self.batch, self.ai_batch,
-            self.youtube_accounts, self.muse_accounts, self.zsky_studio, self.movoa_studio,
+            self.youtube_accounts, self.muse_accounts, self.playlist_studio, self.movoa_studio,
             self.local_studio,
         ):
             self.pages.addWidget(page)
@@ -129,7 +129,7 @@ class MainWindow(QMainWindow):
         self.ai_batch.settings_changed.connect(self._save_settings)
         self.youtube_accounts.settings_changed.connect(self._save_settings)
         self.muse_accounts.settings_changed.connect(self._save_settings)
-        self.zsky_studio.settings_changed.connect(self._save_settings)
+        self.playlist_studio.settings_changed.connect(self._save_settings)
         self.movoa_studio.settings_changed.connect(self._save_settings)
         self.local_studio.settings_changed.connect(self._save_settings)
         root.addWidget(self.pages, 1)
@@ -153,7 +153,7 @@ class MainWindow(QMainWindow):
         for index, text in enumerate((
             "Tạo Visual — 60 giây", "Lặp Video + Nhạc", "Trộn âm thanh",
             "Render hàng loạt", "AI Video hàng loạt", "Tài khoản YouTube", "Muse AI Studio (Cookie)",
-            "Zsky AI Studio (Farm Video)", "Movoa AI Studio (Farm Video)", "AI Video Local (Farm Video)",
+            "Tạo Video Playlist (AI)", "Movoa AI Studio (Farm Video)", "AI Video Local (Farm Video)",
         ), start=1):
             action = QAction(text, self)
             action.triggered.connect(lambda _checked=False, index=index: self.navigation.setCurrentRow(index))
@@ -253,7 +253,7 @@ class MainWindow(QMainWindow):
             or self.ai_batch.busy
             or self.youtube_accounts.busy
             or self.muse_accounts.busy
-            or self.zsky_studio.busy
+            or self.playlist_studio.busy
             or self.movoa_studio.busy
         ):
             answer = QMessageBox.question(self, "Render đang chạy", "Cancel render và thoát ứng dụng?")
@@ -270,13 +270,13 @@ class MainWindow(QMainWindow):
             self.ai_batch.cancel_all()
             self.youtube_accounts.shutdown()
             self.muse_accounts.shutdown()
-            self.zsky_studio.shutdown()
+            self.playlist_studio.shutdown()
             self.movoa_studio.shutdown()
         self.visual.local_runtime.stop()
         self.ai_batch.shutdown()
         self.youtube_accounts.shutdown()
         self.muse_accounts.shutdown()
-        self.zsky_studio.shutdown()
+        self.playlist_studio.shutdown()
         self.movoa_studio.shutdown()
         self._save_settings()
         event.accept()
