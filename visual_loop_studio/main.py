@@ -8,6 +8,10 @@ APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
+from utils.net_ssl import configure_ssl_environment
+
+configure_ssl_environment()
+
 from version import __build_commit__, __version__
 
 if __name__ == "__main__" and "--version" in sys.argv:

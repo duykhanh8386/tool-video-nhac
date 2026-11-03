@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+from utils.net_ssl import robust_urlopen
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -103,7 +104,7 @@ def select_channel_release(payloads: list[dict]) -> ReleaseInfo:
 
 def check_latest_release(timeout: int = 20) -> ReleaseInfo:
     request = urllib.request.Request(API_URL, headers={"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with robust_urlopen(request, timeout=timeout) as response:
         payload = json.load(response)
     if not isinstance(payload, list):
         raise ValueError("GitHub trả về danh sách bản cập nhật không hợp lệ.")
@@ -122,7 +123,7 @@ def download_release(
         raise ValueError("Release không có file SHA-256; từ chối cập nhật để bảo vệ an toàn.")
     request = urllib.request.Request(release.executable.url, headers={"User-Agent": USER_AGENT})
     digest = hashlib.sha256()
-    with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as stream:
+    with robust_urlopen(request, timeout=60) as response, partial.open("wb") as stream:
         total = int(response.headers.get("Content-Length") or release.executable.size or 0)
         downloaded = 0
         while True:
@@ -135,7 +136,7 @@ def download_release(
             if progress:
                 progress(downloaded, total)
     checksum_request = urllib.request.Request(release.checksum.url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(checksum_request, timeout=20) as response:
+    with robust_urlopen(checksum_request, timeout=20) as response:
         expected = response.read().decode("utf-8", errors="replace").strip().split()[0].lower()
     if not re.fullmatch(r"[0-9a-f]{64}", expected) or digest.hexdigest().lower() != expected:
         partial.unlink(missing_ok=True)

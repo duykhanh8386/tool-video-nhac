@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import urllib.request
+from utils.net_ssl import robust_urlopen
 
 from auth.muse_login import (
     CLICKABLE_SELECTOR,
@@ -590,7 +591,7 @@ def _download_muse_video_file(
             if cookie_parts:
                 headers["Cookie"] = "; ".join(cookie_parts)
             req = urllib.request.Request(video_src, headers=headers)
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with robust_urlopen(req, timeout=60) as resp:
                 content = resp.read()
                 if len(content) > 10240:
                     with open(target_dest, "wb") as f:

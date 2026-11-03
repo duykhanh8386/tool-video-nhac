@@ -6,6 +6,7 @@ import mimetypes
 import time
 import urllib.error
 import urllib.request
+from utils.net_ssl import robust_urlopen
 from pathlib import Path
 from typing import Callable
 
@@ -79,7 +80,7 @@ def _json_request(url: str, api_key: str, payload: dict | None = None, timeout: 
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with robust_urlopen(request, timeout=timeout) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
@@ -156,7 +157,7 @@ def generate_image_to_video(
     progress(85, "Đang tải video AI về máy…")
     request = urllib.request.Request(video_uri, headers={"x-goog-api-key": key, "User-Agent": "VisualLoopStudio/1"})
     try:
-        with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as stream:
+        with robust_urlopen(request, timeout=120) as response, partial.open("wb") as stream:
             total = int(response.headers.get("Content-Length") or 0)
             downloaded = 0
             while True:

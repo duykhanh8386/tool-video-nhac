@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from utils.net_ssl import robust_urlopen
 import webbrowser
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -564,7 +565,7 @@ def _request_json(method: str, url: str, form: dict[str, str] | None, headers: d
         safe_headers["Content-Type"] = "application/x-www-form-urlencoded"
     request = urllib.request.Request(url, data=data, headers=safe_headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with robust_urlopen(request, timeout=30) as response:
             raw = response.read(1024 * 1024)
     except urllib.error.HTTPError as exc:
         try:

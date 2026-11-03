@@ -9,6 +9,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from utils.net_ssl import robust_urlopen
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -160,7 +161,7 @@ class LicenseManager:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=15) as res:
+            with robust_urlopen(req, timeout=15) as res:
                 body = json.loads(res.read().decode("utf-8"))
         except urllib.error.HTTPError as err:
             try:
@@ -255,7 +256,7 @@ class LicenseManager:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=15) as res:
+            with robust_urlopen(req, timeout=15) as res:
                 res_data = json.loads(res.read().decode("utf-8"))
                 return True, "Thêm máy thành công", res_data
         except urllib.error.HTTPError as err:
@@ -304,7 +305,7 @@ class LicenseManager:
                 method="DELETE",
             )
             try:
-                with urllib.request.urlopen(req, timeout=15):
+                with robust_urlopen(req, timeout=15):
                     pass
             except Exception:
                 pass

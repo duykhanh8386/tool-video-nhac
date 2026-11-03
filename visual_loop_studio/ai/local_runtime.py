@@ -16,6 +16,7 @@ from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+from utils.net_ssl import robust_urlopen
 
 from ai.comfyui import (
     HUNYUAN_BYT5_ENCODER,
@@ -753,7 +754,7 @@ def server_ready(base_url: str, timeout: float = 1.5) -> bool:
         headers={"User-Agent": "VisualLoopStudio/1", "Accept": "application/json"},
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with robust_urlopen(request, timeout=timeout) as response:
             return 200 <= int(response.status) < 300
     except (HTTPError, URLError, TimeoutError, OSError, ValueError):
         return False
@@ -774,7 +775,7 @@ def _download(
         headers["Range"] = f"bytes={existing}-"
     request = Request(url, headers=headers)
     try:
-        response = urlopen(request, timeout=60)
+        response = robust_urlopen(request, timeout=60)
     except (HTTPError, URLError, TimeoutError, OSError) as exc:
         raise RuntimeError(f"Không tải được {destination.name}: {exc}") from exc
     with response:
