@@ -185,6 +185,45 @@ class TestPlaylistAI(unittest.TestCase):
         muse.update_cookie("new_cookie_val")
         self.assertEqual(muse._cookie_raw, "new_cookie_val")
 
+    def test_wan_dimension_snap(self):
+        from playlist_ai.providers.wan_provider import snap_dim_to_32
+
+        # 1080 -> 1088 (1088 % 32 == 0)
+        self.assertEqual(snap_dim_to_32(1080), 1088)
+        self.assertEqual(snap_dim_to_32(1088) % 32, 0)
+
+        # 1920 -> 1920 (1920 % 32 == 0)
+        self.assertEqual(snap_dim_to_32(1920), 1920)
+        self.assertEqual(snap_dim_to_32(1920) % 32, 0)
+
+        # 720 -> 704 (704 % 32 == 0)
+        self.assertEqual(snap_dim_to_32(720), 704)
+        self.assertEqual(snap_dim_to_32(720) % 32, 0)
+
+        # Dưới 256 px -> tự động nâng lên tối thiểu 256 px
+        self.assertEqual(snap_dim_to_32(100), 256)
+
+    def test_extract_video_thumbnail_mock(self):
+        from playlist_ai.core.job_queue import extract_video_thumbnail
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            vid = tmp / "test.mp4"
+            vid.write_bytes(b"x" * 20000)
+            thumb = tmp / "test.png"
+
+            with patch("subprocess.run") as mock_run:
+                def fake_run(cmd, **kwargs):
+                    thumb.write_bytes(b"png_data")
+                    m = MagicMock()
+                    m.returncode = 0
+                    return m
+
+                mock_run.side_effect = fake_run
+                ok = extract_video_thumbnail(vid, thumb, timestamp_sec=1.0)
+                self.assertTrue(ok)
+                self.assertTrue(thumb.is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

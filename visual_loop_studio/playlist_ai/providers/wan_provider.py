@@ -19,6 +19,19 @@ from playlist_ai.providers.base import IProvider, ProviderError
 from utils.paths import CACHE_DIR
 
 
+def snap_dim_to_32(dim: int, default: int = 704) -> int:
+    """
+    Chuẩn hóa kích thước khung hình:
+    Wan 2.2 Local / ComfyUI bắt buộc chiều rộng và chiều cao phải >= 256 px và chia hết cho 32.
+    Ví dụ: 1080 -> 1088, 1920 -> 1920, 720 -> 704.
+    """
+    try:
+        val = int(dim)
+    except (ValueError, TypeError):
+        val = default
+    return max(256, round(val / 32) * 32)
+
+
 class WanProvider(IProvider):
     """Provider AI Local chạy qua ComfyUI localhost (Wan 2.2 TI2V / DMD)."""
 
@@ -81,8 +94,11 @@ class WanProvider(IProvider):
             cache_path = Path(cache_path).resolve()
             cache_path.parent.mkdir(parents=True, exist_ok=True)
 
+        render_w = snap_dim_to_32(width, 1280)
+        render_h = snap_dim_to_32(height, 704)
+
         if not cache_path.is_file():
-            create_neutral_canvas_image(width, height, cache_path)
+            create_neutral_canvas_image(render_w, render_h, cache_path)
 
         if progress:
             progress(100, "Đã chuẩn bị xong khung hình gốc.")
@@ -105,6 +121,9 @@ class WanProvider(IProvider):
         """
         if not Path(image_path).is_file():
             raise ProviderError(f"Không tìm thấy ảnh nguồn: {image_path}")
+
+        render_w = snap_dim_to_32(width, 1280)
+        render_h = snap_dim_to_32(height, 704)
 
         # Tính toán frame count: 4n + 1 (49 cho ~2s, 81 cho ~3.4s, 121 cho ~5s)
         if duration_seconds <= 2:
@@ -129,8 +148,8 @@ class WanProvider(IProvider):
                 image_path=str(image_path),
                 prompt=prompt,
                 output_path=str(temp_raw),
-                width=width,
-                height=height,
+                width=render_w,
+                height=render_h,
                 length=length,
                 steps=steps,
                 cfg=cfg,

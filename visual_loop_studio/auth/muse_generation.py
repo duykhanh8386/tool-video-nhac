@@ -426,6 +426,224 @@ def _dismiss_muse_popups(driver: Any) -> None:
         pass
 
 
+
+
+
+
+def fill_muse_chat_prompt(driver, text: str) -> bool:
+    """Điền prompt an toàn vào ô chat Muse, cập nhật internal state của React để kích hoạt nút Send."""
+    from selenium.webdriver.common.keys import Keys
+
+    _dismiss_muse_popups(driver)
+
+    selectors = (
+        "textarea[aria-label='Nhắn tin']",
+        "textarea[placeholder*='nhắn tin' i]",
+        "textarea[aria-label='Message']",
+        "textarea[placeholder='Message']",
+        "[data-testid='prompt-input']",
+        "[data-testid*='composer' i] textarea",
+        "textarea[aria-label*='prompt' i]",
+        "textarea[placeholder*='prompt' i]",
+        "[contenteditable='true'][role='textbox'][aria-label*='prompt' i]",
+        "textarea",
+        "[contenteditable='true'][role='textbox']",
+        "[contenteditable='true']",
+    )
+
+    for selector in selectors:
+        fields = _find(driver, "css selector", selector)
+        valid_fields = []
+        for f in reversed(fields):
+            if not _visible(f):
+                continue
+            try:
+                is_sidebar = driver.execute_script(
+                    '''return !!arguments[0].closest("aside,nav,[data-testid*='sidebar' i],[data-testid*='timeline' i],[data-testid*='history' i]");''',
+                    f,
+                )
+                if not is_sidebar:
+                    valid_fields.append(f)
+            except Exception:
+                valid_fields.append(f)
+
+        for field in valid_fields:
+            try:
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", field)
+                except Exception:
+                    pass
+                field.click()
+                time.sleep(0.15)
+
+                js_res = driver.execute_script(
+                    '''
+                    const el = arguments[0];
+                    const val = arguments[1];
+                    el.focus();
+
+                    let inserted = false;
+                    try {
+                        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                            el.select();
+                        } else {
+                            document.execCommand('selectAll', false, null);
+                        }
+                        inserted = document.execCommand('insertText', false, val);
+                    } catch(e) {}
+
+                    const cur = (el.value || el.innerText || '').trim();
+                    if (!inserted || cur.length < 5) {
+                        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                            const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+                            const setMethod = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                            if (setMethod) {
+                                setMethod.call(el, val);
+                            } else {
+                                el.value = val;
+                            }
+                            el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                        } else {
+                            el.innerText = val;
+                            el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                        }
+                    }
+
+                    const finalVal = (el.value || el.innerText || '').trim();
+                    return finalVal.length > 5;
+                    ''',
+                    field,
+                    text,
+                )
+                if js_res:
+                    return True
+
+                tag = str(field.tag_name or "").lower()
+                if tag in {"textarea", "input"}:
+                    field.clear()
+                else:
+                    field.send_keys("\ue009", "a")
+
+                lines = text.split("\n")
+                for i, line in enumerate(lines):
+                    if line:
+                        field.send_keys(line)
+                    if i < len(lines) - 1:
+                        field.send_keys(Keys.SHIFT, Keys.ENTER)
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def submit_muse_chat_prompt(driver) -> bool:
+    """Gửi prompt trong chat Muse bằng cách bấm nút Send / Generate hoặc phím Enter trong composer."""
+    try:
+        clicked = bool(
+            driver.execute_script(
+                '''
+                const isInsideSidebar = el => !!el.closest("aside,nav,[data-testid*='sidebar' i],[data-testid*='timeline' i],[data-testid*='history' i]");
+                const isInsideChat = el => !!el.closest("[data-message-item='true'],[data-message-role],[data-message-group-id]");
+                const isStopOrCancel = el => {
+                    if (!el) return false;
+                    const label = ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || '') + ' ' + (el.getAttribute('title') || '')).toLowerCase();
+                    return /stop|dừng|cancel|hủy|abort|delete|xóa/i.test(label);
+                };
+
+                const triggerClick = el => {
+                    if (!el || isStopOrCancel(el)) return false;
+                    try { el.focus(); } catch(e) {}
+                    try { el.click(); } catch(e) {}
+                    return true;
+                };
+
+                const selectors = [
+                    'button[aria-label="Send" i]',
+                    'button[aria-label*="send message" i]',
+                    'button[aria-label*="send" i]',
+                    'button[aria-label*="tạo" i]',
+                    'button[aria-label*="gửi" i]',
+                    'button[aria-label*="create" i]',
+                    'button[aria-label*="generate" i]',
+                    'button[type="submit"][aria-label*="send" i]',
+                    'button[type="submit"]',
+                    'button[data-testid*="send" i]',
+                    'button[data-testid*="generate" i]',
+                    'button[data-testid*="create" i]'
+                ];
+                for (const sel of selectors) {
+                    const btns = [...document.querySelectorAll(sel)].filter(b => {
+                        if (isInsideSidebar(b) || isInsideChat(b) || isStopOrCancel(b)) return false;
+                        const r = b.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0 && !b.disabled && b.getAttribute('aria-disabled') !== 'true';
+                    });
+                    if (btns.length) {
+                        return triggerClick(btns[btns.length - 1]);
+                    }
+                }
+
+                const textareas = [...document.querySelectorAll('textarea,[contenteditable="true"]')].filter(t => {
+                    if (isInsideSidebar(t) || isInsideChat(t)) return false;
+                    const r = t.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                });
+                if (textareas.length) {
+                    const ta = textareas[textareas.length - 1];
+                    const container = ta.closest("form,[data-testid*='composer' i],div.relative,div") || ta.parentElement;
+                    if (container) {
+                        const btns = [...container.querySelectorAll('button,[role="button"]')].filter(b => {
+                            if (b === ta || isInsideSidebar(b) || isInsideChat(b) || isStopOrCancel(b)) return false;
+                            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                            if (/attach|upload|file|image|add|close|dismiss|preview|stop|dừng|cancel|hủy|xóa/i.test(aria)) return false;
+                            const r = b.getBoundingClientRect();
+                            return r.width > 0 && r.height > 0 && !b.disabled && b.getAttribute('aria-disabled') !== 'true';
+                        });
+                        const sendBtn = btns.find(b => {
+                            if (isStopOrCancel(b)) return false;
+                            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                            const type = (b.getAttribute('type') || '').toLowerCase();
+                            return /send|submit|create|generate|tạo|gửi/i.test(aria) || type === 'submit' || Boolean(b.querySelector('svg path,svg'));
+                        });
+                        if (sendBtn && !isStopOrCancel(sendBtn)) {
+                            return triggerClick(sendBtn);
+                        }
+                    }
+                    try {
+                        ta.focus();
+                        const evt = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
+                        ta.dispatchEvent(evt);
+                        return true;
+                    } catch(e) {}
+                }
+                return false;
+                '''
+            )
+        )
+        if clicked:
+            return True
+    except Exception:
+        pass
+
+    extended_submit_texts = (
+        "send", "generate", "create video", "create", "gửi", "tạo video", "tạo"
+    )
+    if _click_by_text(driver, extended_submit_texts):
+        return True
+
+    for sel in (
+        "button[aria-label*='send' i]",
+        "button[data-testid*='send' i]",
+        "button[type='submit']",
+    ):
+        for btn in reversed(_find(driver, "css selector", sel)):
+            if _clickable(btn):
+                btn.click()
+                return True
+
+    return False
+
+
 def _query_muse_videos(driver: Any) -> list[dict[str, str]]:
     """Trich xuat danh sach video san sinh tu DOM trang Muse theo chuan MuseStudio (lay ca data-hatch-video-src, source tag va the video chat, bo qua avatar mascot)."""
     try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -13,9 +14,67 @@ from playlist_ai.core.prompt_parser import MappedItem
 from playlist_ai.providers.base import CookieExpiredError, IProvider, ProviderError
 from utils.config import read_json, write_json
 from utils.paths import CACHE_DIR, DATA_DIR
+from utils.process import hidden_process_kwargs
 
 
 JOBS_STATE_FILE = DATA_DIR / "playlist_jobs_state.json"
+
+
+def extract_video_thumbnail(
+    video_path: Path | str,
+    output_png: Path | str,
+    timestamp_sec: float = 1.0,
+    ffmpeg_path: str = "ffmpeg",
+) -> bool:
+    """
+    Trích xuất khung hình thật từ file video đã hoàn thành để làm ảnh thumbnail (.png),
+    thay vì để lại ảnh canvas xám tạm thời.
+    """
+    video_path = Path(video_path).resolve()
+    output_png = Path(output_png).resolve()
+    if not video_path.is_file() or video_path.stat().st_size <= 0:
+        return False
+
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        f"{timestamp_sec:.2f}",
+        "-i",
+        str(video_path),
+        "-frames:v",
+        "1",
+        str(output_png),
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=15, check=False, **hidden_process_kwargs())
+        if res.returncode == 0 and output_png.is_file() and output_png.stat().st_size > 0:
+            return True
+    except Exception:
+        pass
+
+    # Fallback frame 0
+    try:
+        fallback_cmd = [
+            ffmpeg_path,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            str(output_png),
+        ]
+        res = subprocess.run(fallback_cmd, capture_output=True, timeout=15, check=False, **hidden_process_kwargs())
+        return res.returncode == 0 and output_png.is_file() and output_png.stat().st_size > 0
+    except Exception:
+        return False
 
 
 @dataclass
@@ -140,12 +199,14 @@ class PlaylistBatchRunner(QThread):
         providers: Dict[str, IProvider],
         output_dir: str | Path,
         conflict_mode: ConflictResolution = "suffix",
+        ffmpeg_path: str = "ffmpeg",
     ):
         super().__init__()
         self.queue_manager = queue_manager
         self.providers = providers
         self.output_dir = Path(output_dir).resolve()
         self.conflict_mode = conflict_mode
+        self.ffmpeg_path = ffmpeg_path or "ffmpeg"
         self._paused = False
         self._stopped = False
         self._single_job_retry_id: Optional[str] = None
@@ -194,68 +255,130 @@ class PlaylistBatchRunner(QThread):
         completed = 0
         failed = 0
 
-        for idx, job in enumerate(jobs_to_run, start=1):
-            if self._stopped:
-                self.log_signal.emit("⏹ Hàng đợi đã dừng.")
-                break
+        try:
+            for idx, job in enumerate(jobs_to_run, start=1):
+                if self._stopped:
+                    self.log_signal.emit("⏹ Hàng đợi đã dừng.")
+                    break
 
-            # Nếu bài này đã hoàn thành từ trước (resume), bỏ qua để không tốn lượt
-            if job.status == "Hoàn thành" and Path(job.output_video_path).is_file():
-                completed += 1
-                continue
+                # Nếu bài này đã hoàn thành từ trước (resume), bỏ qua để không tốn lượt
+                if job.status == "Hoàn thành" and Path(job.output_video_path).is_file():
+                    completed += 1
+                    continue
 
-            while self._paused and not self._stopped:
-                time.sleep(1.0)
+                while self._paused and not self._stopped:
+                    time.sleep(1.0)
 
-            if self._stopped:
-                break
+                if self._stopped:
+                    break
 
-            # Lấy provider tương ứng cho bài này
-            provider = self.providers.get(job.provider_key) or self.providers.get("wan")
-            if not provider:
-                job.status = "Lỗi"
-                job.error_message = f"Không tìm thấy provider '{job.provider_key}'"
+                # Lấy provider tương ứng cho bài này
+                provider = self.providers.get(job.provider_key) or self.providers.get("wan")
+                if not provider:
+                    job.status = "Lỗi"
+                    job.error_message = f"Không tìm thấy provider '{job.provider_key}'"
+                    self.queue_manager.save()
+                    self.job_status_changed.emit(job.to_dict())
+                    failed += 1
+                    continue
+
+                self.log_signal.emit(f"🎬 [{idx}/{total}] Bắt đầu bài '{job.track_title}' ({provider.display_name})...")
+
+                # Xác định đường dẫn file video đầu ra (chuẩn hóa tên file theo title)
+                target_video_file, is_skip = resolve_output_file_path(
+                    self.output_dir, job.track_title, extension=".mp4", conflict_mode=self.conflict_mode
+                )
+
+                if is_skip:
+                    job.status = "Bỏ qua"
+                    job.output_video_path = str(target_video_file)
+                    self.queue_manager.save()
+                    self.job_status_changed.emit(job.to_dict())
+                    self.log_signal.emit(f"⏭ Đã tồn tại file '{target_video_file.name}', bỏ qua theo cài đặt.")
+                    completed += 1
+                    continue
+
+                # Bước 1: Chuẩn bị ảnh nguồn / canvas trung tính (lưu tạm trong cache, không ghi vào output_dir)
+                cached_img = Path(job.cached_image_path) if job.cached_image_path else None
+                if not (cached_img and cached_img.is_file()):
+                    job.status = "Đang tạo ảnh"
+                    self.queue_manager.save()
+                    self.job_status_changed.emit(job.to_dict())
+
+                    cache_dir = CACHE_DIR / "playlist_t2i"
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    cache_file = cache_dir / f"{job.id}_source.png"
+
+                    try:
+                        img_path = provider.text_to_image(
+                            prompt=job.final_prompt,
+                            width=job.width,
+                            height=job.height,
+                            cache_path=cache_file,
+                            progress=lambda p, m: self.progress_signal.emit(p, f"[{idx}/{total}] {m}"),
+                            cancelled=lambda: self._stopped,
+                        )
+                        job.cached_image_path = str(img_path)
+                        self.queue_manager.save()
+                    except CookieExpiredError as e:
+                        job.status = "Tạm dừng"
+                        job.error_message = str(e)
+                        self.queue_manager.save()
+                        self.job_status_changed.emit(job.to_dict())
+                        self.log_signal.emit(f"⚠ Cookie hết hạn: {e}")
+                        self.cookie_expired_signal.emit(str(e))
+                        self._paused = True
+                        # Chờ dán cookie mới
+                        while self._paused and not self._stopped:
+                            time.sleep(1.0)
+                        if self._stopped:
+                            break
+                        continue
+                    except Exception as e:
+                        job.status = "Lỗi"
+                        job.error_message = f"Lỗi tạo ảnh: {e}"
+                        self.queue_manager.save()
+                        self.job_status_changed.emit(job.to_dict())
+                        self.log_signal.emit(f"❌ [{idx}/{total}] {job.error_message}")
+                        failed += 1
+                        continue
+                else:
+                    img_path = cached_img
+
+                # Bước 2: Tạo chuyển động (clip vài giây)
+                job.status = "Đang tạo chuyển động"
                 self.queue_manager.save()
                 self.job_status_changed.emit(job.to_dict())
-                failed += 1
-                continue
-
-            self.log_signal.emit(f"🎬 [{idx}/{total}] Bắt đầu bài '{job.track_title}' ({provider.display_name})...")
-
-            # Xác định đường dẫn file video đầu ra (chuẩn hóa tên file theo title)
-            target_video_file, is_skip = resolve_output_file_path(
-                self.output_dir, job.track_title, extension=".mp4", conflict_mode=self.conflict_mode
-            )
-
-            if is_skip:
-                job.status = "Bỏ qua"
-                job.output_video_path = str(target_video_file)
-                self.queue_manager.save()
-                self.job_status_changed.emit(job.to_dict())
-                self.log_signal.emit(f"⏭ Đã tồn tại file '{target_video_file.name}', bỏ qua theo cài đặt.")
-                completed += 1
-                continue
-
-            # Bước 1: Tạo ảnh (hoặc dùng ảnh cache nếu đã tạo trước đó để không tốn lượt)
-            cached_img = Path(job.cached_image_path) if job.cached_image_path else None
-            if not (cached_img and cached_img.is_file()):
-                job.status = "Đang tạo ảnh"
-                self.queue_manager.save()
-                self.job_status_changed.emit(job.to_dict())
-
-                cache_file = self.output_dir / f"{target_video_file.stem}.png" if job.keep_thumbnail else None
 
                 try:
-                    img_path = provider.text_to_image(
+                    vid_path = provider.image_to_video(
+                        image_path=img_path,
                         prompt=job.final_prompt,
+                        duration_seconds=job.duration_seconds,
                         width=job.width,
                         height=job.height,
-                        cache_path=cache_file,
+                        output_path=target_video_file,
                         progress=lambda p, m: self.progress_signal.emit(p, f"[{idx}/{total}] {m}"),
                         cancelled=lambda: self._stopped,
                     )
-                    job.cached_image_path = str(img_path)
+                    job.output_video_path = str(vid_path)
+
+                    # Trích xuất thumbnail thật từ video đã tạo (thay vì để lại ảnh canvas xám)
+                    if job.keep_thumbnail and Path(job.output_video_path).is_file():
+                        thumb_dest = self.output_dir / f"{target_video_file.stem}.png"
+                        extract_video_thumbnail(
+                            video_path=job.output_video_path,
+                            output_png=thumb_dest,
+                            timestamp_sec=1.0,
+                            ffmpeg_path=self.ffmpeg_path,
+                        )
+
+                    job.status = "Hoàn thành"
+                    job.error_message = ""
                     self.queue_manager.save()
+                    self.job_status_changed.emit(job.to_dict())
+                    self.log_signal.emit(f"✔ [{idx}/{total}] Thành công! Đã lưu: {target_video_file.name}")
+                    completed += 1
                 except CookieExpiredError as e:
                     job.status = "Tạm dừng"
                     job.error_message = str(e)
@@ -264,7 +387,6 @@ class PlaylistBatchRunner(QThread):
                     self.log_signal.emit(f"⚠ Cookie hết hạn: {e}")
                     self.cookie_expired_signal.emit(str(e))
                     self._paused = True
-                    # Chờ dán cookie mới
                     while self._paused and not self._stopped:
                         time.sleep(1.0)
                     if self._stopped:
@@ -272,61 +394,22 @@ class PlaylistBatchRunner(QThread):
                     continue
                 except Exception as e:
                     job.status = "Lỗi"
-                    job.error_message = f"Lỗi tạo ảnh: {e}"
+                    job.error_message = f"Lỗi tạo video: {e}"
                     self.queue_manager.save()
                     self.job_status_changed.emit(job.to_dict())
                     self.log_signal.emit(f"❌ [{idx}/{total}] {job.error_message}")
                     failed += 1
-                    continue
-            else:
-                img_path = cached_img
 
-            # Bước 2: Tạo chuyển động (clip vài giây)
-            job.status = "Đang tạo chuyển động"
-            self.queue_manager.save()
-            self.job_status_changed.emit(job.to_dict())
-
-            try:
-                vid_path = provider.image_to_video(
-                    image_path=img_path,
-                    prompt=job.final_prompt,
-                    duration_seconds=job.duration_seconds,
-                    width=job.width,
-                    height=job.height,
-                    output_path=target_video_file,
-                    progress=lambda p, m: self.progress_signal.emit(p, f"[{idx}/{total}] {m}"),
-                    cancelled=lambda: self._stopped,
-                )
-                job.output_video_path = str(vid_path)
-                job.status = "Hoàn thành"
-                job.error_message = ""
-                self.queue_manager.save()
-                self.job_status_changed.emit(job.to_dict())
-                self.log_signal.emit(f"✔ [{idx}/{total}] Thành công! Đã lưu: {target_video_file.name}")
-                completed += 1
-            except CookieExpiredError as e:
-                job.status = "Tạm dừng"
-                job.error_message = str(e)
-                self.queue_manager.save()
-                self.job_status_changed.emit(job.to_dict())
-                self.log_signal.emit(f"⚠ Cookie hết hạn: {e}")
-                self.cookie_expired_signal.emit(str(e))
-                self._paused = True
-                while self._paused and not self._stopped:
-                    time.sleep(1.0)
-                if self._stopped:
-                    break
-                continue
-            except Exception as e:
-                job.status = "Lỗi"
-                job.error_message = f"Lỗi tạo video: {e}"
-                self.queue_manager.save()
-                self.job_status_changed.emit(job.to_dict())
-                self.log_signal.emit(f"❌ [{idx}/{total}] {job.error_message}")
-                failed += 1
-
-            pct = int((completed + failed) / total * 100)
-            self.progress_signal.emit(pct, f"Đã xử lý {completed}/{total} bài hát")
+                pct = int((completed + failed) / total * 100)
+                self.progress_signal.emit(pct, f"Đã xử lý {completed}/{total} bài hát")
+        finally:
+            # Đóng tài nguyên của các provider nếu có (ví dụ: Chrome Driver của MuseProvider)
+            for p in self.providers.values():
+                if hasattr(p, "close"):
+                    try:
+                        p.close()
+                    except Exception:
+                        pass
 
         if self._stopped:
             self.all_finished_signal.emit(False, f"Đã dừng tác vụ. Hoàn thành {completed}/{total} bài.")

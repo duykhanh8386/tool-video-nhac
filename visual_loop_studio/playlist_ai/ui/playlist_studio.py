@@ -136,6 +136,11 @@ class PlaylistStudioPage(QWidget):
         if self.runner and self.runner.isRunning():
             self.runner.stop()
             self.runner.wait(3000)
+        if hasattr(self.muse_provider, "close"):
+            try:
+                self.muse_provider.close()
+            except Exception:
+                pass
 
     # =========================================================================
     # XÂY DỰNG GIAO DIỆN
@@ -381,10 +386,12 @@ class PlaylistStudioPage(QWidget):
 
         vid_cfg_row.addWidget(QLabel("Độ phân giải:"))
         self.res_combo = QComboBox()
-        self.res_combo.addItem("1280x704 (16:9 Chuẩn)", "1280x704")
-        self.res_combo.addItem("832x480 (16:9 Nhẹ)", "832x480")
-        self.res_combo.addItem("1920x1080 (FullHD)", "1920x1080")
+        self.res_combo.addItem("1280x704 (16:9 Chuẩn, Khuyên dùng)", "1280x704")
+        self.res_combo.addItem("832x480 (16:9 Nhanh/Nhẹ)", "832x480")
+        self.res_combo.addItem("1920x1088 (FullHD 16:9)", "1920x1088")
         saved_res = getattr(self.settings, "playlist_resolution", "1280x704") or "1280x704"
+        if saved_res == "1920x1080":
+            saved_res = "1920x1088"
         for i in range(self.res_combo.count()):
             if self.res_combo.itemData(i) == saved_res:
                 self.res_combo.setCurrentIndex(i)
@@ -742,7 +749,9 @@ class PlaylistStudioPage(QWidget):
                 return
 
             res_parts = (self.res_combo.currentData() or "1280x704").split("x")
-            w, h = int(res_parts[0]), int(res_parts[1])
+            raw_w, raw_h = int(res_parts[0]), int(res_parts[1])
+            w = max(256, round(raw_w / 32) * 32)
+            h = max(256, round(raw_h / 32) * 32)
 
             self.queue_manager.set_jobs_from_mapped_items(
                 mapped_items=self.mapped_items,
@@ -752,6 +761,11 @@ class PlaylistStudioPage(QWidget):
                 height=h,
                 keep_thumbnail=self.keep_thumb_check.isChecked(),
             )
+            setattr(self.settings, "playlist_resolution", self.res_combo.currentData())
+            setattr(self.settings, "playlist_duration", self.duration_spin.value())
+            setattr(self.settings, "playlist_keep_thumbnail", self.keep_thumb_check.isChecked())
+            setattr(self.settings, "playlist_conflict_mode", self.conflict_combo.currentData())
+            self.settings_changed.emit()
             self._refresh_jobs_table()
 
         # Tạo và khởi chạy PlaylistBatchRunner
@@ -766,6 +780,7 @@ class PlaylistStudioPage(QWidget):
             providers=providers_dict,
             output_dir=out_folder,
             conflict_mode=conflict_mode,
+            ffmpeg_path=self.settings.ffmpeg_path or "ffmpeg",
         )
         self.runner.job_status_changed.connect(self._on_job_status_changed)
         self.runner.log_signal.connect(self._log)
@@ -837,6 +852,7 @@ class PlaylistStudioPage(QWidget):
             providers=providers_dict,
             output_dir=out_folder,
             conflict_mode=conflict_mode,
+            ffmpeg_path=self.settings.ffmpeg_path or "ffmpeg",
         )
         self.runner.job_status_changed.connect(self._on_job_status_changed)
         self.runner.log_signal.connect(self._log)
