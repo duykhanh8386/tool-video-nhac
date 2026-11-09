@@ -725,9 +725,14 @@ class LocalRuntimeManager:
             time.sleep(1)
         raise TimeoutError(f"ComfyUI không sẵn sàng sau {timeout} giây. Xem log: {LOG_DIR / 'comfyui.log'}")
 
-    def stop(self) -> None:
+    def is_process_running(self) -> bool:
         with self._lock:
-            self._stopping = True
+            return bool(self.process and self.process.poll() is None)
+
+    def stop(self, *, shutdown: bool = True) -> None:
+        with self._lock:
+            if shutdown:
+                self._stopping = True
             process = self.process
             self.process = None
         if process and process.poll() is None:
@@ -738,6 +743,43 @@ class LocalRuntimeManager:
                 process.kill()
                 process.wait(timeout=5)
         self._close_log()
+
+    def restart(
+        self,
+        install_root: str,
+        base_url: str,
+        progress: Callable[[int, str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        timeout: int = 240,
+        wan_variant: str = WAN_VARIANT_QUALITY,
+    ) -> bool:
+        progress = progress or (lambda _value, _message: None)
+        cancelled = cancelled or (lambda: False)
+        with self._lock:
+            if self._stopping:
+                return False
+            managed_alive = bool(self.process and self.process.poll() is None)
+        if managed_alive:
+            progress(0, "Đang dừng tiến trình ComfyUI đang bị treo để khởi động lại…")
+            self.stop(shutdown=False)
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline and server_ready(base_url, timeout=0.5):
+                if cancelled():
+                    raise RuntimeInstallCancelled("Đã hủy khởi động lại AI Local.")
+                time.sleep(0.5)
+        elif server_ready(base_url, timeout=1.0):
+            return False
+        if not is_runtime_installed(install_root, wan_variant=wan_variant):
+            return False
+        self.ensure_running(
+            install_root,
+            base_url,
+            progress=progress,
+            cancelled=cancelled,
+            timeout=timeout,
+            wan_variant=wan_variant,
+        )
+        return True
 
     def _close_log(self) -> None:
         if self._log_stream:

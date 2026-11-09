@@ -11,6 +11,7 @@ from ai.comfyui import (
     WAN_VARIANT_DMD,
     WAN_VARIANT_QUALITY,
     check_comfyui,
+    free_comfyui_memory,
     generate_local_image_to_video,
 )
 from ai.local_runtime import server_ready
@@ -157,6 +158,7 @@ class WanProvider(IProvider):
                 wan_variant=self.model_variant,
                 progress=on_comfy_progress,
                 cancelled=cancelled,
+                cleanup_history=True,
             )
 
             final_dest = Path(output_path) if output_path else temp_raw.with_name(f"wan_final_{int(time.time())}.mp4")
@@ -170,9 +172,11 @@ class WanProvider(IProvider):
                 ffmpeg_path=self.ffmpeg_path,
                 trim_start_seconds=0.16,
             )
+            free_comfyui_memory(self.comfyui_url, unload_models=False, free_memory=True)
 
             return final_dest
         except Exception as exc:
+            free_comfyui_memory(self.comfyui_url, unload_models=True, free_memory=True)
             raise ProviderError(f"Wan Local Render Error: {exc}") from exc
         finally:
             if temp_raw.exists():

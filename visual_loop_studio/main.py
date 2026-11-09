@@ -259,6 +259,7 @@ class MainWindow(QMainWindow):
             or self.muse_accounts.busy
             or self.playlist_studio.busy
             or self.movoa_studio.busy
+            or self.local_studio.busy
         ):
             answer = QMessageBox.question(self, "Render đang chạy", "Cancel render và thoát ứng dụng?")
             if answer != QMessageBox.StandardButton.Yes:
@@ -277,6 +278,7 @@ class MainWindow(QMainWindow):
             self.playlist_studio.shutdown()
             self.movoa_studio.shutdown()
         self.visual.local_runtime.stop()
+        self.local_studio.shutdown()
         self.ai_batch.shutdown()
         self.youtube_accounts.shutdown()
         self.muse_accounts.shutdown()

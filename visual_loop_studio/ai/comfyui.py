@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import mimetypes
+import os
 import random
 import re
+import socket
+import struct
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from ai.veo import motion_prompt
+from utils.net_ssl import get_ssl_context
 
 
 WAN_VARIANT_QUALITY = "quality"
@@ -499,6 +505,450 @@ def _legacy_check_comfyui_models(
     return None
 
 
+def recommended_video_timeout(
+    wan_variant: str = WAN_VARIANT_QUALITY,
+    width: int = 832,
+    height: int = 480,
+    length: int = 81,
+    steps: int = 20,
+) -> int:
+    """Return a practical per-clip hard timeout (seconds) tailored to model speed and resolution."""
+    variant = normalize_wan_variant(wan_variant)
+    pixels = max(256 * 256, int(width) * int(height))
+    high_res = pixels >= 700_000
+    long_clip = int(length) > 100
+    if variant in {WAN_VARIANT_DMD, LOCAL_MODEL_LTX, LOCAL_MODEL_HUNYUAN}:
+        base_timeout = 2100 if high_res else 1200  # 35 min @ 720p, 20 min @ 480p
+        if long_clip and high_res:
+            base_timeout = 2400
+        return base_timeout
+    # Quality 20-step or custom workflow
+    scale = max(1.0, int(steps) / 20.0)
+    base_timeout = 4500 if high_res else 2700  # 75 min @ 720p, 45 min @ 480p
+    return min(4 * 60 * 60, int(base_timeout * scale))
+
+
+def recommended_stall_timeout(
+    wan_variant: str = WAN_VARIANT_QUALITY,
+    width: int = 832,
+    height: int = 480,
+) -> int:
+    """Return max seconds with zero ComfyUI step/node progress before treating a running job as wedged."""
+    variant = normalize_wan_variant(wan_variant)
+    high_res = (int(width) * int(height)) >= 700_000
+    if variant in {WAN_VARIANT_DMD, LOCAL_MODEL_LTX, LOCAL_MODEL_HUNYUAN}:
+        return 900 if high_res else 600  # 15 min @ 720p, 10 min @ 480p
+    return 1500 if high_res else 1200
+
+
+def get_comfyui_queue(base_url: str, timeout: int = 15) -> dict | None:
+    """Fetch ComfyUI /queue payload safely; returns None when unreachable."""
+    base = _base_url(base_url)
+    try:
+        data = _request_json("GET", f"{base}/queue", timeout=timeout)
+        return data if isinstance(data, dict) else None
+    except RuntimeError:
+        return None
+
+
+def _extract_queue_prompt_ids(queue_data: dict) -> tuple[set[str], set[str]]:
+    running: set[str] = set()
+    pending: set[str] = set()
+    for key, target in (("queue_running", running), ("queue_pending", pending)):
+        items = queue_data.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, (list, tuple)) and len(item) >= 2 and item[1]:
+                target.add(str(item[1]))
+            elif isinstance(item, dict) and item.get("prompt_id"):
+                target.add(str(item["prompt_id"]))
+    return running, pending
+
+
+def free_comfyui_memory(
+    base_url: str,
+    *,
+    unload_models: bool = False,
+    free_memory: bool = True,
+    timeout: int = 15,
+) -> bool:
+    """Ask ComfyUI to release cached execution tensors (and optionally unload models)."""
+    base = _base_url(base_url)
+    try:
+        _request_json(
+            "POST",
+            f"{base}/free",
+            {"unload_models": bool(unload_models), "free_memory": bool(free_memory)},
+            timeout=timeout,
+        )
+        return True
+    except RuntimeError:
+        return False
+
+
+def clear_comfyui_history(
+    base_url: str,
+    *,
+    prompt_ids: list[str] | None = None,
+    clear_all: bool = False,
+    timeout: int = 15,
+) -> bool:
+    """Remove completed history entries from ComfyUI RAM to prevent unbounded batch bloat."""
+    base = _base_url(base_url)
+    if clear_all:
+        payload: dict = {"clear": True}
+    elif prompt_ids:
+        payload = {"delete": [str(pid) for pid in prompt_ids if pid]}
+    else:
+        return False
+    try:
+        _request_json("POST", f"{base}/history", payload, timeout=timeout)
+        return True
+    except RuntimeError:
+        return False
+
+
+def delete_comfyui_queue_items(
+    base_url: str,
+    *,
+    prompt_ids: list[str] | None = None,
+    clear_pending: bool = False,
+    timeout: int = 15,
+) -> bool:
+    """Delete stuck or cancelled prompts from ComfyUI's pending queue."""
+    base = _base_url(base_url)
+    payload: dict = {}
+    if prompt_ids:
+        payload["delete"] = [str(pid) for pid in prompt_ids if pid]
+    if clear_pending:
+        payload["clear"] = True
+    if not payload:
+        return False
+    try:
+        _request_json("POST", f"{base}/queue", payload, timeout=timeout)
+        return True
+    except RuntimeError:
+        return False
+
+
+def get_system_stats(base_url: str, timeout: int = 15) -> dict:
+    """Lightweight connectivity/device check via GET /system_stats (avoids heavy /object_info)."""
+    return _request_json("GET", f"{_base_url(base_url)}/system_stats", timeout=timeout)
+
+
+class _ComfyProgressMonitor:
+    """Lightweight stdlib WebSocket listener for ComfyUI node/step progress and stall detection."""
+
+    def __init__(self, base_url: str, client_id: str) -> None:
+        self.base_url = _base_url(base_url)
+        self.client_id = client_id
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._sock: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._connected = False
+        self._prompt_id: str | None = None
+        self._states: dict[str, dict] = {}
+        self._buffer = bytearray()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def set_prompt_id(self, prompt_id: str) -> None:
+        with self._lock:
+            self._prompt_id = str(prompt_id)
+
+    def close(self) -> None:
+        self._stop.set()
+        with self._lock:
+            sock = self._sock
+            self._sock = None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.5)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            pid = self._prompt_id
+            state = dict(self._states.get(pid or "", {})) if pid else {}
+            state["ws_connected"] = self._connected
+            return state
+
+    def _run(self) -> None:
+        parsed = urlparse(self.base_url)
+        host = parsed.hostname or "127.0.0.1"
+        is_ssl = parsed.scheme == "https"
+        port = parsed.port or (443 if is_ssl else 80)
+        base_path = parsed.path.rstrip("/")
+        ws_path = f"{base_path}/ws?clientId={quote(self.client_id)}"
+        host_header = f"{host}:{port}" if parsed.port else host
+
+        is_local = host in {"127.0.0.1", "localhost", "::1"}
+        try:
+            raw_sock = socket.create_connection((host, port), timeout=0.3 if is_local else 1.5)
+            sock: socket.socket = (
+                get_ssl_context(verify=True).wrap_socket(raw_sock, server_hostname=host)
+                if is_ssl
+                else raw_sock
+            )
+            sock.settimeout(1.0)
+            with self._lock:
+                if self._stop.is_set():
+                    sock.close()
+                    return
+                self._sock = sock
+
+            key = base64.b64encode(os.urandom(16)).decode("ascii")
+            handshake = (
+                f"GET {ws_path} HTTP/1.1\r\n"
+                f"Host: {host_header}\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode("ascii")
+            sock.sendall(handshake)
+
+            header_buf = bytearray()
+            while b"\r\n\r\n" not in header_buf:
+                if self._stop.is_set():
+                    return
+                chunk = sock.recv(4096)
+                if not chunk:
+                    return
+                header_buf.extend(chunk)
+                if len(header_buf) > 32768:
+                    return
+            head, rest = bytes(header_buf).split(b"\r\n\r\n", 1)
+            status_line = head.split(b"\r\n", 1)[0]
+            if b" 101 " not in status_line:
+                return
+
+            self._buffer = bytearray(rest)
+            with self._lock:
+                self._connected = True
+
+            fragments: list[bytes] = []
+            while not self._stop.is_set():
+                frame = self._read_frame(sock)
+                if frame is None:
+                    break
+                fin, opcode, payload = frame
+                if opcode == 0x8:  # Close
+                    break
+                if opcode == 0x9:  # Ping -> masked Pong
+                    self._send_pong(sock, payload)
+                    continue
+                if opcode == 0xA:  # Pong
+                    continue
+                if opcode == 0x1:  # Text
+                    if fin:
+                        self._on_text(payload.decode("utf-8", errors="replace"))
+                    else:
+                        fragments = [payload]
+                elif opcode == 0x0 and fragments:
+                    fragments.append(payload)
+                    if fin:
+                        full = b"".join(fragments)
+                        fragments.clear()
+                        self._on_text(full.decode("utf-8", errors="replace"))
+                elif opcode == 0x2:
+                    # Binary preview frames also indicate ComfyUI is actively sampling
+                    self._touch_active_prompt()
+        except OSError:
+            pass
+        finally:
+            with self._lock:
+                sock = self._sock
+                self._sock = None
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+    def _read_exact(self, sock: socket.socket, n: int) -> bytes | None:
+        while len(self._buffer) < n:
+            if self._stop.is_set():
+                return None
+            try:
+                chunk = sock.recv(max(4096, n - len(self._buffer)))
+            except socket.timeout:
+                continue
+            except OSError:
+                return None
+            if not chunk:
+                return None
+            self._buffer.extend(chunk)
+        out = bytes(self._buffer[:n])
+        del self._buffer[:n]
+        return out
+
+    def _read_frame(self, sock: socket.socket) -> tuple[bool, int, bytes] | None:
+        hdr = self._read_exact(sock, 2)
+        if hdr is None:
+            return None
+        b1, b2 = hdr[0], hdr[1]
+        fin = bool(b1 & 0x80)
+        opcode = b1 & 0x0F
+        masked = bool(b2 & 0x80)
+        length = b2 & 0x7F
+        if length == 126:
+            ext = self._read_exact(sock, 2)
+            if ext is None:
+                return None
+            length = struct.unpack("!H", ext)[0]
+        elif length == 127:
+            ext = self._read_exact(sock, 8)
+            if ext is None:
+                return None
+            length = struct.unpack("!Q", ext)[0]
+        if length > 16 * 1024 * 1024:
+            return None
+        mask_key = self._read_exact(sock, 4) if masked else b""
+        if masked and mask_key is None:
+            return None
+        payload = self._read_exact(sock, length) if length else b""
+        if payload is None:
+            return None
+        if masked and mask_key:
+            payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+        return fin, opcode, payload
+
+    @staticmethod
+    def _send_pong(sock: socket.socket, payload: bytes) -> None:
+        trimmed = payload[:125]
+        mask = os.urandom(4)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(trimmed))
+        frame = bytes((0x8A, 0x80 | len(trimmed))) + mask + masked
+        try:
+            sock.sendall(frame)
+        except OSError:
+            pass
+
+    def _touch_active_prompt(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            pid = self._prompt_id
+            if pid and pid in self._states:
+                self._states[pid]["last_activity"] = now
+
+    def _on_text(self, text: str) -> None:
+        try:
+            msg = json.loads(text)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(msg, dict):
+            return
+        msg_type = str(msg.get("type") or "")
+        data = msg.get("data")
+        if not isinstance(data, dict):
+            return
+        pid = data.get("prompt_id")
+        if not pid:
+            return
+        pid_str = str(pid)
+        now = time.monotonic()
+        with self._lock:
+            state = self._states.setdefault(
+                pid_str,
+                {
+                    "saw_prompt": False,
+                    "node": "",
+                    "step": None,
+                    "max_steps": None,
+                    "completed": False,
+                    "error": "",
+                    "interrupted": False,
+                    "last_activity": now,
+                },
+            )
+            if msg_type == "execution_start":
+                state["saw_prompt"] = True
+                state["last_activity"] = now
+            elif msg_type == "executing":
+                state["saw_prompt"] = True
+                node = data.get("node")
+                if node is None:
+                    state["completed"] = True
+                    state["last_activity"] = now
+                else:
+                    node_str = str(node)
+                    if state.get("node") != node_str:
+                        state["node"] = node_str
+                        state["step"] = None
+                        state["max_steps"] = None
+                    state["last_activity"] = now
+            elif msg_type == "execution_cached":
+                state["saw_prompt"] = True
+                state["last_activity"] = now
+            elif msg_type == "progress":
+                state["saw_prompt"] = True
+                if data.get("node"):
+                    state["node"] = str(data["node"])
+                try:
+                    val = int(data.get("value") or 0)
+                    mx = int(data.get("max") or 0)
+                except (TypeError, ValueError):
+                    val, mx = 0, 0
+                if mx > 0:
+                    state["step"] = val
+                    state["max_steps"] = mx
+                state["last_activity"] = now
+            elif msg_type == "progress_state":
+                state["saw_prompt"] = True
+                nodes = data.get("nodes")
+                if isinstance(nodes, dict):
+                    for n_id, n_info in nodes.items():
+                        if not isinstance(n_info, dict):
+                            continue
+                        if str(n_info.get("state") or "") == "running":
+                            state["node"] = str(n_id)
+                            try:
+                                val = int(n_info.get("value") or 0)
+                                mx = int(n_info.get("max") or 0)
+                            except (TypeError, ValueError):
+                                val, mx = 0, 0
+                            if mx > 0:
+                                state["step"] = val
+                                state["max_steps"] = mx
+                state["last_activity"] = now
+            elif msg_type == "execution_success":
+                state["saw_prompt"] = True
+                state["completed"] = True
+                state["last_activity"] = now
+            elif msg_type == "execution_interrupted":
+                state["saw_prompt"] = True
+                state["interrupted"] = True
+                state["last_activity"] = now
+            elif msg_type == "execution_error":
+                state["saw_prompt"] = True
+                detail = str(data.get("exception_message") or data.get("node_type") or "ComfyUI execution error")
+                state["error"] = detail
+                state["last_activity"] = now
+
+
+def _describe_workflow_stage(workflow: dict, node_id: str) -> tuple[str, str]:
+    """Map ComfyUI node ID to a (stage_key, Vietnamese description) pair."""
+    node = workflow.get(str(node_id)) if node_id else None
+    class_type = str(node.get("class_type") or "") if isinstance(node, dict) else ""
+    if class_type in {"KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced"}:
+        return "sample", "đang chạy trên GPU"
+    if class_type == "VAEDecode":
+        return "vae", "đang giải mã video (VAE Decode)"
+    if class_type in {"CreateVideo", "SaveVideo", "VHS_VideoCombine"}:
+        return "encode", "đang đóng gói file video"
+    if class_type:
+        return "prepare", f"đang nạp model & encode ({class_type})"
+    return "sample", "đang chạy trên GPU"
+
+
 def generate_local_image_to_video(
     comfyui_url: str,
     image_path: str,
@@ -515,7 +965,10 @@ def generate_local_image_to_video(
     wan_variant: str = WAN_VARIANT_QUALITY,
     progress: Callable[[int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
-    timeout_seconds: int = 4 * 60 * 60,
+    timeout_seconds: int | None = None,
+    stall_timeout_seconds: int | None = None,
+    verify_server: bool = True,
+    cleanup_history: bool = False,
 ) -> str:
     wan_variant = normalize_wan_variant(wan_variant)
     dmd = wan_variant == WAN_VARIANT_DMD
@@ -529,12 +982,28 @@ def generate_local_image_to_video(
     if not prompt.strip():
         raise ValueError("Prompt chuyển động local đang trống.")
     _validate_video_settings(width, height, length, steps, cfg, wan_variant)
+    effective_timeout = int(
+        timeout_seconds
+        if timeout_seconds is not None
+        else recommended_video_timeout(wan_variant, width, height, length, steps)
+    )
+    effective_timeout = max(30, effective_timeout)
+    default_stall = recommended_stall_timeout(wan_variant, width, height)
+    effective_stall = min(
+        effective_timeout,
+        max(30, int(stall_timeout_seconds if stall_timeout_seconds is not None else default_stall)),
+    )
+
     base = _base_url(comfyui_url)
     progress = progress or (lambda _value, _message: None)
     cancelled = cancelled or (lambda: False)
     variant_label = local_model_label(wan_variant)
-    progress(2, f"Đang kiểm tra ComfyUI localhost và {variant_label}…")
-    check_comfyui(base, require_default_models=not bool(workflow_path), wan_variant=wan_variant)
+    if verify_server:
+        progress(2, f"Đang kiểm tra ComfyUI localhost và {variant_label}…")
+        check_comfyui(base, require_default_models=not bool(workflow_path), wan_variant=wan_variant)
+    else:
+        progress(2, f"Đang kiểm tra kết nối ComfyUI cho {variant_label}…")
+        get_system_stats(base, timeout=15)
     _raise_if_cancelled(cancelled, base)
     progress(5, f"Đang tải ảnh {source.name} vào ComfyUI…")
     uploaded = _upload_image(base, source)
@@ -546,38 +1015,150 @@ def generate_local_image_to_video(
     _assert_local_only(workflow)
     _raise_if_cancelled(cancelled, base)
     client_id = uuid.uuid4().hex
-    response = _request_json("POST", f"{base}/prompt", {"prompt": workflow, "client_id": client_id}, timeout=60)
-    prompt_id = response.get("prompt_id")
-    if not prompt_id:
-        raise RuntimeError(f"ComfyUI không trả về prompt_id: {response}")
-    progress(8, f"Đã xếp hàng {variant_label}; đang tạo video local…")
-    started = time.monotonic()
-    while True:
-        _raise_if_cancelled(cancelled, base)
-        elapsed = time.monotonic() - started
-        if elapsed > timeout_seconds:
+    monitor = _ComfyProgressMonitor(base, client_id)
+    monitor.start()
+    prompt_id: str | None = None
+    try:
+        response = _request_json("POST", f"{base}/prompt", {"prompt": workflow, "client_id": client_id}, timeout=60)
+        prompt_id = response.get("prompt_id")
+        if not prompt_id:
+            raise RuntimeError(f"ComfyUI không trả về prompt_id: {response}")
+        monitor.set_prompt_id(str(prompt_id))
+        progress(8, f"Đã xếp hàng {variant_label}; đang tạo video local…")
+        started = time.monotonic()
+        pending_started: float | None = None
+        last_pct = 8
+        missing_queue_polls = 0
+        poll_errors = 0
+
+        def _cleanup_aborted_prompt(unload: bool = False) -> None:
             _interrupt(base)
-            raise TimeoutError("ComfyUI vượt quá thời gian chờ 4 giờ cho một video.")
-        history = _request_json("GET", f"{base}/history/{prompt_id}", timeout=30)
-        entry = history.get(prompt_id) if isinstance(history, dict) else None
-        if entry:
-            status = entry.get("status") or {}
-            status_text = str(status.get("status_str") or "").lower()
-            completed = bool(status.get("completed")) or status_text in {"success", "error", "failed"}
-            if completed:
-                if status_text not in {"", "success"}:
-                    raise RuntimeError(_history_error(entry))
-                file_info = _find_video_file(entry.get("outputs") or {})
-                if not file_info:
-                    raise RuntimeError("Workflow đã hoàn tất nhưng không tìm thấy video output. Hãy dùng node SaveVideo.")
-                progress(94, "Đang tải video từ ComfyUI về dự án…")
-                _download_output(base, file_info, Path(output_path), cancelled)
-                progress(100, f"Hoàn tất video {variant_label} local.")
-                return str(Path(output_path).resolve())
-        minutes = elapsed / 60
-        estimated = min(90, 10 + int(minutes * 4))
-        progress(estimated, f"{variant_label} đang chạy trên GPU… {minutes:.1f} phút")
-        time.sleep(2)
+            if prompt_id:
+                delete_comfyui_queue_items(base, prompt_ids=[str(prompt_id)])
+            if unload:
+                free_comfyui_memory(base, unload_models=True, free_memory=True)
+
+        while True:
+            if cancelled():
+                _cleanup_aborted_prompt(unload=False)
+                raise LocalGenerationCancelled()
+
+            now = time.monotonic()
+            elapsed = now - started
+            if elapsed > effective_timeout:
+                _cleanup_aborted_prompt(unload=True)
+                raise TimeoutError(
+                    f"ComfyUI vượt quá thời gian chờ tối đa ({max(1, round(effective_timeout / 60))} phút) cho một video."
+                )
+
+            try:
+                history = _request_json("GET", f"{base}/history/{prompt_id}", timeout=30)
+                poll_errors = 0
+            except RuntimeError as exc:
+                poll_errors += 1
+                if poll_errors >= 5:
+                    _cleanup_aborted_prompt(unload=True)
+                    raise RuntimeError(
+                        f"Mất kết nối liên tiếp tới ComfyUI trong lúc chờ render ({poll_errors} lần): {exc}"
+                    ) from exc
+                progress(
+                    last_pct,
+                    f"{variant_label}: ComfyUI đang bận, thử kết nối lại ({poll_errors}/5)…",
+                )
+                time.sleep(2)
+                continue
+
+            entry = history.get(prompt_id) if isinstance(history, dict) else None
+            if entry:
+                status = entry.get("status") or {}
+                status_text = str(status.get("status_str") or "").lower()
+                completed = bool(status.get("completed")) or status_text in {"success", "error", "failed"}
+                if completed:
+                    if status_text not in {"", "success"}:
+                        raise RuntimeError(_history_error(entry))
+                    file_info = _find_video_file(entry.get("outputs") or {})
+                    if not file_info:
+                        raise RuntimeError("Workflow đã hoàn tất nhưng không tìm thấy video output. Hãy dùng node SaveVideo.")
+                    progress(94, "Đang tải video từ ComfyUI về dự án…")
+                    _download_output(base, file_info, Path(output_path), cancelled)
+                    if cleanup_history:
+                        clear_comfyui_history(base, prompt_ids=[str(prompt_id)])
+                    progress(100, f"Hoàn tất video {variant_label} local.")
+                    return str(Path(output_path).resolve())
+
+            ws = monitor.snapshot()
+            if ws.get("error"):
+                _cleanup_aborted_prompt(unload=False)
+                raise RuntimeError(str(ws["error"]))
+            if ws.get("interrupted"):
+                _cleanup_aborted_prompt(unload=False)
+                raise RuntimeError("Tác vụ AI Local trên ComfyUI đã bị ngắt trước khi hoàn tất.")
+
+            queue_data = get_comfyui_queue(base, timeout=15)
+            is_pending = False
+            if isinstance(queue_data, dict) and (
+                "queue_running" in queue_data or "queue_pending" in queue_data
+            ):
+                running_ids, pending_ids = _extract_queue_prompt_ids(queue_data)
+                pid_str = str(prompt_id)
+                if pid_str in running_ids:
+                    missing_queue_polls = 0
+                    pending_started = None
+                elif pid_str in pending_ids:
+                    missing_queue_polls = 0
+                    is_pending = True
+                    if pending_started is None:
+                        pending_started = now
+                else:
+                    missing_queue_polls += 1
+                    if missing_queue_polls >= 3:
+                        # Final check in case history flushed between /history and /queue reads.
+                        final_hist = _request_json("GET", f"{base}/history/{prompt_id}", timeout=15)
+                        if not (isinstance(final_hist, dict) and final_hist.get(prompt_id)):
+                            raise RuntimeError(
+                                "Tác vụ đã biến mất khỏi hàng đợi ComfyUI mà không có kết quả (có thể GPU/ComfyUI vừa tự hủy hoặc gặp lỗi OOM)."
+                            )
+
+            if ws.get("saw_prompt") and not is_pending and not ws.get("completed"):
+                idle = now - float(ws.get("last_activity") or now)
+                if idle > effective_stall:
+                    _stage_k, stage_desc = _describe_workflow_stage(workflow, str(ws.get("node") or ""))
+                    _cleanup_aborted_prompt(unload=True)
+                    raise TimeoutError(
+                        f"ComfyUI bị treo quá {max(1, round(effective_stall / 60))} phút không tiến triển ({stage_desc})."
+                    )
+
+            minutes = elapsed / 60
+            if is_pending:
+                last_pct = 9
+                msg = f"{variant_label} đang chờ trong hàng đợi ComfyUI… {minutes:.1f} phút"
+            elif ws.get("saw_prompt"):
+                stage_key, stage_desc = _describe_workflow_stage(workflow, str(ws.get("node") or ""))
+                step = ws.get("step")
+                max_steps = ws.get("max_steps")
+                if stage_key == "prepare":
+                    last_pct = max(last_pct, 12)
+                    msg = f"{variant_label} {stage_desc}… {minutes:.1f} phút"
+                elif stage_key == "sample":
+                    if isinstance(step, int) and isinstance(max_steps, int) and max_steps > 0:
+                        last_pct = max(last_pct, min(82, 15 + int(65 * step / max_steps)))
+                        msg = f"{variant_label} đang chạy trên GPU (bước {step}/{max_steps})… {minutes:.1f} phút"
+                    else:
+                        last_pct = max(last_pct, min(80, 15 + int(minutes * 6)))
+                        msg = f"{variant_label} đang chạy trên GPU… {minutes:.1f} phút"
+                elif stage_key == "vae":
+                    last_pct = max(last_pct, 86)
+                    msg = f"{variant_label} {stage_desc}… {minutes:.1f} phút"
+                else:
+                    last_pct = max(last_pct, 92)
+                    msg = f"{variant_label} {stage_desc}… {minutes:.1f} phút"
+            else:
+                last_pct = min(89, 10 + int(minutes * 4))
+                msg = f"{variant_label} đang chạy trên GPU… {minutes:.1f} phút"
+            progress(last_pct, msg)
+            time.sleep(2)
+    finally:
+        monitor.close()
 
 
 def normalize_wan_variant(value: str) -> str:

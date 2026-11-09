@@ -13,13 +13,21 @@ from ai.comfyui import (
     WAN_DMD_LORA,
     WAN_MODEL,
     WAN_VARIANT_DMD,
+    WAN_VARIANT_QUALITY,
     WAN_TEXT_ENCODER,
     WAN_VAE,
+    _ComfyProgressMonitor,
     _find_video_file,
     build_hunyuan15_workflow,
     build_ltx_workflow,
     build_wan22_workflow,
+    clear_comfyui_history,
+    delete_comfyui_queue_items,
+    free_comfyui_memory,
+    generate_local_image_to_video,
     prepare_workflow,
+    recommended_stall_timeout,
+    recommended_video_timeout,
 )
 
 
@@ -140,6 +148,280 @@ class ComfyUiWorkflowTests(unittest.TestCase):
     def test_video_output_is_found_inside_comfy_history(self):
         outputs = {"12": {"videos": [{"filename": "VisualLoop.mp4", "subfolder": "video", "type": "output"}]}}
         self.assertEqual(_find_video_file(outputs)["filename"], "VisualLoop.mp4")
+
+    def test_recommended_timeouts_prevent_four_hour_dmd_hangs(self):
+        dmd_480 = recommended_video_timeout(WAN_VARIANT_DMD, 832, 480, 121, 4)
+        dmd_720 = recommended_video_timeout(WAN_VARIANT_DMD, 1280, 704, 121, 4)
+        qual_480 = recommended_video_timeout(WAN_VARIANT_QUALITY, 832, 480, 121, 20)
+        self.assertEqual(dmd_480, 1200)
+        self.assertEqual(dmd_720, 2400)
+        self.assertGreater(qual_480, dmd_480)
+        self.assertEqual(recommended_stall_timeout(WAN_VARIANT_DMD, 832, 480), 600)
+
+    def test_memory_and_history_cleanup_helpers_send_expected_payloads(self):
+        from unittest.mock import patch
+
+        calls = []
+
+        def fake_req(method, url, payload=None, timeout=30):
+            calls.append((method, url, payload))
+            return {}
+
+        with patch("ai.comfyui._request_json", side_effect=fake_req):
+            self.assertTrue(free_comfyui_memory("http://127.0.0.1:8188", unload_models=False))
+            self.assertTrue(clear_comfyui_history("http://127.0.0.1:8188", prompt_ids=["p1"]))
+            self.assertTrue(delete_comfyui_queue_items("http://127.0.0.1:8188", prompt_ids=["p2"]))
+
+        self.assertEqual(
+            calls,
+            [
+                ("POST", "http://127.0.0.1:8188/free", {"unload_models": False, "free_memory": True}),
+                ("POST", "http://127.0.0.1:8188/history", {"delete": ["p1"]}),
+                ("POST", "http://127.0.0.1:8188/queue", {"delete": ["p2"]}),
+            ],
+        )
+
+        with patch("ai.comfyui._request_json", side_effect=RuntimeError("offline")):
+            self.assertFalse(free_comfyui_memory("http://127.0.0.1:8188"))
+
+    def test_generate_fails_fast_when_prompt_disappears_from_queue(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            img = root / "in.png"
+            img.write_bytes(b"png")
+            out = root / "out.mp4"
+
+            def fake_req(method, url, payload=None, timeout=30):
+                if url.endswith("/system_stats"):
+                    return {"devices": [{"name": "TestGPU"}]}
+                if url.endswith("/prompt"):
+                    return {"prompt_id": "pid-missing"}
+                if url.endswith("/history/pid-missing"):
+                    return {}
+                if url.endswith("/queue"):
+                    return {"queue_running": [], "queue_pending": []}
+                return {}
+
+            with (
+                patch("ai.comfyui._request_json", side_effect=fake_req),
+                patch("ai.comfyui._upload_image", return_value="in.png"),
+                patch("ai.comfyui.time.sleep"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "biến mất khỏi hàng đợi"):
+                    generate_local_image_to_video(
+                        "http://127.0.0.1:8188",
+                        str(img),
+                        "a cat walking",
+                        str(out),
+                        width=832,
+                        height=480,
+                        length=49,
+                        wan_variant=WAN_VARIANT_DMD,
+                        verify_server=False,
+                    )
+
+    def test_generate_retries_transient_history_poll_errors(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            img = root / "in.png"
+            img.write_bytes(b"png")
+            out = root / "out.mp4"
+            state = {"history_calls": 0, "cleared": []}
+
+            def fake_req(method, url, payload=None, timeout=30):
+                if url.endswith("/system_stats"):
+                    return {"devices": []}
+                if url.endswith("/prompt"):
+                    return {"prompt_id": "pid-retry"}
+                if url.endswith("/queue"):
+                    return {"queue_running": [[0, "pid-retry"]], "queue_pending": []}
+                if url.endswith("/history/pid-retry"):
+                    state["history_calls"] += 1
+                    if state["history_calls"] <= 2:
+                        raise RuntimeError("timed out")
+                    return {
+                        "pid-retry": {
+                            "status": {"completed": True, "status_str": "success"},
+                            "outputs": {"12": {"videos": [{"filename": "ok.mp4", "type": "output"}]}},
+                        }
+                    }
+                if url.endswith("/history") and method == "POST":
+                    state["cleared"].append(payload)
+                return {}
+
+            def fake_dl(_base, _info, dest: Path, _cancelled):
+                dest.write_bytes(b"mp4bytes")
+
+            messages = []
+            with (
+                patch("ai.comfyui._request_json", side_effect=fake_req),
+                patch("ai.comfyui._upload_image", return_value="in.png"),
+                patch("ai.comfyui._download_output", side_effect=fake_dl),
+                patch("ai.comfyui.time.sleep"),
+            ):
+                result = generate_local_image_to_video(
+                    "http://127.0.0.1:8188",
+                    str(img),
+                    "wind in grass",
+                    str(out),
+                    width=832,
+                    height=480,
+                    length=49,
+                    wan_variant=WAN_VARIANT_DMD,
+                    progress=lambda p, m: messages.append((p, m)),
+                    verify_server=False,
+                    cleanup_history=True,
+                )
+
+            self.assertEqual(Path(result).read_bytes(), b"mp4bytes")
+            self.assertTrue(any("thử kết nối lại" in m for _p, m in messages))
+            self.assertEqual(state["cleared"], [{"delete": ["pid-retry"]}])
+
+    def test_websocket_monitor_tracks_real_steps_over_rfc6455_socket(self):
+        import base64
+        import hashlib
+        import socket
+        import threading
+
+        received_events = threading.Event()
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+
+        def ws_frame(text: str) -> bytes:
+            data = text.encode("utf-8")
+            header = bytearray([0x81])
+            if len(data) < 126:
+                header.append(len(data))
+            else:
+                header.append(126)
+                header.extend(len(data).to_bytes(2, "big"))
+            return bytes(header) + data
+
+        def serve():
+            conn, _ = srv.accept()
+            with conn:
+                req = conn.recv(4096).decode("ascii", errors="ignore")
+                key_line = [ln for ln in req.splitlines() if ln.lower().startswith("sec-websocket-key:")][0]
+                key = key_line.split(":", 1)[1].strip()
+                accept = base64.b64encode(
+                    hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+                ).decode("ascii")
+                handshake = (
+                    "HTTP/1.1 101 Switching Protocols\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+                ).encode("ascii")
+                conn.sendall(handshake)
+                conn.sendall(ws_frame(json.dumps({"type": "executing", "data": {"prompt_id": "pid-ws", "node": "9"}})))
+                conn.sendall(
+                    ws_frame(
+                        json.dumps({"type": "progress", "data": {"prompt_id": "pid-ws", "node": "9", "value": 3, "max": 4}})
+                    )
+                )
+                received_events.wait(timeout=2.0)
+
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        monitor = _ComfyProgressMonitor(f"http://127.0.0.1:{port}", "cid-1")
+        monitor.set_prompt_id("pid-ws")
+        monitor.start()
+        try:
+            import time
+
+            deadline = time.monotonic() + 2.0
+            snap = {}
+            while time.monotonic() < deadline:
+                snap = monitor.snapshot()
+                if snap.get("step") == 3 and snap.get("max_steps") == 4:
+                    break
+                time.sleep(0.02)
+            self.assertTrue(snap.get("ws_connected"))
+            self.assertTrue(snap.get("saw_prompt"))
+            self.assertEqual(snap.get("node"), "9")
+            self.assertEqual(snap.get("step"), 3)
+            self.assertEqual(snap.get("max_steps"), 4)
+        finally:
+            received_events.set()
+            monitor.close()
+            srv.close()
+
+    def test_stall_timeout_triggers_cleanup_when_ws_node_stagnates(self):
+        import time
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            img = root / "in.png"
+            img.write_bytes(b"png")
+            out = root / "out.mp4"
+
+            posts = []
+            clock = {"now": 100.0}
+
+            def fake_monotonic():
+                clock["now"] += 15.0
+                return clock["now"]
+
+            def fake_req(method, url, payload=None, timeout=30):
+                if method == "POST":
+                    posts.append((url, payload))
+                if url.endswith("/system_stats"):
+                    return {"devices": []}
+                if url.endswith("/prompt"):
+                    return {"prompt_id": "pid-stuck"}
+                if url.endswith("/history/pid-stuck"):
+                    return {}
+                if url.endswith("/queue") and method == "GET":
+                    return {"queue_running": [[0, "pid-stuck"]], "queue_pending": []}
+                return {}
+
+            stale_snap = {
+                "ws_connected": True,
+                "saw_prompt": True,
+                "node": "10",
+                "step": None,
+                "max_steps": None,
+                "completed": False,
+                "error": "",
+                "interrupted": False,
+                "last_activity": 80.0,  # Already idle well past 30s stall timeout
+            }
+
+            with (
+                patch("ai.comfyui._request_json", side_effect=fake_req),
+                patch("ai.comfyui._upload_image", return_value="in.png"),
+                patch("ai.comfyui._ComfyProgressMonitor.start"),
+                patch("ai.comfyui._ComfyProgressMonitor.close"),
+                patch("ai.comfyui._ComfyProgressMonitor.snapshot", return_value=stale_snap),
+                patch("ai.comfyui.time.monotonic", side_effect=fake_monotonic),
+                patch("ai.comfyui.time.sleep"),
+            ):
+                with self.assertRaisesRegex(TimeoutError, r"bị treo.*VAE Decode"):
+                    generate_local_image_to_video(
+                        "http://127.0.0.1:8188",
+                        str(img),
+                        "static lake",
+                        str(out),
+                        width=832,
+                        height=480,
+                        length=49,
+                        wan_variant=WAN_VARIANT_DMD,
+                        timeout_seconds=1200,
+                        stall_timeout_seconds=30,
+                        verify_server=False,
+                    )
+
+            post_urls = [u.rsplit("/", 1)[-1] for u, _p in posts]
+            self.assertIn("interrupt", post_urls)
+            self.assertIn("queue", post_urls)
+            self.assertIn("free", post_urls)
 
 
 if __name__ == "__main__":

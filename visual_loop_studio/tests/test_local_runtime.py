@@ -14,6 +14,7 @@ from ai.local_runtime import (
     LTX_DOWNLOADS,
     MODEL_DOWNLOADS,
     RUNTIME_BACKENDS,
+    LocalRuntimeManager,
     _convert_dmd_lora_for_comfyui,
     _read_safetensors_header,
     build_runtime_command,
@@ -206,6 +207,20 @@ class LocalRuntimeTests(unittest.TestCase):
             command = run.call_args.args[0]
             self.assertEqual(command[:3], [str(seven_zip.resolve()), "x", "-y"])
             self.assertIn(f"-o{(root / 'output').resolve()}", command)
+
+    def test_runtime_manager_restart_stops_without_permanent_shutdown(self):
+        mgr = LocalRuntimeManager()
+        fake_proc = SimpleNamespace(poll=lambda: None, terminate=lambda: None, wait=lambda timeout=None: 0, kill=lambda: None)
+        mgr.process = fake_proc
+        with (
+            patch("ai.local_runtime.server_ready", return_value=False),
+            patch("ai.local_runtime.is_runtime_installed", return_value=True),
+            patch.object(mgr, "ensure_running") as ensure_running,
+        ):
+            ok = mgr.restart("C:/fake_ai", "http://127.0.0.1:8188", wan_variant="dmd4")
+        self.assertTrue(ok)
+        self.assertFalse(mgr._stopping)
+        ensure_running.assert_called_once()
 
 
 if __name__ == "__main__":

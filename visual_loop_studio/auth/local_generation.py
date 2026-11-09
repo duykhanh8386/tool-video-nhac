@@ -18,12 +18,20 @@ from ai.comfyui import (
     LOCAL_MODEL_LTX,
     WAN_VARIANT_DMD,
     WAN_VARIANT_QUALITY,
-    check_comfyui,
+    LocalGenerationCancelled,
+    clear_comfyui_history,
+    free_comfyui_memory,
     generate_local_image_to_video,
+    get_comfyui_queue,
     local_model_label,
     normalize_wan_variant,
 )
-from ai.local_runtime import LocalRuntimeManager, server_ready
+from ai.local_runtime import (
+    LocalRuntimeManager,
+    default_runtime_root,
+    is_runtime_installed,
+    server_ready,
+)
 from utils.paths import CACHE_DIR, safe_filename
 from utils.process import hidden_process_kwargs
 
@@ -162,6 +170,7 @@ class LocalVideoBatchRunnerThread(QThread):
         seed: int = -1,
         ffmpeg_path: str = "ffmpeg",
         runtime_manager: LocalRuntimeManager | None = None,
+        runtime_root: str = "",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -177,6 +186,7 @@ class LocalVideoBatchRunnerThread(QThread):
         self.seed = seed
         self.ffmpeg_path = ffmpeg_path
         self.runtime_manager = runtime_manager or LocalRuntimeManager()
+        self.runtime_root = str(runtime_root or "").strip()
 
         self._stopped = False
         self._paused = False
@@ -188,15 +198,61 @@ class LocalVideoBatchRunnerThread(QThread):
         self._paused = not self._paused
         return self._paused
 
+    def _emit_log(self, text: str) -> None:
+        stamped = f"[{time.strftime('%H:%M:%S')}] {text}" if not re.match(r"^\[\d{2}:\d{2}:\d{2}\]\s", text) else text
+        self.log_signal.emit(stamped)
+
+    def _effective_runtime_root(self) -> str:
+        if self.runtime_root:
+            return self.runtime_root
+        default_root = default_runtime_root()
+        if is_runtime_installed(default_root, wan_variant=self.model_variant):
+            return str(default_root)
+        return ""
+
+    def _recover_comfyui(self, task_label: str, effective_root: str) -> None:
+        """Clear wedged queue/memory and restart managed ComfyUI if GPU worker stalled."""
+        self.worker_status_signal.emit(f"[{task_label}] Đang giải phóng VRAM & phục hồi ComfyUI...")
+        clear_comfyui_history(self.comfyui_url, clear_all=True)
+        free_comfyui_memory(self.comfyui_url, unload_models=True, free_memory=True)
+
+        queue_data = get_comfyui_queue(self.comfyui_url, timeout=8)
+        stuck_running = bool(
+            isinstance(queue_data, dict)
+            and isinstance(queue_data.get("queue_running"), list)
+            and len(queue_data.get("queue_running") or []) > 0
+        )
+        alive = server_ready(self.comfyui_url, timeout=2.0)
+
+        if (not alive or stuck_running) and effective_root:
+            try:
+                restarted = self.runtime_manager.restart(
+                    effective_root,
+                    self.comfyui_url,
+                    progress=lambda v, m: self._emit_log(f"⚙ [{v}%] {m}"),
+                    cancelled=lambda: self._stopped,
+                    wan_variant=self.model_variant,
+                )
+                if restarted:
+                    self._emit_log(f"🔄 [{task_label}] Đã khởi động lại ComfyUI thành công để giải phóng GPU bị treo.")
+            except Exception as exc:
+                self._emit_log(f"⚠ [{task_label}] Không thể khởi động lại ComfyUI tự động: {exc}")
+        elif not alive:
+            self._emit_log(f"⚠ [{task_label}] ComfyUI không phản hồi; đang chờ phục hồi trước khi thử lại...")
+
+        if not self._stopped:
+            time.sleep(2.0)
+
     def run(self) -> None:
         total_items = len(self.prompts)
         if not self.prompts:
-            self.log_signal.emit("❌ Danh sách prompt trống!")
+            self._emit_log("❌ Danh sách prompt trống!")
             self.batch_finished_signal.emit(False, "Danh sách prompt trống.")
             return
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         model_label_str = local_model_label(self.model_variant)
+        effective_root = self._effective_runtime_root()
 
         # Tính toán độ phân giải chuẩn chia hết cho 32
         res_parts = self.resolution.lower().split("x", 1)
@@ -231,13 +287,13 @@ class LocalVideoBatchRunnerThread(QThread):
             steps = 20
             cfg = 5.0
 
-        self.log_signal.emit(
+        self._emit_log(
             f"🚀 Bắt đầu Farm Video AI Local: {total_items} prompt | "
             f"Model: {model_label_str} | Kích thước: {width}×{height} ({self.aspect_ratio}) | "
             f"Thời lượng: {self.duration_seconds}s ({length} frames) | Số bước: {steps} steps (CFG {cfg})"
         )
         if not (self.source_image_path and Path(self.source_image_path).is_file()):
-            self.log_signal.emit("✨ Đang bật tự động khử frame đen: Video sẽ bắt đầu ngay từ khung hình sắc nét.")
+            self._emit_log("✨ Đang bật tự động khử frame đen: Video sẽ bắt đầu ngay từ khung hình sắc nét.")
 
         completed_count = 0
         failed_count = 0
@@ -247,72 +303,140 @@ class LocalVideoBatchRunnerThread(QThread):
         # 1. Kiểm tra kết nối ComfyUI
         self.worker_status_signal.emit("Kiểm tra ComfyUI...")
         if not server_ready(self.comfyui_url):
-            self.log_signal.emit(f"⚙ ComfyUI chưa phản hồi tại {self.comfyui_url}. Đang cố gắng khởi chạy tự động...")
+            self._emit_log(f"⚙ ComfyUI chưa phản hồi tại {self.comfyui_url}. Đang cố gắng khởi chạy tự động...")
             try:
                 self.runtime_manager.ensure_running(
-                    "",
+                    effective_root,
                     self.comfyui_url,
-                    progress=lambda v, m: self.log_signal.emit(f"⚙ [{v}%] {m}"),
+                    progress=lambda v, m: self._emit_log(f"⚙ [{v}%] {m}"),
                     cancelled=lambda: self._stopped,
                     wan_variant=self.model_variant,
                 )
             except Exception as e:
-                self.log_signal.emit(f"❌ Không thể khởi chạy ComfyUI tự động: {e}")
+                self._emit_log(f"❌ Không thể khởi chạy ComfyUI tự động: {e}")
                 self.batch_finished_signal.emit(False, f"Lỗi ComfyUI: {e}")
                 return
 
-        # 2. Tạo thư mục tạm
+        # 2. Tạo thư mục tạm và chuẩn bị ảnh nền dùng chung cho prompt_only
         temp_work_dir = Path(tempfile.mkdtemp(prefix="local_farm_", dir=CACHE_DIR))
+        shared_canvas_path: str | None = None
+        batch_verified = False
 
         try:
             for idx, prompt_text in enumerate(self.prompts, start=1):
                 if self._stopped:
-                    self.log_signal.emit("⏹ Người dùng đã yêu cầu dừng tác vụ.")
+                    self._emit_log("⏹ Người dùng đã yêu cầu dừng tác vụ.")
                     break
 
                 while self._paused and not self._stopped:
                     self.worker_status_signal.emit("Tạm dừng")
                     time.sleep(1.0)
 
+                if self._stopped:
+                    self._emit_log("⏹ Người dùng đã yêu cầu dừng tác vụ.")
+                    break
+
                 task_label = f"#{idx}/{total_items}"
                 self.worker_status_signal.emit(f"Đang tạo {task_label}...")
-                self.log_signal.emit(f"📝 [{task_label}] Bắt đầu render prompt: '{prompt_text[:70]}...'")
+                self._emit_log(f"📝 [{task_label}] Bắt đầu render prompt: '{prompt_text[:70]}...'")
 
                 start_task_time = time.monotonic()
+                is_canvas_fallback = not (self.source_image_path and Path(self.source_image_path).is_file())
+                raw_output = temp_work_dir / f"raw_output_{idx}.mp4"
 
                 try:
-                    # Chuẩn bị ảnh đầu vào
-                    is_canvas_fallback = not (self.source_image_path and Path(self.source_image_path).is_file())
                     if not is_canvas_fallback:
                         active_image = self.source_image_path
                     else:
-                        canvas_file = temp_work_dir / f"canvas_{idx}.png"
-                        active_image = str(create_neutral_canvas_image(width, height, canvas_file))
+                        if not shared_canvas_path or not Path(shared_canvas_path).is_file():
+                            canvas_file = temp_work_dir / f"canvas_neutral_{width}x{height}.png"
+                            shared_canvas_path = str(create_neutral_canvas_image(width, height, canvas_file))
+                        active_image = shared_canvas_path
 
-                    raw_output = temp_work_dir / f"raw_output_{idx}.mp4"
+                    generated_file: str | None = None
+                    last_error: Exception | None = None
+                    max_attempts = 2
 
-                    # Tiến hành tạo video qua ComfyUI
-                    def on_render_progress(val: int, msg: str):
-                        self.worker_status_signal.emit(f"[{task_label}] {val}%: {msg}")
-                        if val % 25 == 0 or "đang chạy trên GPU" in msg:
-                            self.log_signal.emit(f"⏳ [{task_label}] ({val}%): {msg}")
+                    for attempt in range(1, max_attempts + 1):
+                        if self._stopped:
+                            raise LocalGenerationCancelled()
 
-                    generated_file = generate_local_image_to_video(
-                        comfyui_url=self.comfyui_url,
-                        image_path=active_image,
-                        prompt=prompt_text,
-                        output_path=str(raw_output),
-                        width=width,
-                        height=height,
-                        length=length,
-                        steps=steps,
-                        cfg=cfg,
-                        seed=None if self.seed < 0 else self.seed,
-                        negative_prompt=self.negative_prompt,
-                        wan_variant=self.model_variant,
-                        progress=on_render_progress,
-                        cancelled=lambda: self._stopped,
-                    )
+                        last_log_ts = 0.0
+                        last_milestone = -1
+                        last_stage_sig = ""
+
+                        def on_render_progress(val: int, msg: str):
+                            nonlocal last_log_ts, last_milestone, last_stage_sig
+                            self.worker_status_signal.emit(f"[{task_label}] {val}%: {msg}")
+                            now = time.monotonic()
+                            stage_sig = re.sub(r"\d+(?:\.\d+)?\s*phút|\(\d+/\d+\)", "", msg).strip()
+                            milestone = val // 25
+                            important_msg = any(
+                                kw in msg
+                                for kw in (
+                                    "Hoàn tất",
+                                    "giải mã video",
+                                    "đóng gói",
+                                    "hàng đợi",
+                                    "thử kết nối",
+                                )
+                            )
+                            stage_changed = stage_sig != last_stage_sig
+                            should_log = (
+                                val == 100
+                                or important_msg and stage_changed
+                                or (milestone > last_milestone and val > 0)
+                                or (now - last_log_ts >= 20.0)
+                            )
+                            if should_log:
+                                last_log_ts = now
+                                last_milestone = max(last_milestone, milestone)
+                                last_stage_sig = stage_sig
+                                prefix = f"⏳ [{task_label}]" if attempt == 1 else f"⏳ [{task_label} • Lần {attempt}]"
+                                self._emit_log(f"{prefix} ({val}%): {msg}")
+
+                        try:
+                            generated_file = generate_local_image_to_video(
+                                comfyui_url=self.comfyui_url,
+                                image_path=active_image,
+                                prompt=prompt_text,
+                                output_path=str(raw_output),
+                                width=width,
+                                height=height,
+                                length=length,
+                                steps=steps,
+                                cfg=cfg,
+                                seed=None if self.seed < 0 else self.seed,
+                                negative_prompt=self.negative_prompt,
+                                wan_variant=self.model_variant,
+                                progress=on_render_progress,
+                                cancelled=lambda: self._stopped,
+                                verify_server=(not batch_verified or attempt > 1),
+                                cleanup_history=True,
+                            )
+                            batch_verified = True
+                            break
+                        except LocalGenerationCancelled:
+                            raise
+                        except ValueError:
+                            raise
+                        except Exception as exc:
+                            last_error = exc
+                            if attempt < max_attempts and not self._stopped:
+                                self._emit_log(
+                                    f"⚠ [{task_label}] Lần {attempt} gặp sự cố: {exc}. "
+                                    "Đang dọn VRAM ComfyUI và thử lại tự động..."
+                                )
+                                self._recover_comfyui(task_label, effective_root)
+                                batch_verified = False
+                                while self._paused and not self._stopped:
+                                    self.worker_status_signal.emit("Tạm dừng")
+                                    time.sleep(1.0)
+                                continue
+                            raise
+
+                    if not generated_file:
+                        raise last_error or RuntimeError("Không tạo được file video local.")
 
                     # Cắt chuẩn xác thời lượng và loại bỏ frame đen đầu nếu là canvas trống
                     stem_name = safe_filename(f"local_{idx:03d}_{prompt_text[:35]}", default_prefix="local")
@@ -337,15 +461,34 @@ class LocalVideoBatchRunnerThread(QThread):
                     self.progress_signal.emit(pct, f"Hoàn thành {completed_count}/{total_items} video")
                     self.video_completed_signal.emit(prompt_text, str(final_output))
 
-                    self.log_signal.emit(
+                    self._emit_log(
                         f"✔ [{task_label}] Thành công ({render_duration}s)! Đã lưu: {final_output.name}"
                     )
 
+                    # Bảo trì VRAM ComfyUI giữa các clip để chạy dài 600+ video không bị tràn sang RAM/Pagefile
+                    if render_duration >= 240 or (completed_count % 30 == 0):
+                        self._emit_log(
+                            "🧹 Dọn bộ nhớ đệm & sắp xếp lại VRAM ComfyUI để tránh treo GPU khi farm dài..."
+                        )
+                        clear_comfyui_history(self.comfyui_url, clear_all=True)
+                        free_comfyui_memory(self.comfyui_url, unload_models=True, free_memory=True)
+                    else:
+                        free_comfyui_memory(self.comfyui_url, unload_models=False, free_memory=True)
+
+                except LocalGenerationCancelled:
+                    self._emit_log(f"⏹ [{task_label}] Đã hủy tác vụ hiện tại theo yêu cầu.")
+                    break
                 except Exception as e:
                     failed_count += 1
                     remaining = total_items - (completed_count + failed_count)
+                    pct = int((completed_count + failed_count) / total_items * 100)
                     self.stats_signal.emit(total_items, completed_count, failed_count, remaining)
-                    self.log_signal.emit(f"❌ [{task_label}] Lỗi khi render video: {e}")
+                    self.progress_signal.emit(pct, f"Hoàn thành {completed_count}/{total_items} video (Lỗi: {failed_count})")
+                    self._emit_log(f"❌ [{task_label}] Lỗi khi render video: {e}")
+                    free_comfyui_memory(self.comfyui_url, unload_models=True, free_memory=True)
+                    batch_verified = False
+                finally:
+                    raw_output.unlink(missing_ok=True)
 
                 time.sleep(1.0)
 

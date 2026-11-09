@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import threading
 import time
@@ -36,7 +37,7 @@ from ai.comfyui import (
     check_comfyui,
     local_model_label,
 )
-from ai.local_runtime import LocalRuntimeManager, server_ready
+from ai.local_runtime import LocalRuntimeManager, default_runtime_root, is_runtime_installed, server_ready
 from auth.local_generation import LocalVideoBatchRunnerThread
 from models.settings_model import AppSettings
 
@@ -47,6 +48,7 @@ class LocalStudioPage(QWidget):
     """
 
     settings_changed = Signal()
+    _bg_log_signal = Signal(str)
 
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
@@ -54,6 +56,7 @@ class LocalStudioPage(QWidget):
         self.runner_thread: LocalVideoBatchRunnerThread | None = None
         self.runtime_manager = LocalRuntimeManager()
 
+        self._bg_log_signal.connect(self._append_log)
         self._build_ui()
         self._check_comfyui_status(silent=True)
 
@@ -353,6 +356,7 @@ class LocalStudioPage(QWidget):
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(1500)
         self.log_view.setMinimumHeight(170)
         self.log_view.setStyleSheet(
             "background: #0f172a; color: #e2e8f0; font-family: Consolas, monospace; font-size: 12px; border-radius: 6px; padding: 6px;"
@@ -365,9 +369,24 @@ class LocalStudioPage(QWidget):
     # HÀM XỬ LÝ LOG & THÔNG BÁO
     # -------------------------------------------------------------------------
     def _append_log(self, text: str) -> None:
-        t_str = time.strftime("%H:%M:%S")
-        self.log_view.appendPlainText(f"[{t_str}] {text}")
-        self.log_view.ensureCursorVisible()
+        sb = self.log_view.verticalScrollBar()
+        at_bottom = sb.value() >= max(0, sb.maximum() - 4)
+        if re.match(r"^\[\d{2}:\d{2}:\d{2}\]\s", text):
+            line = text
+        else:
+            line = f"[{time.strftime('%H:%M:%S')}] {text}"
+        self.log_view.appendPlainText(line)
+        if at_bottom:
+            sb.setValue(sb.maximum())
+
+    def _effective_runtime_root(self, model_val: str) -> str:
+        configured = str(getattr(self.settings, "local_ai_root", "") or "").strip()
+        if configured:
+            return configured
+        default_root = default_runtime_root()
+        if is_runtime_installed(default_root, wan_variant=model_val):
+            return str(default_root)
+        return ""
 
     def _clear_log(self) -> None:
         self.log_view.clear()
@@ -444,6 +463,7 @@ class LocalStudioPage(QWidget):
     def _start_comfyui_server(self) -> None:
         url = self.url_edit.text().strip()
         model_val = self.model_combo.currentData() or WAN_VARIANT_DMD
+        runtime_root = self._effective_runtime_root(model_val)
         self._append_log("⚙ Đang kiểm tra và khởi động ComfyUI Local Server...")
         self.status_badge.setText("🟡 Đang khởi động...")
         self.status_badge.setStyleSheet("font-weight: 700; color: #d97706; padding: 2px 6px;")
@@ -451,15 +471,15 @@ class LocalStudioPage(QWidget):
         def runner():
             try:
                 self.runtime_manager.ensure_running(
-                    "",
+                    runtime_root,
                     url,
-                    progress=lambda v, m: self._append_log(f"⚙ ComfyUI [{v}%]: {m}"),
+                    progress=lambda v, m: self._bg_log_signal.emit(f"⚙ ComfyUI [{v}%]: {m}"),
                     wan_variant=model_val,
                 )
-                self._append_log("🟢 ComfyUI Server đã sẵn sàng phục vụ!")
+                self._bg_log_signal.emit("🟢 ComfyUI Server đã sẵn sàng phục vụ!")
                 self._check_comfyui_status(silent=True)
             except Exception as e:
-                self._append_log(f"❌ Lỗi khởi động ComfyUI: {e}")
+                self._bg_log_signal.emit(f"❌ Lỗi khởi động ComfyUI: {e}")
                 self._check_comfyui_status(silent=True)
 
         threading.Thread(target=runner, daemon=True).start()
@@ -572,6 +592,7 @@ class LocalStudioPage(QWidget):
             source_image_path=source_img,
             ffmpeg_path=self.settings.ffmpeg_path,
             runtime_manager=self.runtime_manager,
+            runtime_root=self._effective_runtime_root(model_val),
             parent=self,
         )
 
@@ -620,3 +641,13 @@ class LocalStudioPage(QWidget):
             QMessageBox.information(self, "Hoàn tất", msg)
         else:
             QMessageBox.warning(self, "Thông báo", msg)
+
+    @property
+    def busy(self) -> bool:
+        return bool(self.runner_thread and self.runner_thread.isRunning())
+
+    def shutdown(self) -> None:
+        if self.runner_thread and self.runner_thread.isRunning():
+            self.runner_thread.stop()
+            self.runner_thread.wait(3000)
+        self.runtime_manager.stop()
