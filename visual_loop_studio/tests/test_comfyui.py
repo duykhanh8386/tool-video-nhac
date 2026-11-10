@@ -423,6 +423,125 @@ class ComfyUiWorkflowTests(unittest.TestCase):
             self.assertIn("queue", post_urls)
             self.assertIn("free", post_urls)
 
+    def test_pending_timeout_deletes_prompt_and_fails_before_full_video_timeout(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            img = root / "in.png"
+            img.write_bytes(b"png")
+            out = root / "out.mp4"
+
+            posts = []
+            clock = {"now": 100.0}
+
+            def fake_monotonic():
+                clock["now"] += 20.0
+                return clock["now"]
+
+            def fake_req(method, url, payload=None, timeout=30):
+                if method == "POST":
+                    posts.append((url.rsplit("/", 1)[-1], payload))
+                if url.endswith("/system_stats"):
+                    return {"devices": []}
+                if url.endswith("/prompt"):
+                    return {"prompt_id": "pid-pending"}
+                if url.endswith("/history/pid-pending"):
+                    return {}
+                if url.endswith("/queue") and method == "GET":
+                    return {"queue_running": [[0, "other-dead"]], "queue_pending": [[1, "pid-pending"]]}
+                return {}
+
+            with (
+                patch("ai.comfyui._request_json", side_effect=fake_req),
+                patch("ai.comfyui._upload_image", return_value="in.png"),
+                patch("ai.comfyui._ComfyProgressMonitor.start"),
+                patch("ai.comfyui._ComfyProgressMonitor.close"),
+                patch("ai.comfyui._ComfyProgressMonitor.snapshot", return_value={"ws_connected": True}),
+                patch("ai.comfyui.time.monotonic", side_effect=fake_monotonic),
+                patch("ai.comfyui.time.sleep"),
+            ):
+                with self.assertRaisesRegex(TimeoutError, "hàng đợi ComfyUI"):
+                    generate_local_image_to_video(
+                        "http://127.0.0.1:8188",
+                        str(img),
+                        "pending prompt",
+                        str(out),
+                        width=832,
+                        height=480,
+                        length=49,
+                        wan_variant=WAN_VARIANT_DMD,
+                        timeout_seconds=1200,
+                        stall_timeout_seconds=600,
+                        pending_timeout_seconds=30,
+                        verify_server=False,
+                    )
+
+            self.assertIn(("queue", {"delete": ["pid-pending"]}), posts)
+            self.assertNotIn("interrupt", [name for name, _payload in posts])
+            self.assertLess(clock["now"], 300.0)
+
+    def test_running_stall_triggers_without_saw_prompt_when_ws_connected(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            img = root / "in.png"
+            img.write_bytes(b"png")
+            out = root / "out.mp4"
+
+            posts = []
+            clock = {"now": 100.0}
+
+            def fake_monotonic():
+                clock["now"] += 20.0
+                return clock["now"]
+
+            def fake_req(method, url, payload=None, timeout=30):
+                if method == "POST":
+                    posts.append(url.rsplit("/", 1)[-1])
+                if url.endswith("/system_stats"):
+                    return {"devices": []}
+                if url.endswith("/prompt"):
+                    return {"prompt_id": "pid-silent-hang"}
+                if url.endswith("/history/pid-silent-hang"):
+                    return {}
+                if url.endswith("/queue") and method == "GET":
+                    return {"queue_running": [[0, "pid-silent-hang"]], "queue_pending": []}
+                return {}
+
+            with (
+                patch("ai.comfyui._request_json", side_effect=fake_req),
+                patch("ai.comfyui._upload_image", return_value="in.png"),
+                patch("ai.comfyui._ComfyProgressMonitor.start"),
+                patch("ai.comfyui._ComfyProgressMonitor.close"),
+                patch("ai.comfyui._ComfyProgressMonitor.snapshot", return_value={"ws_connected": True, "saw_prompt": False}),
+                patch("ai.comfyui.time.monotonic", side_effect=fake_monotonic),
+                patch("ai.comfyui.time.sleep"),
+            ):
+                with self.assertRaisesRegex(TimeoutError, r"bị treo.*bước đầu tiên"):
+                    generate_local_image_to_video(
+                        "http://127.0.0.1:8188",
+                        str(img),
+                        "stalled init",
+                        str(out),
+                        width=832,
+                        height=480,
+                        length=49,
+                        wan_variant=WAN_VARIANT_DMD,
+                        timeout_seconds=1200,
+                        stall_timeout_seconds=30,
+                        verify_server=False,
+                    )
+
+            self.assertIn("interrupt", posts)
+            self.assertIn("queue", posts)
+            self.assertIn("free", posts)
+
+    def test_monitor_wait_ready_is_noop_when_thread_not_started(self):
+        monitor = _ComfyProgressMonitor("http://127.0.0.1:8188", "cid-noop")
+        self.assertFalse(monitor.wait_ready(timeout=2.0))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,6 +44,7 @@ from ui.youtube_accounts import YouTubeAccountsPage
 from playlist_ai import PlaylistStudioPage
 from ui.movoa_studio import MovoaStudioPage
 from ui.local_studio import LocalStudioPage
+from ai.local_runtime import LocalRuntimeManager
 from auth.license_manager import get_license_manager
 from ui.license_dialog import LicenseDialog
 from utils.config import load_settings, save_settings, write_json
@@ -109,8 +110,9 @@ class MainWindow(QMainWindow):
         side.addWidget(version)
         root.addWidget(sidebar)
         self.pages = QStackedWidget()
+        self.local_runtime = LocalRuntimeManager()
         self.home = HomePage()
-        self.visual = VisualCreatorPage(self.settings)
+        self.visual = VisualCreatorPage(self.settings, runtime_manager=self.local_runtime)
         self.loop = LoopMusicPage(self.settings)
         self.audio = AudioMixerPage(self.settings)
         self.batch = BatchRenderPage(self.settings)
@@ -119,7 +121,7 @@ class MainWindow(QMainWindow):
         self.muse_accounts = MuseAccountsPage(self.settings)
         self.playlist_studio = PlaylistStudioPage(self.settings)
         self.movoa_studio = MovoaStudioPage(self.settings)
-        self.local_studio = LocalStudioPage(self.settings)
+        self.local_studio = LocalStudioPage(self.settings, runtime_manager=self.local_runtime)
         for page in (
             self.home, self.visual, self.loop, self.audio, self.batch, self.ai_batch,
             self.youtube_accounts, self.muse_accounts, self.playlist_studio, self.movoa_studio,
@@ -277,8 +279,8 @@ class MainWindow(QMainWindow):
             self.muse_accounts.shutdown()
             self.playlist_studio.shutdown()
             self.movoa_studio.shutdown()
-        self.visual.local_runtime.stop()
         self.local_studio.shutdown()
+        self.visual.local_runtime.stop()
         self.ai_batch.shutdown()
         self.youtube_accounts.shutdown()
         self.muse_accounts.shutdown()

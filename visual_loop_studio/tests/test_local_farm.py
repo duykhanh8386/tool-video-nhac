@@ -202,6 +202,117 @@ class LocalFarmBatchStabilityTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_preflight_queue_check_recovers_wedged_comfyui_before_submitting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out_dir = tmp_path / "out"
+            dummy_video = tmp_path / "dummy.mp4"
+            dummy_video.write_bytes(b"fake_mp4")
+
+            runtime_mgr = MagicMock()
+            runtime_mgr.restart.return_value = True
+
+            runner = LocalVideoBatchRunnerThread(
+                prompts=["Prompt one"],
+                output_dir=out_dir,
+                comfyui_url="http://127.0.0.1:8188",
+                model_variant="dmd4",
+                resolution="832x480",
+                duration_seconds=5,
+                runtime_manager=runtime_mgr,
+                runtime_root=str(tmp_path / "rt"),
+            )
+
+            queue_responses = [
+                {"queue_running": [[0, "old-dead-prompt"]], "queue_pending": []},
+                {"queue_running": [[0, "old-dead-prompt"]], "queue_pending": []},
+                {"queue_running": [[0, "old-dead-prompt"]], "queue_pending": []},
+                {"queue_running": [], "queue_pending": []},
+            ]
+            seen_calls = []
+
+            def fake_generate(**kwargs):
+                seen_calls.append(kwargs)
+                return str(dummy_video)
+
+            stats_list = []
+            runner.stats_signal.connect(lambda t, c, f, r: stats_list.append((t, c, f, r)))
+
+            with (
+                patch("auth.local_generation.server_ready", return_value=True),
+                patch("auth.local_generation.get_comfyui_queue", side_effect=lambda *_a, **_kw: queue_responses.pop(0) if queue_responses else {"queue_running": [], "queue_pending": []}),
+                patch("auth.local_generation.interrupt_comfyui") as mock_interrupt,
+                patch("auth.local_generation.free_comfyui_memory", return_value=True),
+                patch("auth.local_generation.clear_comfyui_history", return_value=True),
+                patch("auth.local_generation.generate_local_image_to_video", side_effect=fake_generate),
+                patch("auth.local_generation.conform_video_duration", side_effect=lambda src, dst, **kw: dst.write_bytes(b"final") or dst),
+                patch("auth.local_generation.time.sleep"),
+            ):
+                runner.run()
+
+            self.assertTrue(mock_interrupt.called)
+            runtime_mgr.restart.assert_called_once()
+            self.assertTrue(runtime_mgr.restart.call_args.kwargs.get("force"))
+            self.assertEqual(len(seen_calls), 1)
+            self.assertEqual(seen_calls[0].get("pending_timeout_seconds"), 180)
+            self.assertEqual(stats_list[-1], (1, 1, 0, 0))
+
+    def test_batch_aborts_when_queue_running_stays_unrecoverably_wedged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out_dir = tmp_path / "out"
+
+            runtime_mgr = MagicMock()
+            runtime_mgr.restart.return_value = False
+
+            runner = LocalVideoBatchRunnerThread(
+                prompts=[f"Prompt {i}" for i in range(5)],
+                output_dir=out_dir,
+                comfyui_url="http://127.0.0.1:8188",
+                model_variant="dmd4",
+                resolution="832x480",
+                duration_seconds=5,
+                runtime_manager=runtime_mgr,
+                runtime_root=str(tmp_path / "rt"),
+            )
+
+            finished_events = []
+            stats_list = []
+            runner.batch_finished_signal.connect(lambda ok, msg: finished_events.append((ok, msg)))
+            runner.stats_signal.connect(lambda t, c, f, r: stats_list.append((t, c, f, r)))
+
+            with (
+                patch("auth.local_generation.server_ready", return_value=True),
+                patch("auth.local_generation.get_comfyui_queue", return_value={"queue_running": [[0, "wedged-forever"]], "queue_pending": []}),
+                patch("auth.local_generation.interrupt_comfyui"),
+                patch("auth.local_generation.free_comfyui_memory", return_value=True),
+                patch("auth.local_generation.clear_comfyui_history", return_value=True),
+                patch("auth.local_generation.generate_local_image_to_video") as mock_gen,
+                patch("auth.local_generation.time.sleep"),
+            ):
+                runner.run()
+
+            mock_gen.assert_not_called()
+            self.assertEqual(stats_list[-1], (5, 0, 1, 4))
+            self.assertEqual(len(finished_events), 1)
+            self.assertFalse(finished_events[0][0])
+            self.assertIn("queue_running", finished_events[0][1])
+
+    def test_local_studio_page_accepts_shared_runtime_manager(self):
+        from PySide6.QtWidgets import QApplication
+        from ai.local_runtime import LocalRuntimeManager
+        from ui.local_studio import LocalStudioPage
+
+        app = QApplication.instance() or QApplication([])
+        self.assertIsNotNone(app)
+        shared_mgr = LocalRuntimeManager()
+        with patch.object(LocalStudioPage, "_check_comfyui_status"):
+            page = LocalStudioPage(AppSettings(), runtime_manager=shared_mgr)
+        try:
+            self.assertIs(page.runtime_manager, shared_mgr)
+        finally:
+            page.close()
+
 
 if __name__ == "__main__":
     unittest.main()

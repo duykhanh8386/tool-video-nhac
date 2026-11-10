@@ -23,6 +23,7 @@ from ai.comfyui import (
     free_comfyui_memory,
     generate_local_image_to_video,
     get_comfyui_queue,
+    interrupt_comfyui,
     local_model_label,
     normalize_wan_variant,
 )
@@ -30,6 +31,8 @@ from ai.local_runtime import (
     LocalRuntimeManager,
     default_runtime_root,
     is_runtime_installed,
+    parse_localhost_url,
+    resolve_runtime_root,
     server_ready,
 )
 from utils.paths import CACHE_DIR, safe_filename
@@ -143,6 +146,10 @@ def conform_video_duration(
     return output_path
 
 
+class _FatalComfyUIWedgedError(RuntimeError):
+    """Raised when ComfyUI queue_running stays wedged and cannot be cleared/restarted."""
+
+
 class LocalVideoBatchRunnerThread(QThread):
     """Luồng xử lý farm hàng loạt video AI Local chạy trực tiếp qua ComfyUI (Wan / LTX / Hunyuan).
     Không cần đăng nhập tài khoản hay cookie, tối ưu tốc độ nhanh nhất có thể.
@@ -205,43 +212,98 @@ class LocalVideoBatchRunnerThread(QThread):
     def _effective_runtime_root(self) -> str:
         if self.runtime_root:
             return self.runtime_root
-        default_root = default_runtime_root()
-        if is_runtime_installed(default_root, wan_variant=self.model_variant):
-            return str(default_root)
-        return ""
+        return resolve_runtime_root(
+            "",
+            wan_variant=self.model_variant,
+            base_url=self.comfyui_url,
+        )
 
-    def _recover_comfyui(self, task_label: str, effective_root: str) -> None:
-        """Clear wedged queue/memory and restart managed ComfyUI if GPU worker stalled."""
+    def _inspect_queue_state(self, timeout: int = 8) -> tuple[bool, bool]:
+        queue_data = get_comfyui_queue(self.comfyui_url, timeout=timeout)
+        if not isinstance(queue_data, dict):
+            return False, False
+        running = queue_data.get("queue_running") or []
+        pending = queue_data.get("queue_pending") or []
+        return (
+            bool(isinstance(running, list) and len(running) > 0),
+            bool(isinstance(pending, list) and len(pending) > 0),
+        )
+
+    def _recover_comfyui(
+        self,
+        task_label: str,
+        effective_root: str,
+        *,
+        force_restart: bool = False,
+    ) -> bool:
+        """Clear wedged queue/memory and restart localhost ComfyUI if GPU worker stalled."""
         self.worker_status_signal.emit(f"[{task_label}] Đang giải phóng VRAM & phục hồi ComfyUI...")
+        interrupt_comfyui(self.comfyui_url)
         clear_comfyui_history(self.comfyui_url, clear_all=True)
         free_comfyui_memory(self.comfyui_url, unload_models=True, free_memory=True)
 
-        queue_data = get_comfyui_queue(self.comfyui_url, timeout=8)
-        stuck_running = bool(
-            isinstance(queue_data, dict)
-            and isinstance(queue_data.get("queue_running"), list)
-            and len(queue_data.get("queue_running") or []) > 0
-        )
+        stuck_running, stuck_pending = self._inspect_queue_state(timeout=8)
         alive = server_ready(self.comfyui_url, timeout=2.0)
 
-        if (not alive or stuck_running) and effective_root:
+        restart_root = effective_root or self._effective_runtime_root()
+        is_local_url, _port = parse_localhost_url(self.comfyui_url)
+        should_restart = bool(force_restart or not alive or stuck_running or stuck_pending)
+        restarted = False
+
+        if should_restart and (restart_root or is_local_url):
             try:
                 restarted = self.runtime_manager.restart(
-                    effective_root,
+                    restart_root,
                     self.comfyui_url,
                     progress=lambda v, m: self._emit_log(f"⚙ [{v}%] {m}"),
                     cancelled=lambda: self._stopped,
                     wan_variant=self.model_variant,
+                    force=True,
                 )
                 if restarted:
                     self._emit_log(f"🔄 [{task_label}] Đã khởi động lại ComfyUI thành công để giải phóng GPU bị treo.")
+                else:
+                    self._emit_log(
+                        f"⚠ [{task_label}] Không thể tự khởi động lại tiến trình ComfyUI đang chạy tại {self.comfyui_url}."
+                    )
             except Exception as exc:
                 self._emit_log(f"⚠ [{task_label}] Không thể khởi động lại ComfyUI tự động: {exc}")
         elif not alive:
             self._emit_log(f"⚠ [{task_label}] ComfyUI không phản hồi; đang chờ phục hồi trước khi thử lại...")
 
+        if self._stopped:
+            return False
+
+        time.sleep(2.0)
+        post_running, _post_pending = self._inspect_queue_state(timeout=8)
+        if restarted:
+            return not post_running
+        if post_running:
+            return False
+        return bool(alive or server_ready(self.comfyui_url, timeout=2.0))
+
+    def _ensure_comfyui_clear_before_submit(self, task_label: str, effective_root: str) -> None:
+        stuck_running, _stuck_pending = self._inspect_queue_state(timeout=8)
+        if not stuck_running:
+            return
+        self._emit_log(
+            f"⚠ [{task_label}] Phát hiện ComfyUI vẫn còn tác vụ đang chạy/kẹt trong hàng đợi (queue_running). "
+            "Đang ngắt & phục hồi ComfyUI trước khi gửi prompt..."
+        )
+        interrupt_comfyui(self.comfyui_url)
         if not self._stopped:
             time.sleep(2.0)
+        stuck_running, _ = self._inspect_queue_state(timeout=8)
+        if not stuck_running:
+            return
+        recovered = self._recover_comfyui(task_label, effective_root, force_restart=True)
+        if not recovered:
+            still_running, _ = self._inspect_queue_state(timeout=8)
+            if still_running:
+                raise _FatalComfyUIWedgedError(
+                    "ComfyUI đang bị treo ở hàng đợi chạy (queue_running) và không thể tự khởi động lại. "
+                    "Đã dừng hàng đợi để tránh xếp chờ các prompt còn lại; hãy khởi động lại ComfyUI rồi chạy tiếp."
+                )
 
     def run(self) -> None:
         total_items = len(self.prompts)
@@ -321,6 +383,7 @@ class LocalVideoBatchRunnerThread(QThread):
         temp_work_dir = Path(tempfile.mkdtemp(prefix="local_farm_", dir=CACHE_DIR))
         shared_canvas_path: str | None = None
         batch_verified = False
+        aborted_reason = ""
 
         try:
             for idx, prompt_text in enumerate(self.prompts, start=1):
@@ -396,6 +459,7 @@ class LocalVideoBatchRunnerThread(QThread):
                                 self._emit_log(f"{prefix} ({val}%): {msg}")
 
                         try:
+                            self._ensure_comfyui_clear_before_submit(task_label, effective_root)
                             generated_file = generate_local_image_to_video(
                                 comfyui_url=self.comfyui_url,
                                 image_path=active_image,
@@ -411,11 +475,14 @@ class LocalVideoBatchRunnerThread(QThread):
                                 wan_variant=self.model_variant,
                                 progress=on_render_progress,
                                 cancelled=lambda: self._stopped,
+                                pending_timeout_seconds=180,
                                 verify_server=(not batch_verified or attempt > 1),
                                 cleanup_history=True,
                             )
                             batch_verified = True
                             break
+                        except _FatalComfyUIWedgedError:
+                            raise
                         except LocalGenerationCancelled:
                             raise
                         except ValueError:
@@ -478,6 +545,15 @@ class LocalVideoBatchRunnerThread(QThread):
                 except LocalGenerationCancelled:
                     self._emit_log(f"⏹ [{task_label}] Đã hủy tác vụ hiện tại theo yêu cầu.")
                     break
+                except _FatalComfyUIWedgedError as exc:
+                    failed_count += 1
+                    remaining = total_items - (completed_count + failed_count)
+                    pct = int((completed_count + failed_count) / total_items * 100)
+                    self.stats_signal.emit(total_items, completed_count, failed_count, remaining)
+                    self.progress_signal.emit(pct, f"Đã dừng do ComfyUI treo (Lỗi: {failed_count})")
+                    self._emit_log(f"🛑 [{task_label}] {exc}")
+                    aborted_reason = str(exc)
+                    break
                 except Exception as e:
                     failed_count += 1
                     remaining = total_items - (completed_count + failed_count)
@@ -497,6 +573,11 @@ class LocalVideoBatchRunnerThread(QThread):
 
         if self._stopped:
             self.batch_finished_signal.emit(False, f"Đã dừng tác vụ. Hoàn thành {completed_count}/{total_items}.")
+        elif aborted_reason:
+            self.batch_finished_signal.emit(
+                False,
+                f"{aborted_reason} (Thành công: {completed_count}/{total_items}, Lỗi: {failed_count})",
+            )
         else:
             self.batch_finished_signal.emit(
                 True, f"Đã hoàn thành farm video AI Local! Thành công: {completed_count}/{total_items}."

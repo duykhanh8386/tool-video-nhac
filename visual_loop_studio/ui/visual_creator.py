@@ -20,7 +20,8 @@ from ai.comfyui import (
 from ai.google_vids_web import GOOGLE_VIDS_PROFILE_DIR, google_vids_profile_ready
 from ai.local_runtime import (
     LocalRuntimeManager, default_runtime_root, detect_runtime_backend,
-    is_runtime_installed, required_free_bytes, server_ready, validate_local_model_backend,
+    is_runtime_installed, required_free_bytes, resolve_runtime_root, server_ready,
+    validate_local_model_backend,
 )
 from models.settings_model import AppSettings
 from models.visual_project import (
@@ -57,13 +58,18 @@ TEXT_ANIMATION_OPTIONS = [
 class VisualCreatorPage(QWidget):
     settings_changed = Signal()
 
-    def __init__(self, settings: AppSettings, parent=None):
+    def __init__(
+        self,
+        settings: AppSettings,
+        runtime_manager: LocalRuntimeManager | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.settings = settings
         self.worker = RenderWorker(self)
         self.ai_worker = AiVideoWorker(self)
         self.google_vids_worker = GoogleVidsWorker(self)
-        self.local_runtime = LocalRuntimeManager()
+        self.local_runtime = runtime_manager or LocalRuntimeManager()
         self.local_ai_worker = LocalAiVideoWorker(self.local_runtime, self)
         self.local_setup_worker = LocalAiSetupWorker(self)
         self.elements = default_element_layouts()
@@ -1706,8 +1712,13 @@ class VisualCreatorPage(QWidget):
         self.ai_status.setText("Đã dừng cài AI Local. File tải dở được giữ để tiếp tục lần sau.")
 
     def _auto_start_local_ai(self) -> None:
+        effective_root = resolve_runtime_root(
+            self.settings.local_ai_root,
+            wan_variant=self._selected_wan_variant(),
+            base_url=self.settings.comfyui_url,
+        )
         if not self.settings.local_ai_auto_start or not is_runtime_installed(
-            self.settings.local_ai_root, wan_variant=self._selected_wan_variant()
+            effective_root, wan_variant=self._selected_wan_variant()
         ):
             return
         if self.local_ai_worker.running or self.local_ai_worker.checking or server_ready(self.settings.comfyui_url):
@@ -1718,7 +1729,7 @@ class VisualCreatorPage(QWidget):
             self.local_ai_worker.check(
                 self.settings.comfyui_url,
                 self.settings.comfyui_workflow,
-                self.settings.local_ai_root,
+                effective_root,
                 self._selected_wan_variant(),
             )
         except Exception:

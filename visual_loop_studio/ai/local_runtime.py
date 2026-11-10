@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import threading
@@ -370,6 +371,208 @@ def default_runtime_root() -> Path:
     return USER_DATA_ROOT / "ai_runtime"
 
 
+def default_runtime_candidates() -> tuple[Path, ...]:
+    return (USER_DATA_ROOT / "VisualLoopStudio_AI", default_runtime_root())
+
+
+def parse_localhost_url(base_url: str) -> tuple[bool, int]:
+    """Return (is_localhost, port) for a ComfyUI base URL."""
+    parsed = urlparse(_normalized_url(base_url))
+    host = (parsed.hostname or "").strip().lower()
+    is_local = host in {"127.0.0.1", "localhost", "::1"}
+    port = parsed.port or (443 if parsed.scheme == "https" else 8188)
+    return is_local, port
+
+
+def has_portable_comfyui(install_root: str | Path) -> bool:
+    """Return True when python_embeded/python.exe and ComfyUI/main.py exist under install_root."""
+    if not str(install_root or "").strip():
+        return False
+    try:
+        paths = runtime_paths(install_root)
+        return Path(paths["python"]).is_file() and Path(paths["main"]).is_file()
+    except OSError:
+        return False
+
+
+def _extract_install_root_from_process(executable_path: str, command_line: str) -> str:
+    """Infer VisualLoopStudio AI root (or portable directory) from a running ComfyUI process."""
+    candidates: list[Path] = []
+    if executable_path:
+        exe = Path(executable_path)
+        if exe.parent.name.lower() == "python_embeded":
+            candidates.append(exe.parent.parent)
+    for pattern in (
+        r'["\']?([A-Za-z]:[^"\'\r\n]+?)[\\/]python_embeded[\\/]pythonw?\.exe',
+        r'["\']?([A-Za-z]:[^"\'\r\n]+?)[\\/]ComfyUI[\\/]main\.py',
+    ):
+        match = re.search(pattern, command_line or "", flags=re.IGNORECASE)
+        if match:
+            candidates.append(Path(match.group(1)))
+    for portable in candidates:
+        root = portable.parent if portable.name.lower() == "comfyui_windows_portable" else portable
+        if has_portable_comfyui(root):
+            return str(root)
+    return ""
+
+
+def _listening_tcp_pids(port: int) -> set[int]:
+    """Return PIDs listening on the given TCP port (Windows netstat, locale-safe)."""
+    if os.name != "nt" or port <= 0:
+        return set()
+    try:
+        res = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+            **hidden_process_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if res.returncode != 0:
+        return set()
+    pids: set[int] = set()
+    suffix = f":{int(port)}"
+    for line in (res.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP":
+            continue
+        local_addr = parts[1]
+        remote_addr = parts[2]
+        pid_token = parts[-1]
+        if not local_addr.endswith(suffix) or not pid_token.isdigit():
+            continue
+        if parts[3].upper() in {"LISTENING", "LISTEN"} or remote_addr.endswith(":0"):
+            pid = int(pid_token)
+            if pid > 0:
+                pids.add(pid)
+    return pids
+
+
+def _find_localhost_comfyui_processes(port: int) -> list[dict[str, str | int]]:
+    """Inspect running localhost ComfyUI python processes matching the target port."""
+    if os.name != "nt":
+        return []
+    listening = _listening_tcp_pids(port)
+    ps_script = (
+        "Get-CimInstance Win32_Process | Where-Object { "
+        "$_.Name -match '^python' -and $_.CommandLine -match 'ComfyUI' -and $_.CommandLine -match 'main\\.py' "
+        "} | Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+    )
+    try:
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+            **hidden_process_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    raw = (res.stdout or "").strip()
+    if res.returncode != 0 or not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    rows = [parsed] if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
+    self_pid = os.getpid()
+    matches: list[dict[str, str | int]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            pid = int(row.get("ProcessId") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0 or pid == self_pid:
+            continue
+        exe_path = str(row.get("ExecutablePath") or "")
+        cmd_line = str(row.get("CommandLine") or "")
+        port_match = re.search(r"--port(?:=|\s+)(\d+)", cmd_line, flags=re.IGNORECASE)
+        cmd_port = int(port_match.group(1)) if port_match else 8188
+        if listening:
+            if pid not in listening and not (port_match and cmd_port == port):
+                continue
+        elif cmd_port != port:
+            continue
+        matches.append(
+            {
+                "pid": pid,
+                "executable_path": exe_path,
+                "command_line": cmd_line,
+                "install_root": _extract_install_root_from_process(exe_path, cmd_line),
+            }
+        )
+    return matches
+
+
+def _kill_pid_tree(pid: int) -> bool:
+    """Forcibly terminate a process (and its child tree on Windows)."""
+    pid_int = int(pid)
+    if pid_int <= 0 or pid_int == os.getpid():
+        return False
+    if os.name == "nt":
+        try:
+            res = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid_int)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+                **hidden_process_kwargs(),
+            )
+            return res.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+    try:
+        os.kill(pid_int, signal.SIGKILL)
+        return True
+    except OSError:
+        return False
+
+
+def resolve_runtime_root(
+    configured_root: str = "",
+    *,
+    wan_variant: str = WAN_VARIANT_QUALITY,
+    base_url: str = "",
+) -> str:
+    """Resolve an installed AI Local runtime directory from config, standard folders, or active ComfyUI."""
+    configured = str(configured_root or "").strip()
+    if configured and (
+        is_runtime_installed(configured, wan_variant=wan_variant) or has_portable_comfyui(configured)
+    ):
+        return configured
+    for candidate in default_runtime_candidates():
+        if is_runtime_installed(candidate, wan_variant=wan_variant):
+            return str(candidate)
+    for candidate in default_runtime_candidates():
+        if has_portable_comfyui(candidate):
+            return str(candidate)
+    if base_url:
+        is_local, port = parse_localhost_url(base_url)
+        if is_local:
+            for proc in _find_localhost_comfyui_processes(port):
+                proc_root = str(proc.get("install_root") or "").strip()
+                if proc_root:
+                    return proc_root
+    return configured
+
+
 def portable_dir(install_root: str | Path) -> Path:
     root = Path(install_root).expanduser().resolve()
     candidates = (root / "ComfyUI_windows_portable", root)
@@ -692,6 +895,24 @@ class LocalRuntimeManager:
                 "AI Local chưa được cài đầy đủ (thiếu: " + missing + "). "
                 "Bấm ‘Cài AI Local tự động’ trong phần Chuyển động AI."
             )
+        self._launch_managed_process(
+            install_root,
+            base_url,
+            progress=progress,
+            cancelled=cancelled,
+            timeout=timeout,
+            wan_variant=wan_variant,
+        )
+
+    def _launch_managed_process(
+        self,
+        install_root: str,
+        base_url: str,
+        progress: Callable[[int, str], None],
+        cancelled: Callable[[], bool],
+        timeout: int,
+        wan_variant: str,
+    ) -> None:
         with self._lock:
             if self._stopping:
                 raise RuntimeInstallCancelled("Ứng dụng đang đóng; không khởi động ComfyUI.")
@@ -740,9 +961,25 @@ class LocalRuntimeManager:
             try:
                 process.wait(timeout=12)
             except subprocess.TimeoutExpired:
+                pid = getattr(process, "pid", None)
+                if pid:
+                    _kill_pid_tree(int(pid))
                 process.kill()
                 process.wait(timeout=5)
         self._close_log()
+
+    @staticmethod
+    def _terminate_localhost_comfyui(port: int) -> tuple[bool, str]:
+        """Find and forcibly kill any localhost ComfyUI process bound to port."""
+        killed_any = False
+        discovered_root = ""
+        for proc in _find_localhost_comfyui_processes(port):
+            if not discovered_root:
+                discovered_root = str(proc.get("install_root") or "").strip()
+            pid = int(proc.get("pid") or 0)
+            if pid > 0 and _kill_pid_tree(pid):
+                killed_any = True
+        return killed_any, discovered_root
 
     def restart(
         self,
@@ -752,6 +989,7 @@ class LocalRuntimeManager:
         cancelled: Callable[[], bool] | None = None,
         timeout: int = 240,
         wan_variant: str = WAN_VARIANT_QUALITY,
+        force: bool = False,
     ) -> bool:
         progress = progress or (lambda _value, _message: None)
         cancelled = cancelled or (lambda: False)
@@ -767,19 +1005,54 @@ class LocalRuntimeManager:
                 if cancelled():
                     raise RuntimeInstallCancelled("Đã hủy khởi động lại AI Local.")
                 time.sleep(0.5)
-        elif server_ready(base_url, timeout=1.0):
-            return False
-        if not is_runtime_installed(install_root, wan_variant=wan_variant):
-            return False
-        self.ensure_running(
-            install_root,
-            base_url,
-            progress=progress,
-            cancelled=cancelled,
-            timeout=timeout,
-            wan_variant=wan_variant,
+
+        discovered_root = ""
+        if server_ready(base_url, timeout=1.0):
+            if not force:
+                return False
+            is_local, port = parse_localhost_url(base_url)
+            if not is_local:
+                return False
+            progress(0, "Phát hiện ComfyUI localhost đang kẹt tiến trình cũ; đang buộc dừng để khởi động lại…")
+            _killed, discovered_root = self._terminate_localhost_comfyui(port)
+            deadline = time.monotonic() + 10.0
+            still_up = server_ready(base_url, timeout=0.5)
+            while still_up and time.monotonic() < deadline:
+                if cancelled():
+                    raise RuntimeInstallCancelled("Đã hủy khởi động lại AI Local.")
+                time.sleep(0.5)
+                still_up = server_ready(base_url, timeout=0.5)
+            if still_up:
+                return False
+
+        effective_root = (
+            str(install_root or "").strip()
+            or discovered_root
+            or resolve_runtime_root(install_root, wan_variant=wan_variant, base_url=base_url)
         )
-        return True
+        if not effective_root:
+            return False
+        if is_runtime_installed(effective_root, wan_variant=wan_variant):
+            self.ensure_running(
+                effective_root,
+                base_url,
+                progress=progress,
+                cancelled=cancelled,
+                timeout=timeout,
+                wan_variant=wan_variant,
+            )
+            return True
+        if force and has_portable_comfyui(effective_root):
+            self._launch_managed_process(
+                effective_root,
+                base_url,
+                progress=progress,
+                cancelled=cancelled,
+                timeout=timeout,
+                wan_variant=wan_variant,
+            )
+            return True
+        return False
 
     def _close_log(self) -> None:
         if self._log_stream:

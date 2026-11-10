@@ -37,7 +37,13 @@ from ai.comfyui import (
     check_comfyui,
     local_model_label,
 )
-from ai.local_runtime import LocalRuntimeManager, default_runtime_root, is_runtime_installed, server_ready
+from ai.local_runtime import (
+    LocalRuntimeManager,
+    default_runtime_root,
+    is_runtime_installed,
+    resolve_runtime_root,
+    server_ready,
+)
 from auth.local_generation import LocalVideoBatchRunnerThread
 from models.settings_model import AppSettings
 
@@ -50,11 +56,16 @@ class LocalStudioPage(QWidget):
     settings_changed = Signal()
     _bg_log_signal = Signal(str)
 
-    def __init__(self, settings: AppSettings, parent=None) -> None:
+    def __init__(
+        self,
+        settings: AppSettings,
+        runtime_manager: LocalRuntimeManager | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.settings = settings
         self.runner_thread: LocalVideoBatchRunnerThread | None = None
-        self.runtime_manager = LocalRuntimeManager()
+        self.runtime_manager = runtime_manager or LocalRuntimeManager()
 
         self._bg_log_signal.connect(self._append_log)
         self._build_ui()
@@ -381,12 +392,8 @@ class LocalStudioPage(QWidget):
 
     def _effective_runtime_root(self, model_val: str) -> str:
         configured = str(getattr(self.settings, "local_ai_root", "") or "").strip()
-        if configured:
-            return configured
-        default_root = default_runtime_root()
-        if is_runtime_installed(default_root, wan_variant=model_val):
-            return str(default_root)
-        return ""
+        url = self.url_edit.text().strip() if hasattr(self, "url_edit") else ""
+        return resolve_runtime_root(configured, wan_variant=model_val, base_url=url)
 
     def _clear_log(self) -> None:
         self.log_view.clear()

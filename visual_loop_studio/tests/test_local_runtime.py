@@ -222,6 +222,84 @@ class LocalRuntimeTests(unittest.TestCase):
         self.assertFalse(mgr._stopping)
         ensure_running.assert_called_once()
 
+    def test_runtime_manager_force_restart_kills_unmanaged_localhost_comfyui(self):
+        mgr = LocalRuntimeManager()
+        mgr.process = None
+        with (
+            patch("ai.local_runtime.server_ready", side_effect=[True, False]),
+            patch.object(mgr, "_terminate_localhost_comfyui", return_value=(True, "C:/discovered_ai")) as terminate_fn,
+            patch("ai.local_runtime.is_runtime_installed", return_value=True),
+            patch.object(mgr, "ensure_running") as ensure_running,
+        ):
+            ok = mgr.restart("", "http://127.0.0.1:8188", wan_variant="dmd4", force=True)
+        self.assertTrue(ok)
+        terminate_fn.assert_called_once_with(8188)
+        ensure_running.assert_called_once()
+        self.assertEqual(ensure_running.call_args.args[0], "C:/discovered_ai")
+
+    def test_runtime_manager_restart_requires_force_and_never_kills_remote_host(self):
+        mgr = LocalRuntimeManager()
+        mgr.process = None
+        with (
+            patch("ai.local_runtime.server_ready", return_value=True),
+            patch.object(mgr, "_terminate_localhost_comfyui") as terminate_fn,
+        ):
+            self.assertFalse(mgr.restart("C:/fake_ai", "http://127.0.0.1:8188", wan_variant="dmd4", force=False))
+            self.assertFalse(mgr.restart("C:/fake_ai", "http://192.168.1.50:8188", wan_variant="dmd4", force=True))
+        terminate_fn.assert_not_called()
+
+    def test_resolve_runtime_root_prefers_existing_visualloopstudio_ai_dir(self):
+        from ai.local_runtime import resolve_runtime_root
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            ai_dir = root / "VisualLoopStudio_AI"
+            paths = runtime_paths(ai_dir)
+            paths["python"].parent.mkdir(parents=True)
+            paths["python"].write_bytes(b"exe")
+            paths["main"].parent.mkdir(parents=True)
+            paths["main"].write_text("# comfy", encoding="utf-8")
+            with patch("ai.local_runtime.USER_DATA_ROOT", root):
+                resolved = resolve_runtime_root("", wan_variant="dmd4", base_url="http://127.0.0.1:8188")
+            self.assertEqual(Path(resolved).resolve(), ai_dir.resolve())
+
+    def test_find_localhost_comfyui_processes_matches_port_and_extracts_root(self):
+        from ai.local_runtime import _find_localhost_comfyui_processes
+
+        with tempfile.TemporaryDirectory() as folder:
+            ai_dir = Path(folder) / "VisualLoopStudio_AI"
+            paths = runtime_paths(ai_dir)
+            paths["python"].parent.mkdir(parents=True)
+            paths["python"].write_bytes(b"exe")
+            paths["main"].parent.mkdir(parents=True)
+            paths["main"].write_text("# comfy", encoding="utf-8")
+
+            cim_rows = [
+                {
+                    "ProcessId": 4321,
+                    "ExecutablePath": str(paths["python"]),
+                    "CommandLine": r".\python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build",
+                },
+                {
+                    "ProcessId": 9999,
+                    "ExecutablePath": str(paths["python"]),
+                    "CommandLine": r".\python_embeded\python.exe -s ComfyUI\main.py --port 8199",
+                },
+            ]
+            with (
+                patch("ai.local_runtime.os.name", "nt"),
+                patch("ai.local_runtime._listening_tcp_pids", return_value={4321}),
+                patch(
+                    "ai.local_runtime.subprocess.run",
+                    return_value=SimpleNamespace(returncode=0, stdout=json.dumps(cim_rows)),
+                ),
+            ):
+                found = _find_localhost_comfyui_processes(8188)
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["pid"], 4321)
+        self.assertEqual(Path(str(found[0]["install_root"])).resolve(), ai_dir.resolve())
+
 
 if __name__ == "__main__":
     unittest.main()

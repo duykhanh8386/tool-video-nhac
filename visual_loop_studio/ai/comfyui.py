@@ -551,6 +551,21 @@ def get_comfyui_queue(base_url: str, timeout: int = 15) -> dict | None:
         return None
 
 
+def get_comfyui_queue_ids(base_url: str, timeout: int = 15) -> tuple[set[str], set[str]] | None:
+    """Return (running_prompt_ids, pending_prompt_ids), or None when ComfyUI is unreachable."""
+    queue_data = get_comfyui_queue(base_url, timeout=timeout)
+    if not isinstance(queue_data, dict):
+        return None
+    if "queue_running" not in queue_data and "queue_pending" not in queue_data:
+        return None
+    return _extract_queue_prompt_ids(queue_data)
+
+
+def interrupt_comfyui(base_url: str) -> None:
+    """Best-effort request to interrupt the currently active ComfyUI prompt."""
+    _interrupt(_base_url(base_url))
+
+
 def _extract_queue_prompt_ids(queue_data: dict) -> tuple[set[str], set[str]]:
     running: set[str] = set()
     pending: set[str] = set()
@@ -644,6 +659,7 @@ class _ComfyProgressMonitor:
         self.base_url = _base_url(base_url)
         self.client_id = client_id
         self._stop = threading.Event()
+        self._ready_event = threading.Event()
         self._lock = threading.Lock()
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
@@ -656,12 +672,21 @@ class _ComfyProgressMonitor:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def wait_ready(self, timeout: float = 1.5) -> bool:
+        """Wait briefly for the WebSocket handshake so early execution events are not missed."""
+        if self._thread is None:
+            return False
+        self._ready_event.wait(timeout=max(0.0, float(timeout)))
+        with self._lock:
+            return self._connected
+
     def set_prompt_id(self, prompt_id: str) -> None:
         with self._lock:
             self._prompt_id = str(prompt_id)
 
     def close(self) -> None:
         self._stop.set()
+        self._ready_event.set()
         with self._lock:
             sock = self._sock
             self._sock = None
@@ -733,6 +758,7 @@ class _ComfyProgressMonitor:
             self._buffer = bytearray(rest)
             with self._lock:
                 self._connected = True
+            self._ready_event.set()
 
             fragments: list[bytes] = []
             while not self._stop.is_set():
@@ -764,6 +790,7 @@ class _ComfyProgressMonitor:
         except OSError:
             pass
         finally:
+            self._ready_event.set()
             with self._lock:
                 sock = self._sock
                 self._sock = None
@@ -967,6 +994,7 @@ def generate_local_image_to_video(
     cancelled: Callable[[], bool] | None = None,
     timeout_seconds: int | None = None,
     stall_timeout_seconds: int | None = None,
+    pending_timeout_seconds: int | None = None,
     verify_server: bool = True,
     cleanup_history: bool = False,
 ) -> str:
@@ -993,6 +1021,13 @@ def generate_local_image_to_video(
         effective_timeout,
         max(30, int(stall_timeout_seconds if stall_timeout_seconds is not None else default_stall)),
     )
+    effective_pending = min(
+        effective_timeout,
+        max(
+            30,
+            int(pending_timeout_seconds if pending_timeout_seconds is not None else min(effective_stall, 600)),
+        ),
+    )
 
     base = _base_url(comfyui_url)
     progress = progress or (lambda _value, _message: None)
@@ -1017,6 +1052,7 @@ def generate_local_image_to_video(
     client_id = uuid.uuid4().hex
     monitor = _ComfyProgressMonitor(base, client_id)
     monitor.start()
+    monitor.wait_ready(timeout=1.5)
     prompt_id: str | None = None
     try:
         response = _request_json("POST", f"{base}/prompt", {"prompt": workflow, "client_id": client_id}, timeout=60)
@@ -1027,6 +1063,7 @@ def generate_local_image_to_video(
         progress(8, f"Đã xếp hàng {variant_label}; đang tạo video local…")
         started = time.monotonic()
         pending_started: float | None = None
+        running_started: float | None = None
         last_pct = 8
         missing_queue_polls = 0
         poll_errors = 0
@@ -1104,11 +1141,20 @@ def generate_local_image_to_video(
                 if pid_str in running_ids:
                     missing_queue_polls = 0
                     pending_started = None
+                    if running_started is None:
+                        running_started = now
                 elif pid_str in pending_ids:
                     missing_queue_polls = 0
                     is_pending = True
                     if pending_started is None:
                         pending_started = now
+                    elif (now - pending_started) > effective_pending:
+                        delete_comfyui_queue_items(base, prompt_ids=[pid_str])
+                        pending_mins = max(1, round((now - pending_started) / 60))
+                        raise TimeoutError(
+                            f"Tác vụ {variant_label} đang chờ trong hàng đợi ComfyUI quá {pending_mins} phút "
+                            "(tác vụ trước trên GPU có thể đã bị treo)."
+                        )
                 else:
                     missing_queue_polls += 1
                     if missing_queue_polls >= 3:
@@ -1127,6 +1173,17 @@ def generate_local_image_to_video(
                     raise TimeoutError(
                         f"ComfyUI bị treo quá {max(1, round(effective_stall / 60))} phút không tiến triển ({stage_desc})."
                     )
+            elif (
+                ws.get("ws_connected")
+                and not is_pending
+                and not ws.get("completed")
+                and running_started is not None
+                and (now - running_started) > effective_stall
+            ):
+                _cleanup_aborted_prompt(unload=True)
+                raise TimeoutError(
+                    f"ComfyUI bị treo quá {max(1, round(effective_stall / 60))} phút không khởi chạy bước đầu tiên trên GPU."
+                )
 
             minutes = elapsed / 60
             if is_pending:
