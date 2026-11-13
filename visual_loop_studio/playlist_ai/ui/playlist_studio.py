@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSpinBox,
     QSplitter,
@@ -37,6 +39,7 @@ from playlist_ai.core.file_namer import ConflictResolution
 from playlist_ai.core.job_queue import JobQueueManager, JobState, PlaylistBatchRunner
 from playlist_ai.core.prompt_parser import MappedItem, parse_and_map_prompts
 from playlist_ai.core.track_scanner import TrackInfo, scan_mp3_folder
+from playlist_ai.core.youtube_thumb import DEFAULT_MASTER_VISUALIZER_PROMPT
 from playlist_ai.providers.base import CookieExpiredError, IProvider, ProviderError
 from playlist_ai.providers.muse_provider import MuseProvider
 from playlist_ai.providers.wan_provider import WanProvider
@@ -225,18 +228,39 @@ class PlaylistStudioPage(QWidget):
 
         left_layout.addWidget(folder_box)
 
-        # 2. Ô nhập Prompt & Ghép nối
-        prompt_box = QGroupBox("✍ 2. Danh sách Prompt & Ghép bài hát")
+        # 2. Phương thức Tạo Video & Prompt
+        prompt_box = QGroupBox("✨ 2. Phương thức Tạo Video & Master Prompt")
         prompt_layout = QVBoxLayout(prompt_box)
-        prompt_layout.setSpacing(8)
+        prompt_layout.setSpacing(10)
+
+        # Chuyển đổi chế độ
+        mode_btn_group = QButtonGroup(self)
+        self.radio_mode_auto = QRadioButton("🌐 Tự động tải Thumbnail YouTube + Master Prompt (Không cần nhập prompt)")
+        self.radio_mode_auto.setStyleSheet("font-weight: bold; color: #0f172a;")
+        self.radio_mode_manual = QRadioButton("✍ Nhập Prompt thủ công từng bài (Chế độ tùy biến)")
+        self.radio_mode_manual.setStyleSheet("color: #475569;")
+        mode_btn_group.addButton(self.radio_mode_auto)
+        mode_btn_group.addButton(self.radio_mode_manual)
+
+        is_auto_mode = bool(getattr(self.settings, "playlist_auto_youtube_thumb", True))
+        if is_auto_mode:
+            self.radio_mode_auto.setChecked(True)
+        else:
+            self.radio_mode_manual.setChecked(True)
+
+        self.radio_mode_auto.toggled.connect(self._on_prompt_mode_changed)
+        self.radio_mode_manual.toggled.connect(self._on_prompt_mode_changed)
+
+        prompt_layout.addWidget(self.radio_mode_auto)
+        prompt_layout.addWidget(self.radio_mode_manual)
 
         # Counter badge
         counter_row = QHBoxLayout()
-        counter_lbl_title = QLabel("Mỗi dòng 1 prompt:")
-        counter_lbl_title.setStyleSheet("font-weight: 500;")
-        counter_row.addWidget(counter_lbl_title)
+        self.counter_lbl_title = QLabel("Trạng thái ghép:")
+        self.counter_lbl_title.setStyleSheet("font-weight: 500;")
+        counter_row.addWidget(self.counter_lbl_title)
 
-        self.prompt_counter_lbl = QLabel("0 prompt / 0 bài")
+        self.prompt_counter_lbl = QLabel("0 bài")
         self.prompt_counter_lbl.setStyleSheet(
             "background: #e2e8f0; color: #1e293b; padding: 2px 8px; border-radius: 10px; font-weight: bold; font-size: 11px;"
         )
@@ -244,17 +268,62 @@ class PlaylistStudioPage(QWidget):
         counter_row.addStretch()
         prompt_layout.addLayout(counter_row)
 
+        # === PANEL A: Tự động tải YouTube + Master Prompt ===
+        self.auto_yt_panel = QWidget()
+        auto_yt_layout = QVBoxLayout(self.auto_yt_panel)
+        auto_yt_layout.setContentsMargins(0, 0, 0, 0)
+        auto_yt_layout.setSpacing(8)
+
+        info_box = QLabel(
+            "💡 <b>Chế độ tự động thông minh:</b> Không cần nhập prompt thủ công. "
+            "Tool sẽ tự động tìm kiếm từng bài hát trên YouTube theo tên bài trong thư mục MP3, "
+            "tải thumbnail gốc đẹp nhất về lưu theo tên bài hát, và gửi kèm Master Prompt chuẩn Visualizer "
+            "lên AI (Muse AI / Wan 2.2) để tạo video chuyển động tương ứng."
+        )
+        info_box.setWordWrap(True)
+        info_box.setStyleSheet(
+            "color: #0369a1; background: #f0f9ff; padding: 8px 10px; border-radius: 6px; font-size: 11px; border: 1px solid #bae6fd;"
+        )
+        auto_yt_layout.addWidget(info_box)
+
+        master_header_row = QHBoxLayout()
+        master_header_row.addWidget(QLabel("Khung Master Prompt gửi AI:"))
+        btn_reset_master = QPushButton("↺ Khôi phục Prompt gốc")
+        btn_reset_master.setStyleSheet("font-size: 11px; padding: 2px 8px;")
+        btn_reset_master.clicked.connect(self._reset_default_master_prompt)
+        master_header_row.addStretch()
+        master_header_row.addWidget(btn_reset_master)
+        auto_yt_layout.addLayout(master_header_row)
+
+        self.master_prompt_edit = QPlainTextEdit()
+        saved_master = getattr(self.settings, "playlist_master_prompt", "") or DEFAULT_MASTER_VISUALIZER_PROMPT
+        self.master_prompt_edit.setPlainText(saved_master)
+        self.master_prompt_edit.setMinimumHeight(125)
+        self.master_prompt_edit.textChanged.connect(self._on_prompts_changed)
+        auto_yt_layout.addWidget(self.master_prompt_edit)
+
+        prompt_layout.addWidget(self.auto_yt_panel)
+
+        # === PANEL B: Nhập Prompt thủ công (Chế độ nâng cao) ===
+        self.manual_prompt_panel = QWidget()
+        manual_layout = QVBoxLayout(self.manual_prompt_panel)
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+        manual_layout.setSpacing(8)
+
+        manual_hint = QLabel("Mỗi dòng 1 prompt tương ứng với 1 bài hát MP3:")
+        manual_hint.setStyleSheet("font-weight: 500;")
+        manual_layout.addWidget(manual_hint)
+
         self.prompts_edit = QPlainTextEdit()
         self.prompts_edit.setPlaceholderText(
             "Ví dụ:\n"
             "cozy coffee shop in rain, neon lights, lo-fi aesthetic\n"
             "sunset over misty mountain, peaceful river, soft golden hour\n"
-            "night city drive, bokeh reflections, anime style\n"
             "(Mỗi dòng ứng với 1 bài hát theo thứ tự số/tên file)"
         )
-        self.prompts_edit.setMinimumHeight(130)
+        self.prompts_edit.setMinimumHeight(110)
         self.prompts_edit.textChanged.connect(self._on_prompts_changed)
-        prompt_layout.addWidget(self.prompts_edit)
+        manual_layout.addWidget(self.prompts_edit)
 
         # Tùy chọn lệch số lượng
         mismatch_row = QHBoxLayout()
@@ -266,12 +335,12 @@ class PlaylistStudioPage(QWidget):
         self.mismatch_combo.setCurrentIndex(1 if saved_mismatch == "last" else 0)
         self.mismatch_combo.currentIndexChanged.connect(self._on_prompts_changed)
         mismatch_row.addWidget(self.mismatch_combo, 1)
-        prompt_layout.addLayout(mismatch_row)
+        manual_layout.addLayout(mismatch_row)
 
         self.mismatch_warn_lbl = QLabel("")
         self.mismatch_warn_lbl.setStyleSheet("color: #b45309; font-size: 11px; font-weight: bold;")
         self.mismatch_warn_lbl.setVisible(False)
-        prompt_layout.addWidget(self.mismatch_warn_lbl)
+        manual_layout.addWidget(self.mismatch_warn_lbl)
 
         # Template chèn Title vào Prompt
         template_group = QGroupBox("Chèn Title bài hát vào Prompt")
@@ -301,7 +370,12 @@ class PlaylistStudioPage(QWidget):
         tmpl_hint.setStyleSheet("color: #64748b; font-size: 11px;")
         template_group_layout.addWidget(tmpl_hint)
 
-        prompt_layout.addWidget(template_group)
+        manual_layout.addWidget(template_group)
+        prompt_layout.addWidget(self.manual_prompt_panel)
+
+        self.auto_yt_panel.setVisible(is_auto_mode)
+        self.manual_prompt_panel.setVisible(not is_auto_mode)
+
         left_layout.addWidget(prompt_box)
 
         # 3. Chọn AI & Cấu hình Video
@@ -570,11 +644,73 @@ class PlaylistStudioPage(QWidget):
     def _on_prompts_changed(self) -> None:
         self._update_mapping()
 
+    def _on_prompt_mode_changed(self) -> None:
+        is_auto = self.radio_mode_auto.isChecked() if hasattr(self, "radio_mode_auto") else True
+        if hasattr(self, "auto_yt_panel"):
+            self.auto_yt_panel.setVisible(is_auto)
+        if hasattr(self, "manual_prompt_panel"):
+            self.manual_prompt_panel.setVisible(not is_auto)
+        setattr(self.settings, "playlist_auto_youtube_thumb", is_auto)
+        self.settings_changed.emit()
+        self._update_mapping()
+
+    def _reset_default_master_prompt(self) -> None:
+        if hasattr(self, "master_prompt_edit"):
+            self.master_prompt_edit.setPlainText(DEFAULT_MASTER_VISUALIZER_PROMPT)
+            setattr(self.settings, "playlist_master_prompt", DEFAULT_MASTER_VISUALIZER_PROMPT)
+            self.settings_changed.emit()
+            self._update_mapping()
+
     def _on_template_toggled(self, checked: bool) -> None:
         self.template_edit.setEnabled(checked)
         self._update_mapping()
 
     def _update_mapping(self) -> None:
+        is_auto = self.radio_mode_auto.isChecked() if hasattr(self, "radio_mode_auto") else True
+
+        if is_auto:
+            if hasattr(self, "mismatch_warn_lbl"):
+                self.mismatch_warn_lbl.setVisible(False)
+            master_prompt = (
+                self.master_prompt_edit.toPlainText().strip()
+                if hasattr(self, "master_prompt_edit")
+                else ""
+            ) or DEFAULT_MASTER_VISUALIZER_PROMPT
+
+            self.mapped_items = []
+            for track in self.tracks:
+                self.mapped_items.append(
+                    MappedItem(
+                        index=track.index,
+                        track=track,
+                        raw_prompt="[YouTube Thumbnail Auto]",
+                        final_prompt=master_prompt,
+                        is_looped=False,
+                    )
+                )
+
+            total_tracks = len(self.tracks)
+            if total_tracks > 0:
+                self.prompt_counter_lbl.setText(
+                    f"✔ {total_tracks}/{total_tracks} bài (Tự động tải Thumbnail YouTube & Master Prompt)"
+                )
+                self.prompt_counter_lbl.setStyleSheet(
+                    "background: #dcfce7; color: #166534; padding: 2px 8px; border-radius: 10px; font-weight: bold; font-size: 11px;"
+                )
+            else:
+                self.prompt_counter_lbl.setText("Chưa tìm thấy bài hát nào.")
+                self.prompt_counter_lbl.setStyleSheet(
+                    "background: #e2e8f0; color: #1e293b; padding: 2px 8px; border-radius: 10px; font-weight: bold; font-size: 11px;"
+                )
+
+            self.preview_table.setRowCount(len(self.mapped_items))
+            for r, item in enumerate(self.mapped_items):
+                self.preview_table.setItem(r, 0, QTableWidgetItem(str(item.index)))
+                self.preview_table.setItem(r, 1, QTableWidgetItem(item.track.title))
+                self.preview_table.setItem(r, 2, QTableWidgetItem("YouTube (Tự động tải thumbnail)"))
+                self.preview_table.setItem(r, 3, QTableWidgetItem(item.final_prompt[:130] + "..."))
+            return
+
         prompt_text = self.prompts_edit.toPlainText()
         mismatch = self.mismatch_combo.currentData() or "loop"
         use_tmpl = self.use_template_check.isChecked()
@@ -740,13 +876,32 @@ class PlaylistStudioPage(QWidget):
 
         # Nếu chưa có job nào trong hàng đợi, tạo mới từ kết quả map
         if not self.queue_manager.jobs:
-            if not self.mapped_items:
-                QMessageBox.warning(
-                    self,
-                    "Chưa có bài hát",
-                    "Vui lòng chọn thư mục MP3 và nhập danh sách prompt trước khi bắt đầu.",
+            is_auto = self.radio_mode_auto.isChecked() if hasattr(self, "radio_mode_auto") else True
+            if is_auto:
+                if not self.tracks:
+                    QMessageBox.warning(
+                        self,
+                        "Chưa có bài hát",
+                        "Vui lòng chọn thư mục MP3 chứa file nhạc trước khi bắt đầu.",
+                    )
+                    return
+                source_type = "youtube"
+                setattr(self.settings, "playlist_auto_youtube_thumb", True)
+                setattr(
+                    self.settings,
+                    "playlist_master_prompt",
+                    self.master_prompt_edit.toPlainText().strip() if hasattr(self, "master_prompt_edit") else "",
                 )
-                return
+            else:
+                if not self.mapped_items:
+                    QMessageBox.warning(
+                        self,
+                        "Chưa có bài hát hoặc prompt",
+                        "Vui lòng chọn thư mục MP3 và nhập danh sách prompt trước khi bắt đầu.",
+                    )
+                    return
+                source_type = "manual"
+                setattr(self.settings, "playlist_auto_youtube_thumb", False)
 
             res_parts = (self.res_combo.currentData() or "1280x704").split("x")
             raw_w, raw_h = int(res_parts[0]), int(res_parts[1])
@@ -760,6 +915,7 @@ class PlaylistStudioPage(QWidget):
                 width=w,
                 height=h,
                 keep_thumbnail=self.keep_thumb_check.isChecked(),
+                source_type=source_type,
             )
             setattr(self.settings, "playlist_resolution", self.res_combo.currentData())
             setattr(self.settings, "playlist_duration", self.duration_spin.value())

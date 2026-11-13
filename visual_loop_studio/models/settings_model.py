@@ -63,6 +63,8 @@ class AppSettings:
     playlist_conflict_mode: str = "suffix"
     playlist_keep_thumbnail: bool = True
     playlist_muse_cookie: str = ""
+    playlist_auto_youtube_thumb: bool = True
+    playlist_master_prompt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

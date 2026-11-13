@@ -19,8 +19,11 @@ from auth.muse_cookies import (
     parse_muse_cookies,
 )
 from auth.muse_generation import (
+    ATTACH_TEXTS,
+    _click_by_text,
     _dismiss_muse_popups,
     _download_muse_video_file,
+    _find,
     _get_muse_recent_text,
     _query_muse_videos,
     fill_muse_chat_prompt,
@@ -225,6 +228,30 @@ class MuseProvider(IProvider):
 
         return cache_path
 
+    def _upload_image(self, driver: Any, source: Path) -> bool:
+        """Tải ảnh tham chiếu / thumbnail lên Muse AI."""
+        resolved = Path(source).resolve()
+        if not resolved.is_file() or resolved.stat().st_size <= 0:
+            return False
+
+        inputs = _find(driver, "css selector", "input[type='file']")
+        if not inputs:
+            _click_by_text(driver, ATTACH_TEXTS)
+            time.sleep(1.0)
+            inputs = _find(driver, "css selector", "input[type='file']")
+
+        for field in reversed(inputs):
+            try:
+                accept = str(field.get_attribute("accept") or "").casefold()
+                if accept and "image" not in accept and not any(ext in accept for ext in (".png", ".jpg", ".jpeg", ".webp")):
+                    continue
+                field.send_keys(str(resolved))
+                time.sleep(2.0)
+                return True
+            except Exception:
+                continue
+        return False
+
     def image_to_video(
         self,
         image_path: Path,
@@ -259,7 +286,14 @@ class MuseProvider(IProvider):
         seen_ids = {v.get("id") for v in baseline_vids if v.get("id")}
         seen_srcs = {v.get("src") for v in baseline_vids if v.get("src")}
 
-        # 2. Điền prompt vào ô chat Muse
+        # 2. Nếu có ảnh tham chiếu (thumbnail), tải lên Muse trước
+        if image_path and Path(image_path).is_file() and Path(image_path).stat().st_size > 0:
+            if progress:
+                progress(15, f"Đang tải ảnh '{Path(image_path).name}' lên Muse AI...")
+            self._upload_image(driver, Path(image_path))
+            time.sleep(2.0)
+
+        # 3. Điền prompt vào ô chat Muse
         if progress:
             progress(20, f"Đang gửi prompt lên Muse AI...")
 

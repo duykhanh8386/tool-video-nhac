@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from playlist_ai.core.file_namer import ConflictResolution, resolve_output_file_path
 from playlist_ai.core.prompt_parser import MappedItem
+from playlist_ai.core.youtube_thumb import fetch_and_save_youtube_thumbnail
 from playlist_ai.providers.base import CookieExpiredError, IProvider, ProviderError
 from utils.config import read_json, write_json
 from utils.paths import CACHE_DIR, DATA_DIR
@@ -95,6 +96,8 @@ class JobState:
     width: int = 1280
     height: int = 704
     keep_thumbnail: bool = True
+    source_type: str = "youtube"  # "youtube" | "manual"
+    thumbnail_url: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -145,6 +148,7 @@ class JobQueueManager:
         width: int = 1280,
         height: int = 704,
         keep_thumbnail: bool = True,
+        source_type: str = "youtube",
     ) -> None:
         """Khởi tạo danh sách jobs mới từ kết quả ghép prompt."""
         self.jobs = []
@@ -163,6 +167,7 @@ class JobQueueManager:
                     width=width,
                     height=height,
                     keep_thumbnail=keep_thumbnail,
+                    source_type=source_type,
                 )
             )
         self.save()
@@ -298,9 +303,71 @@ class PlaylistBatchRunner(QThread):
                     completed += 1
                     continue
 
-                # Bước 1: Chuẩn bị ảnh nguồn / canvas trung tính (lưu tạm trong cache, không ghi vào output_dir)
+                # Bước 1: Chuẩn bị ảnh nguồn / thumbnail
+                # Đích lưu thumbnail ứng với tên bài nhạc trong thư mục output
+                thumb_dest = self.output_dir / f"{target_video_file.stem}.png"
+                img_path: Optional[Path] = None
+
                 cached_img = Path(job.cached_image_path) if job.cached_image_path else None
-                if not (cached_img and cached_img.is_file()):
+                if cached_img and cached_img.is_file() and cached_img.stat().st_size > 2048:
+                    img_path = cached_img
+                elif thumb_dest.is_file() and thumb_dest.stat().st_size > 2048:
+                    img_path = thumb_dest
+                    job.cached_image_path = str(thumb_dest)
+                    self.queue_manager.save()
+                    self.log_signal.emit(f"🖼 [{idx}/{total}] Đã có sẵn thumbnail: {thumb_dest.name}")
+                elif getattr(job, "source_type", "youtube") == "youtube":
+                    job.status = "Đang tải ảnh"
+                    self.queue_manager.save()
+                    self.job_status_changed.emit(job.to_dict())
+                    self.log_signal.emit(f"🔍 [{idx}/{total}] Đang tìm video và tải thumbnail YouTube cho bài '{job.track_title}'...")
+                    self.progress_signal.emit(10, f"[{idx}/{total}] Tìm YouTube: {job.track_title}")
+
+                    fetched = fetch_and_save_youtube_thumbnail(job.track_title, output_path=thumb_dest)
+                    if fetched and fetched.is_file() and fetched.stat().st_size > 2048:
+                        img_path = fetched
+                        job.cached_image_path = str(fetched)
+                        self.queue_manager.save()
+                        self.log_signal.emit(f"✔ [{idx}/{total}] Đã tải và lưu thumbnail YouTube: {thumb_dest.name}")
+                    else:
+                        self.log_signal.emit(f"⚠ [{idx}/{total}] Không tìm thấy thumbnail YouTube cho '{job.track_title}', tạo ảnh nguồn thay thế...")
+                        cache_dir = CACHE_DIR / "playlist_t2i"
+                        cache_dir.mkdir(parents=True, exist_ok=True)
+                        cache_file = cache_dir / f"{job.id}_source.png"
+                        try:
+                            img_path = provider.text_to_image(
+                                prompt=job.final_prompt,
+                                width=job.width,
+                                height=job.height,
+                                cache_path=cache_file,
+                                progress=lambda p, m: self.progress_signal.emit(p, f"[{idx}/{total}] {m}"),
+                                cancelled=lambda: self._stopped,
+                            )
+                            job.cached_image_path = str(img_path)
+                            self.queue_manager.save()
+                        except CookieExpiredError as e:
+                            job.status = "Tạm dừng"
+                            job.error_message = str(e)
+                            self.queue_manager.save()
+                            self.job_status_changed.emit(job.to_dict())
+                            self.log_signal.emit(f"⚠ Cookie hết hạn: {e}")
+                            self.cookie_expired_signal.emit(str(e))
+                            self._paused = True
+                            while self._paused and not self._stopped:
+                                time.sleep(1.0)
+                            if self._stopped:
+                                break
+                            continue
+                        except Exception as e:
+                            job.status = "Lỗi"
+                            job.error_message = f"Lỗi tạo ảnh: {e}"
+                            self.queue_manager.save()
+                            self.job_status_changed.emit(job.to_dict())
+                            self.log_signal.emit(f"❌ [{idx}/{total}] {job.error_message}")
+                            failed += 1
+                            continue
+                else:
+                    # Chế độ nhập prompt thủ công không tải YouTube
                     job.status = "Đang tạo ảnh"
                     self.queue_manager.save()
                     self.job_status_changed.emit(job.to_dict())
@@ -342,8 +409,6 @@ class PlaylistBatchRunner(QThread):
                         self.log_signal.emit(f"❌ [{idx}/{total}] {job.error_message}")
                         failed += 1
                         continue
-                else:
-                    img_path = cached_img
 
                 # Bước 2: Tạo chuyển động (clip vài giây)
                 job.status = "Đang tạo chuyển động"
@@ -363,15 +428,16 @@ class PlaylistBatchRunner(QThread):
                     )
                     job.output_video_path = str(vid_path)
 
-                    # Trích xuất thumbnail thật từ video đã tạo (thay vì để lại ảnh canvas xám)
+                    # Trích xuất thumbnail thật từ video đã tạo (nếu chưa có thumbnail gốc)
                     if job.keep_thumbnail and Path(job.output_video_path).is_file():
                         thumb_dest = self.output_dir / f"{target_video_file.stem}.png"
-                        extract_video_thumbnail(
-                            video_path=job.output_video_path,
-                            output_png=thumb_dest,
-                            timestamp_sec=1.0,
-                            ffmpeg_path=self.ffmpeg_path,
-                        )
+                        if not (thumb_dest.is_file() and thumb_dest.stat().st_size > 2048):
+                            extract_video_thumbnail(
+                                video_path=job.output_video_path,
+                                output_png=thumb_dest,
+                                timestamp_sec=1.0,
+                                ffmpeg_path=self.ffmpeg_path,
+                            )
 
                     job.status = "Hoàn thành"
                     job.error_message = ""
