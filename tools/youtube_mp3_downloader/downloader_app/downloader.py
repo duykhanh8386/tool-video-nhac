@@ -405,9 +405,18 @@ def resolve_ffmpeg_location() -> str | None:
     """Find FFmpeg both in packaged builds and local developer installations."""
     candidates: list[Path] = []
     bundle_root = _bundle_root()
+    exe_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else bundle_root
+
     candidates.append(bundle_root / "_internal" / "tools" / "ffmpeg")
     candidates.append(bundle_root / "tools" / "ffmpeg")
     candidates.append(bundle_root / "_internal")
+    candidates.append(bundle_root / "vendor" / "bin")
+    candidates.append(bundle_root)
+
+    candidates.append(exe_dir / "_internal" / "tools" / "ffmpeg")
+    candidates.append(exe_dir / "tools" / "ffmpeg")
+    candidates.append(exe_dir / "vendor" / "bin")
+    candidates.append(exe_dir)
 
     # In standalone installation:
     installed_app_root = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / APP_NAME / "_internal" / "tools" / "ffmpeg"
@@ -426,9 +435,19 @@ def resolve_ffmpeg_location() -> str | None:
 def resolve_js_runtime() -> tuple[str, str] | None:
     """Use an installed JS runtime when available for newer YouTube players."""
     candidates = ["deno", "node", "bun"]
-    bundle_node = _bundle_root() / "_internal" / "tools" / "node" / "node.exe"
-    if bundle_node.is_file():
-        return "node", str(bundle_node)
+    bundle_root = _bundle_root()
+    exe_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else bundle_root
+
+    node_candidates = [
+        bundle_root / "_internal" / "tools" / "node" / "node.exe",
+        bundle_root / "tools" / "node" / "node.exe",
+        exe_dir / "_internal" / "tools" / "node" / "node.exe",
+        exe_dir / "tools" / "node" / "node.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / APP_NAME / "_internal" / "tools" / "node" / "node.exe",
+    ]
+    for node_path in node_candidates:
+        if node_path.is_file():
+            return "node", str(node_path)
 
     for name in candidates:
         executable = shutil.which(name)
