@@ -12,6 +12,7 @@ import threading
 from ctypes import wintypes
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 from urllib.request import Request, urlopen
 
 import certifi
@@ -167,6 +168,7 @@ WS_EX_CLIENTEDGE = 0x00000200
 # Edit control styles
 ES_MULTILINE = 0x0004
 ES_AUTOVSCROLL = 0x0040
+ES_AUTOHSCROLL = 0x0080
 ES_WANTRETURN = 0x1000
 ES_NUMBER = 0x2000
 ES_READONLY = 0x0800
@@ -1308,6 +1310,10 @@ def run_app() -> None:
 
 
 def native_ui_smoke_test() -> None:
+    import builtins
+    import dis
+    import inspect
+
     class VolatileStateStore:
         def __init__(self) -> None:
             self.value = {}
@@ -1321,4 +1327,16 @@ def native_ui_smoke_test() -> None:
 
     app = NativeYoutubeMp3App(YoutubeMp3DownloadController(state_store=VolatileStateStore()))
     assert app.controller is not None
+
+    methods = [m for _, m in inspect.getmembers(NativeYoutubeMp3App, predicate=inspect.isfunction)]
+    builtins_set = set(dir(builtins))
+    missing = []
+    for m in methods:
+        for instr in dis.get_instructions(m.__code__):
+            if instr.opname == "LOAD_GLOBAL":
+                name = instr.argval
+                if name not in m.__globals__ and name not in builtins_set:
+                    missing.append((m.__name__, name))
+    if missing:
+        raise NameError(f"Missing globals in NativeYoutubeMp3App: {missing}")
 

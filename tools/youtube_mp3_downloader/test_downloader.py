@@ -132,6 +132,11 @@ class TestYoutubeMp3Downloader(unittest.TestCase):
         source = inspect.getsource(controller._download_one_attempt)
         self.assertIn("%(title)s [%(id)s].%(ext)s", source)
 
+    def test_native_ui_smoke_test(self):
+        from downloader_app.app import ES_AUTOHSCROLL, native_ui_smoke_test
+        self.assertEqual(ES_AUTOHSCROLL, 0x0080)
+        native_ui_smoke_test()
+
 
 if __name__ == "__main__":
     unittest.main()
