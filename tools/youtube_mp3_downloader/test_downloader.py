@@ -14,6 +14,7 @@ from downloader_app.downloader import (
     is_playlist_url,
     normalize_youtube_source_url,
     parse_youtube_urls,
+    prepare_youtube_cookiefile,
     youtube_video_id,
 )
 
@@ -89,6 +90,41 @@ class TestYoutubeMp3Downloader(unittest.TestCase):
             ratio = (completed + (downloading_p / 100.0)) / total
             percent = int(ratio * 100)
             self.assertEqual(percent, 62)  # (2 + 0.5) / 4 = 2.5 / 4 = 62.5% -> 62%
+
+    def test_prepare_youtube_cookiefile_raw_header(self):
+        cookie_header = "LOGIN_INFO=abc123xyz; SID=securesid456; __Secure-1PSID=token789"
+        cookie_path = prepare_youtube_cookiefile(cookie_header)
+        self.assertIsNotNone(cookie_path)
+        path = Path(cookie_path)
+        self.assertTrue(path.is_file())
+        content = path.read_text(encoding="utf-8")
+        self.assertIn("# Netscape HTTP Cookie File", content)
+        self.assertIn(".youtube.com", content)
+        self.assertIn("LOGIN_INFO", content)
+        self.assertIn("abc123xyz", content)
+        self.assertIn("SID", content)
+
+    def test_prepare_youtube_cookiefile_file_path(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            f.write("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\t123\n")
+            f_path = f.name
+        try:
+            resolved = prepare_youtube_cookiefile(f_path)
+            self.assertEqual(resolved, str(Path(f_path).resolve()))
+        finally:
+            Path(f_path).unlink(missing_ok=True)
+
+    def test_controller_cookie_persistence(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_file = Path(tmp_dir) / "state.json"
+            store = AtomicJsonStateStore(state_file)
+            c1 = YoutubeMp3DownloadController(state_store=store)
+            c1.set_cookie_text("Cookie: SID=mysecret; HSID=myhsid")
+            self.assertEqual(c1.cookie_text, "Cookie: SID=mysecret; HSID=myhsid")
+
+            # Reload new controller instance
+            c2 = YoutubeMp3DownloadController(state_store=store)
+            self.assertEqual(c2.cookie_text, "Cookie: SID=mysecret; HSID=myhsid")
 
 
 if __name__ == "__main__":

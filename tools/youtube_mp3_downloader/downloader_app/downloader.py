@@ -273,10 +273,85 @@ def _best_thumbnail_url(entry: dict[str, Any]) -> str:
     return ""
 
 
+def prepare_youtube_cookiefile(cookie_input: str | None) -> str | None:
+    """Prepare a valid Netscape cookies.txt file from raw header, file path, or Netscape content.
+    Returns the file path string, or None if no valid cookie is provided.
+    """
+    if not cookie_input:
+        return None
+    text = cookie_input.strip()
+    if not text:
+        return None
+
+    # Case 1: text is an existing file path
+    potential_path = Path(text.strip('"').strip("'"))
+    try:
+        if potential_path.is_file():
+            return str(potential_path.resolve())
+    except (OSError, ValueError):
+        pass
+
+    target_file = app_data_dir() / "youtube_cookies.txt"
+    try:
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+    # Case 2: text is already Netscape format
+    if "# Netscape" in text or "\t" in text:
+        try:
+            with target_file.open("w", encoding="utf-8") as f:
+                if not text.startswith("# Netscape"):
+                    f.write("# Netscape HTTP Cookie File\n")
+                f.write(text)
+                if not text.endswith("\n"):
+                    f.write("\n")
+            return str(target_file)
+        except OSError:
+            return None
+
+    # Case 3: Raw cookie string: "name1=val1; name2=val2" or "Cookie: name1=val1; ..."
+    raw = text
+    if raw.lower().startswith("cookie:"):
+        raw = raw[7:].strip()
+
+    cookie_pairs = [pair.strip() for pair in raw.split(";") if pair.strip()]
+    if not cookie_pairs:
+        return None
+
+    netscape_lines = ["# Netscape HTTP Cookie File"]
+    valid_count = 0
+    domains = [".youtube.com", ".google.com"]
+
+    for pair in cookie_pairs:
+        if "=" not in pair:
+            continue
+        name, val = pair.split("=", 1)
+        name = name.strip()
+        val = val.strip()
+        if not name:
+            continue
+        valid_count += 1
+        for dom in domains:
+            is_secure = "TRUE" if name.startswith("__Secure") or name.startswith("__Host") or "SAPISID" in name else "FALSE"
+            netscape_lines.append(f"{dom}\tTRUE\t/\t{is_secure}\t2147483647\t{name}\t{val}")
+
+    if valid_count == 0:
+        return None
+
+    try:
+        with target_file.open("w", encoding="utf-8") as f:
+            f.write("\n".join(netscape_lines) + "\n")
+        return str(target_file)
+    except OSError:
+        return None
+
+
 def extract_youtube_entries(
     urls: list[str],
     limit: int = 0,
     browser_source: str = "auto",
+    cookie_text: str | None = None,
     stop_event: threading.Event | None = None,
     on_progress: Callable[[int], None] | None = None,
 ) -> list[dict[str, Any]]:
@@ -331,7 +406,7 @@ def extract_youtube_entries(
             return "stopped by user"
         return None
 
-    def scan(browser_name: str | None) -> None:
+    def scan(browser_name: str | None, cookie_file: str | None = None) -> None:
         logger = AuthTrackingYtdlpLogger()
         options: dict[str, Any] = {
             "quiet": True,
@@ -342,7 +417,9 @@ def extract_youtube_entries(
             "logger": logger,
             "match_filter": stop_filter,
         }
-        if browser_name:
+        if cookie_file:
+            options["cookiefile"] = cookie_file
+        elif browser_name:
             options["cookiesfrombrowser"] = (browser_name,)
         js_runtime = resolve_js_runtime()
         if js_runtime:
@@ -367,6 +444,17 @@ def extract_youtube_entries(
                     ensure_not_stopped()
                     if isinstance(raw_entry, dict):
                         add_entry(raw_entry)
+
+    cookie_file = prepare_youtube_cookiefile(cookie_text)
+    if cookie_file:
+        try:
+            scan(None, cookie_file=cookie_file)
+            return ranked_results()
+        except ListingStopped:
+            raise
+        except Exception as exc:
+            if not is_youtube_auth_error(exc) and not is_browser_cookie_error(exc):
+                raise
 
     candidates = browser_cookie_candidates(browser_source)
     if not candidates:
@@ -461,8 +549,8 @@ def safe_error_message(exc: BaseException) -> str:
     lowered = detail.lower()
     if is_youtube_auth_error(exc):
         return (
-            "YouTube yêu cầu xác minh. Hãy chọn đúng trình duyệt tại mục "
-            "'Phiên YouTube' và đảm bảo đã đăng nhập YouTube trên trình duyệt đó."
+            "YouTube yêu cầu xác minh. Hãy dán Cookie phiên YouTube tại ô 'Cookie YouTube' "
+            "hoặc chọn đúng trình duyệt và đăng nhập YouTube trên trình duyệt đó."
         )
     if "ffmpeg" in lowered and ("not found" in lowered or "not installed" in lowered):
         return "Không tìm thấy FFmpeg để chuyển đổi sang MP3. Hãy cài lại tool."
@@ -476,6 +564,7 @@ class YoutubeMp3DownloadController:
         self,
         state_store: StateStore | None = None,
         on_change: Callable[[], None] | None = None,
+        cookie_text: str = "",
     ) -> None:
         self.state_store = state_store or AtomicJsonStateStore()
         self.on_change = on_change
@@ -484,6 +573,7 @@ class YoutubeMp3DownloadController:
         self.output_dir = default_output_dir()
         self.audio_quality = "192"
         self.browser_source = "auto"
+        self.cookie_text = str(cookie_text or "")
         self.status_text = "Dán link YouTube rồi bấm Tải MP3."
         self.version = 0
         self._worker: threading.Thread | None = None
@@ -518,6 +608,7 @@ class YoutubeMp3DownloadController:
                 "output_dir": str(self.output_dir),
                 "audio_quality": self.audio_quality,
                 "browser_source": self.browser_source,
+                "cookie_text": self.cookie_text,
                 "status_text": self.status_text,
                 "running": self.is_running(),
             }
@@ -531,6 +622,7 @@ class YoutubeMp3DownloadController:
                 "output_dir": str(self.output_dir),
                 "audio_quality": self.audio_quality,
                 "browser_source": self.browser_source,
+                "cookie_text": self.cookie_text,
             }
 
     def _save_state(self) -> bool:
@@ -564,11 +656,19 @@ class YoutubeMp3DownloadController:
         self.browser_source = str(state.get("browser_source") or "auto")
         if self.browser_source not in BROWSER_SESSION_SOURCES:
             self.browser_source = "auto"
+        saved_cookie = state.get("cookie_text")
+        if saved_cookie and not self.cookie_text:
+            self.cookie_text = str(saved_cookie)
         # Reset any interrupted downloading state to pending
         for item in self.items.values():
             if item.get("status") == "downloading":
                 item["status"] = "pending"
                 item["progress"] = 0
+
+    def set_cookie_text(self, cookie_text: str) -> None:
+        with self._lock:
+            self.cookie_text = str(cookie_text or "").strip()
+        self._changed(persist=True)
 
     def update_urls(self, urls: list[str]) -> None:
         with self._lock:
@@ -724,6 +824,16 @@ class YoutubeMp3DownloadController:
         self._record_progress(url, downloaded, total)
 
     def _download_one(self, url: str, ffmpeg_location: str) -> dict[str, str]:
+        cookie_file = prepare_youtube_cookiefile(self.cookie_text)
+        if cookie_file:
+            try:
+                return self._download_one_attempt(url, ffmpeg_location, None, cookie_file=cookie_file)
+            except DownloadStopped:
+                raise
+            except Exception as exc:
+                if not is_youtube_auth_error(exc) and not is_browser_cookie_error(exc):
+                    raise
+
         attempted_browsers: set[str] = set()
         active_browser = self._active_cookie_browser
         allowed_browsers = browser_cookie_candidates(self.browser_source)
@@ -774,6 +884,7 @@ class YoutubeMp3DownloadController:
         url: str,
         ffmpeg_location: str,
         browser_name: str | None,
+        cookie_file: str | None = None,
     ) -> dict[str, str]:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         options: dict[str, Any] = {
@@ -792,7 +903,9 @@ class YoutubeMp3DownloadController:
             "logger": QuietYtdlpLogger(),
             "progress_hooks": [lambda data: self._progress_hook(url, data)],
         }
-        if browser_name:
+        if cookie_file:
+            options["cookiefile"] = cookie_file
+        elif browser_name:
             options["cookiesfrombrowser"] = (browser_name,)
         js_runtime = resolve_js_runtime()
         if js_runtime:

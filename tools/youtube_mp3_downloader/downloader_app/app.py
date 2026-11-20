@@ -266,6 +266,9 @@ ID_SELECT_ALL = 113
 ID_SELECT_NONE = 114
 ID_PROGRESS = 115
 ID_PROGRESS_TEXT = 116
+ID_COOKIE = 117
+ID_COOKIE_PASTE = 118
+ID_COOKIE_CLEAR = 119
 
 BROWSER_SESSION_OPTIONS = [
     ("auto", "Tự động (khuyên dùng)"),
@@ -305,6 +308,18 @@ if user32:
     user32.DestroyWindow.restype = wintypes.BOOL
     user32.PostQuitMessage.argtypes = [ctypes.c_int]
     user32.PostQuitMessage.restype = None
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = ctypes.c_void_p
+
+if kernel32:
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
 
 if gdi32:
     gdi32.CreateSolidBrush.argtypes = [wintypes.COLORREF]
@@ -547,6 +562,18 @@ class NativeYoutubeMp3App:
             label_buf = ctypes.create_unicode_buffer(label)
             user32.SendMessageW(session, CB_ADDSTRING, 0, ctypes.cast(label_buf, ctypes.c_void_p).value)
 
+        self._control("cookie_label", "STATIC", "Cookie YouTube:", 0)
+        self._control(
+            "cookie",
+            "EDIT",
+            self.controller.cookie_text,
+            WS_TABSTOP | ES_AUTOHSCROLL,
+            ID_COOKIE,
+            ex_style=WS_EX_CLIENTEDGE,
+        )
+        self._control("cookie_paste", "BUTTON", "Dán Cookie", WS_TABSTOP, ID_COOKIE_PASTE)
+        self._control("cookie_clear", "BUTTON", "Xóa", WS_TABSTOP, ID_COOKIE_CLEAR)
+
         self._control("folder_label", "STATIC", "Thư mục lưu:", 0)
         self._control("folder", "EDIT", str(self.controller.output_dir), ES_READONLY, ID_FOLDER, ex_style=WS_EX_CLIENTEDGE)
         self._control("browse", "BUTTON", "Chọn thư mục", WS_TABSTOP, ID_BROWSE)
@@ -619,39 +646,45 @@ class NativeYoutubeMp3App:
         positions: dict[str, tuple[int, int, int, int]] = {
             "title": (margin, 12, content_width, 32),
             "description": (margin, 46, content_width, 22),
-            "urls": (margin, 72, content_width, 140),
+            "urls": (margin, 72, content_width, 130),
 
             # Hàng cài đặt lọc & phiên
-            "quantity_label": (margin, 224, 155, 26),
-            "quantity": (margin + 160, 222, 65, 28),
-            "list": (margin + 235, 220, 135, 32),
-            "list_stop": (margin + 378, 220, 135, 32),
-            "session_label": (margin + 525, 224, 110, 26),
-            "session": (margin + 640, 221, max(140, content_width - 640), 160),
+            "quantity_label": (margin, 212, 155, 26),
+            "quantity": (margin + 160, 210, 65, 28),
+            "list": (margin + 235, 208, 135, 32),
+            "list_stop": (margin + 378, 208, 135, 32),
+            "session_label": (margin + 525, 212, 110, 26),
+            "session": (margin + 640, 209, max(140, content_width - 640), 160),
+
+            # Hàng Cookie YouTube (Mới)
+            "cookie_label": (margin, 248, 125, 26),
+            "cookie": (margin + 130, 246, max(200, content_width - 325), 28),
+            "cookie_paste": (width - margin - 185, 245, 110, 30),
+            "cookie_clear": (width - margin - 70, 245, 70, 30),
 
             # Hàng thư mục lưu
-            "folder_label": (margin, 263, 100, 26),
-            "folder": (margin + 105, 260, max(200, content_width - 325), 28),
-            "browse": (width - margin - 205, 259, 120, 30),
-            "open": (width - margin - 75, 259, 75, 30),
+            "folder_label": (margin, 286, 100, 26),
+            "folder": (margin + 105, 284, max(200, content_width - 325), 28),
+            "browse": (width - margin - 205, 283, 120, 30),
+            "open": (width - margin - 75, 283, 75, 30),
 
             # Hàng Nút Bấm & Thanh Tiến Độ Tổng Thể
-            "save": (margin, 300, 125, 34),
-            "start": (margin + 135, 300, 165, 34),
-            "stop": (margin + 308, 300, 85, 34),
-            "progress": (margin + 405, 302, max(220, content_width - 405), 16),
-            "progress_text": (margin + 405, 320, max(220, content_width - 405), 20),
+            "save": (margin, 324, 125, 34),
+            "start": (margin + 135, 324, 165, 34),
+            "stop": (margin + 308, 324, 85, 34),
+            "progress": (margin + 405, 326, max(220, content_width - 405), 16),
+            "progress_text": (margin + 405, 344, max(220, content_width - 405), 20),
 
             # Hàng Chọn Tất Cả / Bỏ Chọn
-            "selection_help": (margin, 348, 200, 24),
-            "select_all": (margin + 205, 344, 105, 28),
-            "select_none": (margin + 318, 344, 90, 28),
+            "selection_help": (margin, 372, 200, 24),
+            "select_all": (margin + 205, 368, 105, 28),
+            "select_none": (margin + 318, 368, 90, 28),
 
             # Bảng danh sách & Preview
-            "items": (margin, 380, item_width, max(150, height - 398)),
-            "preview_title": (preview_x, 348, preview_width, 24),
-            "preview": (preview_x, 380, preview_width, 192),
-            "preview_meta": (preview_x, 580, preview_width, max(60, height - 598)),
+            "items": (margin, 404, item_width, max(150, height - 422)),
+            "preview_title": (preview_x, 372, preview_width, 24),
+            "preview": (preview_x, 404, preview_width, 192),
+            "preview_meta": (preview_x, 604, preview_width, max(60, height - 622)),
         }
 
         for key, (x, y, w, h) in positions.items():
@@ -752,6 +785,38 @@ class NativeYoutubeMp3App:
         if control_id == ID_SELECT_NONE:
             self._set_all_checked(False)
             return
+        if control_id == ID_COOKIE and notification == 0x0300:  # EN_CHANGE
+            self.controller.set_cookie_text(self._get_text(self.controls["cookie"]).strip())
+            return
+        if control_id == ID_COOKIE_PASTE:
+            self._paste_clipboard_cookie()
+            return
+        if control_id == ID_COOKIE_CLEAR:
+            self._set_text(self.controls["cookie"], "")
+            self.controller.set_cookie_text("")
+            return
+
+    def _paste_clipboard_cookie(self) -> None:
+        text = ""
+        if user32 and user32.OpenClipboard(self.hwnd):
+            try:
+                h_data = user32.GetClipboardData(13)  # CF_UNICODETEXT = 13
+                if h_data and kernel32:
+                    p_data = kernel32.GlobalLock(h_data)
+                    if p_data:
+                        try:
+                            text = ctypes.wstring_at(p_data)
+                        finally:
+                            kernel32.GlobalUnlock(h_data)
+            finally:
+                user32.CloseClipboard()
+        if text:
+            clean = text.strip()
+            self._set_text(self.controls["cookie"], clean)
+            self.controller.set_cookie_text(clean)
+            self._message("Cookie YouTube", "Đã dán Cookie thành công và lưu vào cấu hình!")
+        else:
+            self._message("Cookie YouTube", "Clipboard trống hoặc không có nội dung văn bản.")
 
     def _handle_notify(self, lparam: int) -> None:
         if not lparam or self._refreshing_items:
@@ -859,6 +924,10 @@ class NativeYoutubeMp3App:
         )
         user32.EnableWindow(self.controls["save"], not busy)
         user32.EnableWindow(self.controls["session"], not busy)
+        if "cookie" in self.controls:
+            user32.EnableWindow(self.controls["cookie"], not busy)
+            user32.EnableWindow(self.controls["cookie_paste"], not busy)
+            user32.EnableWindow(self.controls["cookie_clear"], not busy)
         user32.EnableWindow(self.controls["stop"], snapshot["running"])
 
         # QUAN TRỌNG: Cho phép kéo danh sách kể cả khi tool đang tải!
@@ -1114,6 +1183,8 @@ class NativeYoutubeMp3App:
         if self._listing:
             self._message("Đang xử lý", "Hãy chờ lấy xong danh sách video.")
             return False
+        if "cookie" in self.controls:
+            self.controller.set_cookie_text(self._get_text(self.controls["cookie"]).strip())
         urls, invalid = self._read_urls()
         if invalid:
             self._message("Link không hợp lệ", f"Đã bỏ qua {len(invalid)} link không phải YouTube.")
@@ -1136,6 +1207,8 @@ class NativeYoutubeMp3App:
     def _expand_list(self) -> None:
         if self._listing:
             return
+        if "cookie" in self.controls:
+            self.controller.set_cookie_text(self._get_text(self.controls["cookie"]).strip())
         urls, invalid = self._read_urls()
         if not urls:
             self._message("Thiếu link", "Hãy nhập link playlist, kênh hoặc video YouTube.")
@@ -1153,6 +1226,7 @@ class NativeYoutubeMp3App:
         self._refresh()
 
         browser_source = str(self.controller.snapshot()["browser_source"])
+        cookie_text = str(self.controller.snapshot().get("cookie_text") or "")
 
         def on_prog(count: int) -> None:
             self._listing_count = count
@@ -1166,6 +1240,7 @@ class NativeYoutubeMp3App:
                     urls,
                     limit=limit,
                     browser_source=browser_source,
+                    cookie_text=cookie_text,
                     stop_event=self._list_stop_event,
                     on_progress=on_prog,
                 )
