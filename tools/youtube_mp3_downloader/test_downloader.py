@@ -126,6 +126,12 @@ class TestYoutubeMp3Downloader(unittest.TestCase):
             c2 = YoutubeMp3DownloadController(state_store=store)
             self.assertEqual(c2.cookie_text, "Cookie: SID=mysecret; HSID=myhsid")
 
+    def test_outtmpl_has_video_id(self):
+        controller = YoutubeMp3DownloadController()
+        import inspect
+        source = inspect.getsource(controller._download_one_attempt)
+        self.assertIn("%(title)s [%(id)s].%(ext)s", source)
+
 
 if __name__ == "__main__":
     unittest.main()

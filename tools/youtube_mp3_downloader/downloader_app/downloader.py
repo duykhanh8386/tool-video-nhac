@@ -889,7 +889,7 @@ class YoutubeMp3DownloadController:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         options: dict[str, Any] = {
             "format": "bestaudio/best",
-            "outtmpl": str(self.output_dir / "%(title)s.%(ext)s"),
+            "outtmpl": str(self.output_dir / "%(title)s [%(id)s].%(ext)s"),
             "ffmpeg_location": ffmpeg_location,
             "postprocessors": [
                 {
